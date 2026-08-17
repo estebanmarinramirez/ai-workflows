@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "feature",
+  "label": "Feature delivery",
+  "description": "Acceptance criteria, focused implementation, tests, compatibility, and handoff.",
+  "stage": "execute",
+  "assignments": {
+    "lead": "Implementation lead — translate acceptance criteria into tests, implement the smallest complete feature, run gates, and commit a focused change.",
+    "reviewer": "Reviewer — inspect behavior, API compatibility, edge cases, and the lead diff independently. Do not edit production code.",
+    "verifier": "Verifier — exercise acceptance criteria and negative paths independently. Limit edits to tests or fixtures and commit separately."
+  },
+  "required_evidence": ["Explicit acceptance criteria", "Automated tests for normal and edge behavior", "Compatibility and migration impact", "Repository-defined test, lint, and format gates"]
+}
+

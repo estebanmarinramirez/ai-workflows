@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "bugfix",
+  "label": "Bug fix",
+  "description": "Reproduce, red test, minimal fix, regression and mutation validation.",
+  "stage": "execute",
+  "assignments": {
+    "lead": "Implementation lead — reproduce, add a failing regression test, implement the minimal approved fix, run gates, and commit a focused change.",
+    "reviewer": "Reviewer — independently inspect the reproduction, scope, and lead diff. Do not edit production code.",
+    "verifier": "Verifier — independently run regression and mutation checks. Limit edits to tests or fixtures and commit separately."
+  },
+  "required_evidence": ["Failure reproduced before the fix", "Regression test fails red and passes green", "Mutation or revert check proves the test bites", "Repository-defined test, lint, and format gates"]
+}
+

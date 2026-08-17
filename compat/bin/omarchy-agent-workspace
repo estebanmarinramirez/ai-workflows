@@ -1,0 +1,201 @@
+#!/bin/bash
+
+set -o pipefail
+
+# Keep this list aligned with the agents supported by Omarchy. Only installed
+# agents are offered; choosing one here does not change the system default.
+declare -A agent_names=(
+  [pi]="Pi"
+  [omp]="Oh My Pi"
+  [opencode]="OpenCode"
+  [claude]="Claude Code"
+  [codex]="Codex"
+  [grok]="Grok"
+  [gemini]="Gemini"
+  [copilot]="GitHub Copilot"
+  [crush]="Crush"
+)
+agent_order=(pi omp opencode claude codex grok gemini copilot crush)
+
+declare -a agent_choices=()
+default_agent=$(omarchy-default-agent)
+for agent_id in "${agent_order[@]}"; do
+  command -v "$agent_id" >/dev/null 2>&1 || continue
+  suffix=""
+  [[ $agent_id == "$default_agent" ]] && suffix="  (default)"
+  agent_choices+=("${agent_names[$agent_id]}$suffix|$agent_id")
+done
+
+if ((${#agent_choices[@]} == 0)); then
+  gum style --foreground=196 "No supported coding agent is installed."
+  exit 1
+fi
+
+agent=$(printf '%s\n' "${agent_choices[@]}" | gum choose \
+  --header="Agent Workspaces - choose an agent / provider" \
+  --height=12 \
+  --label-delimiter='|') || exit 130
+
+model_choice=$(printf '%s\n' "Use agent default" "Enter a model ID..." | gum choose \
+  --header="Model for ${agent_names[$agent]}" \
+  --height=5) || exit 130
+
+model=""
+if [[ $model_choice == "Enter a model ID..." ]]; then
+  model=$(gum input \
+    --header="Model ID (provider/model where supported)" \
+    --placeholder="Leave empty to use the agent default") || exit 130
+fi
+
+# Override with a colon-separated list for unusual project layouts.
+if [[ -n ${OMARCHY_AGENT_ROOTS:-} ]]; then
+  IFS=: read -r -a roots <<<"$OMARCHY_AGENT_ROOTS"
+else
+  roots=("$HOME/Work" "$HOME/Projects" "$HOME/Code" "$HOME/Developer")
+fi
+
+declare -a candidates=()
+for root in "${roots[@]}"; do
+  [[ -d $root ]] || continue
+  candidates+=("$root")
+
+  while IFS= read -r directory; do
+    candidates+=("$directory")
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -print 2>/dev/null)
+
+  while IFS= read -r git_directory; do
+    candidates+=("${git_directory%/.git}")
+  done < <(find "$root" -mindepth 2 -maxdepth 5 -type d -name .git -print 2>/dev/null)
+done
+
+mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | awk 'NF && !seen[$0]++' | sort)
+
+relative_time() {
+  local epoch=${1:-0} now delta
+  ((epoch > 0)) || { printf 'never'; return; }
+  now=$(date +%s)
+  delta=$((now - epoch))
+  ((delta < 60)) && { printf 'now'; return; }
+  ((delta < 3600)) && { printf '%dm' "$((delta / 60))"; return; }
+  ((delta < 86400)) && { printf '%dh' "$((delta / 3600))"; return; }
+  ((delta < 604800)) && { printf '%dd' "$((delta / 86400))"; return; }
+  date -d "@$epoch" +%Y-%m-%d
+}
+
+# Build a workspace -> most recent agent-session timestamp index. Codex and
+# other JSONL-based agents are recognized when their records expose a cwd.
+declare -A agent_activity=()
+declare -A agent_activity_source=()
+history_roots=("$HOME/.codex/sessions" "$HOME/.claude/projects" "$HOME/.pi/agent/sessions" "$HOME/.omp/sessions")
+for history_root in "${history_roots[@]}"; do
+  [[ -d $history_root ]] || continue
+  case "$history_root" in
+    *'/.codex/'*) history_source="Codex" ;;
+    *'/.claude/'*) history_source="Claude" ;;
+    *'/.pi/'*) history_source="Pi" ;;
+    *'/.omp/'*) history_source="OMP" ;;
+  esac
+  while IFS= read -r session_file; do
+    session_cwd=$(sed -n '1,60p' "$session_file" 2>/dev/null | jq -rs \
+      '[.[] | (.cwd // .payload.cwd // empty)] | map(select(type == "string" and length > 0)) | first // empty' \
+      2>/dev/null)
+    [[ -d $session_cwd ]] || continue
+    session_time=$(stat -c %Y "$session_file" 2>/dev/null || printf 0)
+    if ((session_time > ${agent_activity[$session_cwd]:-0})); then
+      agent_activity[$session_cwd]=$session_time
+      agent_activity_source[$session_cwd]=$history_source
+    fi
+  done < <(find "$history_root" -type f -name '*.jsonl' -mtime -180 -print 2>/dev/null)
+done
+
+declare -a workspace_rows=()
+declare -A workspace_paths=()
+for directory in "${candidates[@]}"; do
+  display=${directory#"$HOME"/}
+  depth=$(awk -F/ '{print NF-1}' <<<"$display")
+  indent=""
+  ((depth > 0)) && printf -v indent '%*s' "$((depth * 2))" ''
+
+  if [[ $directory == "${directory%/*}" ]]; then
+    branch=""
+  elif [[ $directory == "${roots[0]}" || $directory == "${roots[1]}" || $directory == "${roots[2]}" || $directory == "${roots[3]}" ]]; then
+    branch="▾ "
+  else
+    branch="└─ "
+  fi
+
+  modified=$(find "$directory" -maxdepth 2 -type f -not -path '*/.git/*' -printf '%T@\n' 2>/dev/null |
+    sort -nr | head -1 | cut -d. -f1)
+  [[ -n $modified ]] || modified=$(stat -c %Y "$directory" 2>/dev/null || printf 0)
+
+  activity=${agent_activity[$directory]:-0}
+  metadata="modified $(relative_time "$modified")"
+  ((activity > 0)) && metadata="${agent_activity_source[$directory]} $(relative_time "$activity")  ·  $metadata"
+  row_label="$indent$branch$display    $metadata"
+  workspace_rows+=("$row_label")
+  workspace_paths["$row_label"]=$directory
+done
+workspace_rows+=("Enter another path...")
+
+selection_label=$(printf '%s\n' "${workspace_rows[@]}" | gum filter \
+  --header="Workspace for ${agent_names[$agent]}" \
+  --placeholder="Search projects..." \
+  --height=18) || exit 130
+
+if [[ $selection_label == "Enter another path..." ]]; then
+  selection=$(gum input \
+    --header="Workspace directory" \
+    --placeholder="$HOME/path/to/project" \
+    --value="$HOME/") || exit 130
+else
+  selection=${workspace_paths[$selection_label]}
+fi
+
+# Expand ~/ without evaluating arbitrary shell input.
+[[ $selection == '~/'* ]] && selection="$HOME/${selection#\~/}"
+
+if [[ ! -d $selection ]]; then
+  gum style --foreground=196 "Not a directory: $selection"
+  read -r -p "Press Enter to close..."
+  exit 1
+fi
+
+cd -- "$selection" || exit 1
+
+case "$agent" in
+  opencode)
+    command=(opencode --auto)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  gemini)
+    command=(gemini --yolo)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  copilot)
+    command=(copilot --allow-all)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  crush)
+    command=(crush --yolo)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  claude | grok)
+    command=("$agent" --permission-mode bypassPermissions)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  codex)
+    command=(codex --dangerously-bypass-approvals-and-sandbox)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  omp)
+    command=(omp --auto-approve)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+  pi)
+    command=(pi)
+    [[ -n $model ]] && command+=(--model "$model")
+    ;;
+esac
+
+exec "${command[@]}"
+

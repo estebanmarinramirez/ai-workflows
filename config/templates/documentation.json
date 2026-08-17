@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "documentation",
+  "label": "Documentation",
+  "description": "Source-backed documentation with runnable examples and link validation.",
+  "stage": "execute",
+  "assignments": {
+    "lead": "Documentation lead — verify behavior from source, update the smallest relevant docs, validate examples, and commit.",
+    "reviewer": "Reviewer — check accuracy, audience fit, terminology, and omissions independently. Do not edit the lead's files.",
+    "verifier": "Verifier — run documented commands or examples and check links independently."
+  },
+  "required_evidence": ["Claims traced to source or executable behavior", "Examples executed where practical", "Links and references checked", "Repository-defined documentation gates"]
+}
+

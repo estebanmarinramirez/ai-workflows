@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "codex",
+  "label": "OpenAI Codex",
+  "executable": "codex",
+  "process_pattern": "-codex,",
+  "fresh": ["codex"],
+  "resume": ["codex", "resume", "{session_id}"],
+  "continue": ["codex", "resume", "--last"],
+  "profiles": {
+    "safe": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+    "trusted": ["--sandbox", "workspace-write", "--approve-for-me"],
+    "yolo": ["--dangerously-bypass-approvals-and-sandbox"]
+  }
+}

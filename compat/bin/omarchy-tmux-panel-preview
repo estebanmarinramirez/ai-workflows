@@ -1,0 +1,28 @@
+#!/bin/bash
+
+session=${1:-}
+tmux has-session -t "=$session" 2>/dev/null || exit 0
+
+description=$(tmux show-option -qv -t "$session" @description)
+IFS=$'\t' read -r created activity attached < <(tmux list-sessions -F $'#{session_name}\t#{session_created}\t#{session_activity}\t#{session_attached}' | awk -F '\t' -v target="$session" '$1 == target {print $2 "\t" $3 "\t" $4; exit}')
+
+printf '\033[1m%s\033[0m\n' "$session"
+[[ -n $description ]] && printf '%s\n' "$description"
+printf 'Created %s · active %s · %s attached\n\n' "$(date -d "@$created" '+%b %d · %H:%M')" "$(date -d "@$activity" '+%b %d · %H:%M')" "$attached"
+
+printf '\033[1mWindows and panes\033[0m\n'
+mapfile -t panes < <(tmux list-panes -s -t "=$session" -F $'#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_active}')
+for index in "${!panes[@]}"; do
+  IFS=$'\t' read -r window window_name pane path command active <<<"${panes[$index]}"
+  [[ $index == $((${#panes[@]} - 1)) ]] && marker='└─' || marker='├─'
+  focus=' '
+  [[ $active == 1 ]] && focus='›'
+  printf '%s %s %s:%s  %-12s  %s\n' "$marker" "$focus" "$window" "$pane" "$command" "${path#"$HOME"/}"
+  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    branch=$(git -C "$path" branch --show-current 2>/dev/null)
+    changes=$(git -C "$path" status --porcelain 2>/dev/null | wc -l)
+    state='clean'; ((changes > 0)) && state="$changes changed"
+    printf '      %s · %s\n' "${branch:-detached}" "$state"
+  fi
+done
+

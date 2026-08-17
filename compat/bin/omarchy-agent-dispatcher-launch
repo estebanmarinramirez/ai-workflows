@@ -1,0 +1,5 @@
+#!/bin/bash
+
+sleep 0.25
+exec "$HOME/.local/bin/omarchy-agent-dispatcher"
+

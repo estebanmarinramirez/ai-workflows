@@ -1,0 +1,214 @@
+#!/bin/bash
+
+set -euo pipefail
+source "${AW_LIB:-$(dirname "$(realpath "$0")")/../lib/core.sh}"
+
+usage() {
+  sed -n '/^## Commands/,/^Run /p' "$(dirname "$(realpath "$0")")/../README.md"
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  help|-h|--help) usage ;;
+  version|--version) printf '%s\n' "$AW_VERSION" ;;
+  doctor)
+    failed=0
+    for dep in bash git jq flock tmux fzf gum hyprctl gh; do
+      if command -v "$dep" >/dev/null; then printf 'ok       %s\n' "$dep"; else printf 'missing  %s\n' "$dep"; failed=1; fi
+    done
+    for provider in "$AW_PROVIDER_HOME"/*.json; do
+      jq -e '.schema_version==1 and (.id|type=="string") and (.profiles|has("safe") and has("trusted") and has("yolo"))' "$provider" >/dev/null || { printf 'invalid  %s\n' "$provider"; failed=1; }
+    done
+    printf 'config   %s\nstate    %s\n' "$AW_CONFIG_HOME" "$AW_DATA_HOME"
+    exit "$failed"
+    ;;
+  provider-command)
+    provider=${1:?provider}; mode=${2:?fresh or resume}; profile=${3:?profile}; session_id=${4:-}
+    aw_provider_command "$provider" "$mode" "$profile" "$session_id"
+    ;;
+  discover-session)
+    provider=${1:?provider}; directory=${2:?directory}; found=''
+    case "$provider" in
+      claude)
+        while IFS= read -r file; do
+          found=$(jq -rs --arg cwd "$directory" '[.[]|select(.cwd==$cwd and (.sessionId//"")!="")|.sessionId][0]//empty' "$file" 2>/dev/null)
+          [[ -n $found ]] && break
+        done < <(find "$HOME/.claude/projects" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+        ;;
+      codex)
+        while IFS= read -r file; do
+          found=$(sed -n '1,20p' "$file" | jq -rs --arg cwd "$directory" '[.[]|select(.type=="session_meta" and .payload.cwd==$cwd)|(.payload.session_id//.payload.id)][0]//empty' 2>/dev/null)
+          [[ -n $found ]] && break
+        done < <(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+        ;;
+      grok)
+        encoded=${directory//\//%2F}; session_root="$HOME/.grok/sessions/$encoded"
+        [[ -d $session_root ]] && found=$(find "$session_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+        ;;
+      *) aw_die "unknown provider: $provider" ;;
+    esac
+    [[ -n $found ]] && printf '%s\n' "$found"
+    ;;
+  remember-session)
+    session=${1:?tmux session}; provider=${2:?provider}; directory=${3:?directory}
+    session_id=$("$0" discover-session "$provider" "$directory" || true)
+    if [[ -n $session_id ]]; then
+      tmux set-option -q -t "$session" @aw_provider_session_id "$session_id"
+      printf '%s\n' "$session_id"
+    fi
+    ;;
+  status)
+    task='' role='' state='' summary='' command_run='' exit_code='' blocker=''; commits=(); changed_files=()
+    while (($#)); do
+      case "$1" in
+        --task) task=$2; shift 2;; --role) role=$2; shift 2;; --state) state=$2; shift 2;;
+        --summary) summary=$2; shift 2;; --command) command_run=$2; shift 2;; --exit-code) exit_code=$2; shift 2;;
+        --blocker) blocker=$2; shift 2;; --commit) commits+=("$2"); shift 2;; --file) changed_files+=("$2"); shift 2;;
+        *) aw_die "unknown status option: $1";;
+      esac
+    done
+    [[ -n $task && -n $role && -n $state ]] || aw_die 'status requires --task, --role, and --state'
+    aw_valid_state "$state" || aw_die "invalid state: $state"
+    [[ -d $task ]] || aw_die "task directory not found: $task"
+    status_file="$task/$role.status.json"; now=$(aw_now)
+    if [[ ! -f $status_file ]]; then
+      jq -n --arg id "$(basename "$task")" --arg role "$role" --arg at "$now" \
+        '{schema_version:1,task_id:$id,role:$role,state:"dispatched",summary:"",updated_at:$at,evidence:[],commits:[],changed_files:[],blockers:[]}' >"$status_file"
+    fi
+    if [[ $state == blocked && -z $blocker && $(jq '.blockers|length' "$status_file") -eq 0 ]]; then
+      aw_die 'blocked status requires --blocker evidence'
+    fi
+    if [[ $state == completed ]]; then
+      task_stage=$(jq -r '.stage' "$task/state.json")
+      final_summary=$summary; [[ -n $final_summary ]] || final_summary=$(jq -r '.summary // empty' "$status_file")
+      [[ -n $final_summary ]] || aw_die 'completed status requires a summary'
+      if [[ $task_stage =~ ^(execute|verify)$ && -z $command_run && $(jq '.evidence|length' "$status_file") -eq 0 ]]; then
+        aw_die 'execute/verify completion requires command evidence'
+      fi
+      if [[ -n $command_run && $exit_code != 0 ]]; then aw_die 'completion evidence must have a zero exit code'; fi
+    fi
+    args=(--arg state "$state" --arg summary "$summary" --arg at "$now")
+    filter='.state=$state | .updated_at=$at | if $summary!="" then .summary=$summary else . end'
+    if [[ -n $command_run ]]; then
+      [[ $exit_code =~ ^-?[0-9]+$ ]] || aw_die '--exit-code is required and must be numeric with --command'
+      args+=(--arg command "$command_run" --argjson exit_code "$exit_code")
+      filter+=' | .evidence += [{command:$command,exit_code:$exit_code,at:$at}]'
+    fi
+    if [[ -n $blocker ]]; then args+=(--arg blocker "$blocker"); filter+=' | .blockers += [$blocker] | .blockers |= unique'; fi
+    if ((${#commits[@]})); then
+      commits_json=$(printf '%s\n' "${commits[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')
+      args+=(--argjson commits "$commits_json"); filter+=' | .commits += $commits | .commits |= unique'
+    fi
+    if ((${#changed_files[@]})); then
+      files_json=$(printf '%s\n' "${changed_files[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')
+      args+=(--argjson files "$files_json"); filter+=' | .changed_files += $files | .changed_files |= unique'
+    fi
+    aw_atomic_jq "$status_file" "${args[@]}" "$filter"
+    workspace_root=${task%/.coordination/*}
+    aw_audit "$workspace_root" role.status "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg state "$state" '{task_id:$task,role:$role,state:$state}')" "$role"
+    aw_task_refresh "$task" >/dev/null
+    printf '%s\n' "$status_file"
+    ;;
+  refresh) aw_task_refresh "${1:?task directory}" ;;
+  audit)
+    task=${1:?task directory}; event=${2:?event}; actor=${3:-user}; details=${4:-'{}'}
+    [[ -f $task/state.json ]] || aw_die "missing task: $task"
+    jq -e . <<<"$details" >/dev/null || aw_die 'audit details must be JSON'
+    aw_audit "${task%/.coordination/*}" "$event" "$details" "$actor"
+    ;;
+  health)
+    workspace_id=${1:-}
+    if [[ -z $workspace_id ]]; then
+      tmux list-sessions -F '#{@aw_workspace_id}' 2>/dev/null | awk 'NF' | sort -u
+      exit 0
+    fi
+    aw_workspace_risks "$workspace_id"
+    ;;
+  dashboard)
+    mapfile -t ids < <(tmux list-sessions -F '#{@aw_workspace_id}' 2>/dev/null | awk 'NF' | sort -u)
+    ((${#ids[@]})) || aw_die 'no live Agent Workspaces'
+    rows=()
+    for id in "${ids[@]}"; do
+      summary=$(aw_workspace_risks "$id" | tail -1)
+      rows+=("$id"$'\t'"$id  ·  $summary")
+    done
+    selection=$(printf '%s\n' "${rows[@]}" | fzf --delimiter=$'\t' --with-nth=2 --accept-nth=1 --layout=reverse --no-border --pointer='›' --prompt='Health  ' --preview='agent-workspaces health {1}' --preview-window='down,65%,border-top') || exit 0
+    aw_workspace_risks "$selection"
+    ;;
+  collision)
+    task=${1:?task directory}
+    result=$(aw_collision_json "$task")
+    printf '%s\n' "$result" | jq .
+    if [[ $(jq -r '.safe' <<<"$result") != true ]]; then exit 2; fi
+    ;;
+  end)
+    workspace_id=${1:?workspace id}
+    aw_workspace_risks "$workspace_id"
+    if command -v gum >/dev/null && [[ -t 0 ]]; then gum confirm "End every $workspace_id session after this warning?" || exit 0; fi
+    root=$(aw_workspace_root "$workspace_id" 2>/dev/null || true)
+    [[ -n $root ]] && aw_audit "$root" workspace.end.requested "$(jq -cn --arg id "$workspace_id" '{workspace_id:$id}')" user
+    mapfile -t sessions < <(tmux list-sessions -F $'#{session_name}\t#{@aw_workspace_id}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$2==id {print $1}')
+    for session in "${sessions[@]}"; do tmux send-keys -t "$session" C-c 2>/dev/null || true; done
+    sleep 1
+    for session in "${sessions[@]}"; do tmux kill-session -t "$session" 2>/dev/null || true; done
+    printf 'Ended %s sessions. Worktrees and provider history remain.\n' "${#sessions[@]}"
+    ;;
+  recover)
+    workspace_id=${1:?workspace id}; requested_role=${2:-}
+    while IFS=$'\t' read -r session role; do
+      [[ -z $requested_role || $role == "$requested_role" ]] || continue
+      [[ $role != integration ]] || continue
+      omarchy-agent-pane-active "$role" "$session" 2>/dev/null && continue
+      directory=$(tmux display-message -p -t "$session" '#{pane_current_path}')
+      profile=$(tmux show-option -qv -t "$session" @aw_profile); profile=${profile:-trusted}
+      session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id)
+      if [[ -z $session_id ]]; then
+        session_id=$("$0" discover-session "$role" "$directory" || true)
+        [[ -n $session_id ]] && tmux set-option -q -t "$session" @aw_provider_session_id "$session_id"
+      fi
+      command=$(aw_provider_command "$role" resume "$profile" "$session_id")
+      pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
+      tmux send-keys -t "$pane" -l -- "$command"; tmux send-keys -t "$pane" Enter
+      printf 'Relaunched %s in %s (%s).\n' "$role" "$directory" "$profile"
+    done < <(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$3==id {print $1 "\t" $2}')
+    ;;
+  archive)
+    archive_root="$AW_DATA_HOME/.archives"; mkdir -p "$archive_root"
+    days=$(jq -r '.archive_after_days // 30' "$AW_CONFIG_FILE")
+    while IFS= read -r state; do
+      task=$(dirname "$state"); status=$(jq -r '.status' "$state")
+      [[ $status =~ ^(completed|draft_pr|ready_for_pr)$ ]] || continue
+      find "$task" -maxdepth 0 -mtime "+$days" -print | grep -q . || continue
+      workspace_root=${task%/.coordination/*}; workspace_key=$(basename "$(dirname "$workspace_root")")-$(basename "$workspace_root"); id=$(basename "$task")
+      target="$archive_root/$workspace_key-$id.tar.zst"
+      [[ -f $target ]] && continue
+      tar --zstd -cf "$target" -C "$(dirname "$task")" "$id"
+      checksum=$(sha256sum "$target" | awk '{print $1}')
+      jq -cn --arg id "$id" --arg file "$target" --arg checksum "$checksum" --arg at "$(aw_now)" '{task_id:$id,file:$file,sha256:$checksum,archived_at:$at}' >>"$archive_root/index.jsonl"
+      aw_audit "$workspace_root" task.archived "$(jq -cn --arg id "$id" --arg file "$target" '{task_id:$id,file:$file}')"
+    done < <(find "$AW_DATA_HOME" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null)
+    ;;
+  publish)
+    task=${1:?task directory}; state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
+    [[ $(jq -r '.status' "$state") == ready_for_pr ]] || aw_die 'task must be ready_for_pr'
+    jq -e '.gates.integration_approved==true and .gates.pr_prepared==true and .gates.pr_approved==true' "$state" >/dev/null || aw_die 'integration and PR gates are not all approved'
+    jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'every required role must be completed'
+    collision=$(aw_collision_json "$task")
+    [[ $(jq -r '.safe' <<<"$collision") == true ]] || aw_die 'agent branches have unresolved integration collisions'
+    repository=$(jq -r '.repository' "$state"); title=$(jq -r '.pr.title // .objective' "$state"); branch=$(git -C "$repository" branch --show-current)
+    [[ -n $branch ]] || aw_die 'integration checkout is detached'
+    [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
+    gh auth status >/dev/null 2>&1 || aw_die 'GitHub CLI is not authenticated'
+    printf 'Repository: %s\nBranch: %s\nTitle: %s\n' "$repository" "$branch" "$title"
+    gum confirm 'Push this branch and open a draft pull request?' || exit 0
+    git -C "$repository" push -u origin "$branch"
+    body_file="$task/pr-body.md"; [[ -f $body_file ]] || printf 'Agent Workspaces task `%s`. Evidence is recorded locally.\n' "$(basename "$task")" >"$body_file"
+    url=$(cd "$repository" && gh pr create --draft --title "$title" --body-file "$body_file")
+    aw_atomic_jq "$state" --arg url "$url" --arg at "$(aw_now)" '.status="draft_pr" | .pr.url=$url | .updated_at=$at | .transitions += [{from:"ready_for_pr",to:"draft_pr",at:$at,actor:"user:published"}]'
+    aw_audit "${task%/.coordination/*}" pr.draft.created "$(jq -cn --arg id "$(basename "$task")" --arg url "$url" '{task_id:$id,url:$url}')" user
+    printf '%s\n' "$url"
+    ;;
+  migrate) exec "$(dirname "$(realpath "$0")")/../packaging/migrate" ;;
+  rollback) exec "$(dirname "$(realpath "$0")")/../packaging/rollback" ;;
+  *) aw_die "unknown command: $cmd" ;;
+esac

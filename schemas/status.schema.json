@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Workspace role status",
+  "type": "object",
+  "required": ["schema_version", "task_id", "role", "state", "updated_at", "evidence", "commits", "changed_files", "blockers"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "role": {"type": "string", "minLength": 1},
+    "state": {"enum": ["dispatched", "in_progress", "blocked", "completed"]},
+    "summary": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "object", "required": ["command", "exit_code"], "properties": {"command": {"type": "string"}, "exit_code": {"type": "integer"}, "at": {"type": "string"}}}},
+    "commits": {"type": "array", "items": {"type": "string"}},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

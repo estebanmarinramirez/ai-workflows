@@ -1,0 +1,27 @@
+#!/bin/bash
+
+task_dir=${1:-}
+state_file="$task_dir/state.json"
+[[ -f $state_file ]] || exit 0
+
+printf '\033[1m%s\033[0m\n' "$(jq -r '.objective' "$state_file")"
+printf '%s · %s · %s\n' "$(jq -r '.stage' "$state_file")" "$(jq -r '.status' "$state_file" | tr _ ' ')" "$(jq -r '.id' "$state_file")"
+parent=$(jq -r '.parent_id // empty' "$state_file")
+issue=$(jq -r '.issue // empty' "$state_file")
+[[ -n $parent ]] && printf 'Parent: %s\n' "$parent"
+[[ -n $issue ]] && printf 'Issue: %s\n' "$issue"
+
+printf '\n\033[1mRoles\033[0m\n'
+mapfile -t role_rows < <(jq -r '.roles | to_entries[] | [.key, (.value.state // "active"), .value.assignment] | @tsv' "$state_file")
+for index in "${!role_rows[@]}"; do
+  IFS=$'\t' read -r role status assignment <<<"${role_rows[$index]}"
+  [[ $index == $((${#role_rows[@]} - 1)) ]] && marker='└─' || marker='├─'
+  printf '%s %-7s  %-20s  %s\n' "$marker" "${role^}" "$status" "$assignment"
+done
+
+printf '\n\033[1mApproval gates\033[0m\n'
+jq -r '.gates | to_entries[] | "\(.key | gsub("_"; " ")): \(if .value then "approved" else "pending" end)"' "$state_file"
+
+printf '\n\033[1mRecent transitions\033[0m\n'
+jq -r '.transitions[-4:][] | "\(.at)  \(.from // "created") → \(.to)"' "$state_file"
+

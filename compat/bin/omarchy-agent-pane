@@ -1,0 +1,71 @@
+#!/bin/bash
+
+role=${1:?role required}
+session=${2:?tmux session required}
+directory=${3:?working directory required}
+description=${4:-${role^}}
+state_file=${5:-}
+repository=${6:-}
+set_slug=${7:-}
+class_prefix=${8:-}
+workspace_id=${9:-}
+profile=${AW_PERMISSION_PROFILE:-trusted}
+
+set_session_metadata() {
+  tmux set-option -q -t "$session" @description "$description"
+  [[ -n $repository ]] && tmux set-option -q -t "$session" @aw_repository "$repository"
+  [[ -n $set_slug ]] && tmux set-option -q -t "$session" @aw_set "$set_slug"
+  [[ -n $class_prefix ]] && tmux set-option -q -t "$session" @aw_class_prefix "$class_prefix"
+  [[ -n $workspace_id ]] && tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
+  tmux set-option -q -t "$session" @aw_role "$role"
+  tmux set-option -q -t "$session" @aw_profile "$profile"
+}
+
+was_started=false
+if [[ -n $state_file ]]; then
+  [[ -f $state_file ]] && was_started=true
+  mkdir -p "$(dirname "$state_file")"
+  touch "$state_file"
+fi
+
+case "$role" in
+  claude|grok|codex)
+    fresh=$(agent-workspaces provider-command "$role" fresh "$profile")
+    provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
+    resume=$(agent-workspaces provider-command "$role" resume "$profile" "$provider_session_id")
+    ;;
+  integration) launch='' ;;
+  *) printf 'Unknown agent role: %s\n' "$role" >&2; exit 1 ;;
+esac
+
+if tmux has-session -t "$session" 2>/dev/null; then
+  set_session_metadata
+  if [[ $role != integration ]]; then
+    pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
+    if ! omarchy-agent-pane-active "$role" "$session"; then
+      relaunch=$fresh
+      [[ $was_started == true ]] && relaunch="$resume || $fresh"
+      tmux send-keys -t "$pane" -l -- "$relaunch"
+      tmux send-keys -t "$pane" Enter
+    fi
+  fi
+  exec tmux attach-session -t "$session"
+fi
+
+if [[ $role != integration ]]; then
+  launch=$fresh
+  if [[ $was_started == true ]]; then
+    # A missing tmux session means the machine or tmux server stopped. Resume
+    # the newest conversation scoped to this worktree; fall back to a fresh
+    # conversation only when the agent reports that nothing can be resumed.
+    launch="$resume || $fresh"
+  fi
+  # Keep an interactive shell in the pane if the agent exits, so the tmux
+  # session remains available for review and manual relaunching.
+  tmux new-session -d -s "$session" -c "$directory" "bash -lc '$launch; agent-workspaces remember-session '$session' '$role' '$directory' >/dev/null 2>&1 || true; exec bash'"
+else
+  tmux new-session -d -s "$session" -c "$directory"
+fi
+set_session_metadata
+exec tmux attach-session -t "$session"
+

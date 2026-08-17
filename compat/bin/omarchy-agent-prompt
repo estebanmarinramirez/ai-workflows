@@ -1,0 +1,251 @@
+#!/bin/bash
+
+set -o pipefail
+
+declare -A workspace_labels=()
+declare -A workspace_sessions=()
+declare -A workspace_repositories=()
+declare -A workspace_sets=()
+
+while IFS=$'\t' read -r session workspace_id role repository set_slug; do
+  [[ -n $workspace_id && $role != integration ]] || continue
+  workspace_labels["$workspace_id"]="$set_slug · $(basename "$repository")"
+  workspace_sessions["$workspace_id"]+="${workspace_sessions[$workspace_id]:+$'\n'}$session"
+  workspace_repositories["$workspace_id"]=$repository
+  workspace_sets["$workspace_id"]=$set_slug
+done < <(tmux list-sessions -F $'#{session_name}\t#{@aw_workspace_id}\t#{@aw_role}\t#{@aw_repository}\t#{@aw_set}' 2>/dev/null)
+
+if ((${#workspace_labels[@]} == 0)); then
+  notify-send 'Agent Workspaces' 'No live managed sessions. Open a workspace first.'
+  exit 1
+fi
+
+workspace_options=()
+for workspace_id in "${!workspace_labels[@]}"; do
+  workspace_options+=("󱃉"$'\t'"${workspace_labels[$workspace_id]}"$'\t'"$workspace_id")
+done
+if [[ -n ${AW_WORKSPACE_ID:-} ]]; then
+  workspace_id=$AW_WORKSPACE_ID
+  [[ -n ${workspace_labels[$workspace_id]:-} ]] || { notify-send 'Agent Dispatcher' 'The requested workspace has no live managed sessions.'; exit 1; }
+else
+  workspace_selection=$(printf '%s\n' "${workspace_options[@]}" | omarchy menu select 'Prompt workspace' -- --width 420) || exit 0
+  workspace_id=${workspace_selection#*$'\t'}
+fi
+
+declare -A role_sessions=()
+declare -A role_panes=()
+declare -A role_paths=()
+active_roles=()
+active_count=0
+expected_count=$(jq -r '.providers | length' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null || printf 3)
+
+while IFS= read -r session; do
+  [[ -n $session ]] || continue
+  role=$(tmux show-option -qv -t "$session" @aw_role)
+  pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
+  if omarchy-agent-pane-active "$role" "$session"; then
+    role_sessions["$role"]=$session
+    role_panes["$role"]=$pane
+    role_paths["$role"]=$(tmux display-message -p -t "$pane" '#{pane_current_path}')
+    active_roles+=("$role")
+    ((active_count++))
+  fi
+done <<<"${workspace_sessions[$workspace_id]}"
+
+if ((active_count < expected_count)); then
+  readiness=$(omarchy menu select "$active_count/$expected_count agents ready" \
+    ""$'\t'"Open workspace and restore agents"$'\t'"open" \
+    "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 460) || exit 0
+  if [[ ${readiness#*$'\t'} == open ]]; then
+    exec env OMARCHY_AGENT_REPOSITORY="${workspace_repositories[$workspace_id]}" \
+      OMARCHY_AGENT_SET="${workspace_sets[$workspace_id]}" omarchy-agent-grid
+  fi
+  exit 0
+fi
+
+template_root="$HOME/.config/agent-workspaces/templates"
+if [[ -n ${AW_TEMPLATE:-} ]]; then
+  template_id=$AW_TEMPLATE
+else
+  template_rows=()
+  while IFS= read -r template_file; do
+    template_rows+=("$(jq -r '[.id, .label, .description] | @tsv' "$template_file")")
+  done < <(find "$template_root" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort)
+  ((${#template_rows[@]} > 0)) || { notify-send 'Agent Dispatcher' 'No development templates are installed.'; exit 1; }
+  template_selection=$(printf '%s\n' "${template_rows[@]}" | omarchy menu select 'Development template' -- --width 560) || exit 0
+  template_id=${template_selection%%$'\t'*}
+fi
+template_file="$template_root/$template_id.json"
+jq -e '.schema_version == 1 and (.id | type == "string")' "$template_file" >/dev/null 2>&1 || {
+  notify-send 'Agent Dispatcher' "Invalid development template: $template_id"
+  exit 1
+}
+
+if [[ -n ${AW_OBJECTIVE:-} ]]; then
+  prompt=$AW_OBJECTIVE
+else
+  prompt=$(omarchy menu input 'Shared task for active agents' --width 620) || exit 0
+fi
+[[ -n ${prompt//[[:space:]]/} ]] || exit 0
+
+stage=${AW_STAGE:-$(jq -r '.stage' "$template_file")}
+case "$stage" in review|execute|verify|integrate) ;; *) notify-send 'Agent Dispatcher' "Unsupported workflow stage: $stage"; exit 1 ;; esac
+
+if ((active_count > 1)); then
+  lead_options=()
+  for role in "${active_roles[@]}"; do lead_options+=("󰒓"$'\t'"${role^}"$'\t'"$role"); done
+  lead_selection=$(printf '%s\n' "${lead_options[@]}" | omarchy menu select "${stage^} lead" -- --width 380) || exit 0
+  lead=${lead_selection#*$'\t'}
+else
+  lead=${active_roles[0]}
+fi
+
+repository=${workspace_repositories[$workspace_id]}
+set_slug=${workspace_sets[$workspace_id]}
+repo_name=$(basename "$repository")
+repo_hash=${workspace_id%%:*}
+task_id=$(date '+%Y%m%d-%H%M%S-%3N')
+task_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash/$set_slug/.coordination/$task_id"
+workspace_root=${task_root%/.coordination/*}
+profile=$(jq -r '.profile // "trusted"' "$workspace_root/workspace.json" 2>/dev/null || printf trusted)
+
+declare -A assignments=()
+assignments["$lead"]=$(jq -r '.assignments.lead' "$template_file")
+for role in "${active_roles[@]}"; do
+  [[ $role == "$lead" ]] && continue
+  if [[ -z ${analyst:-} ]]; then
+    analyst=$role
+    assignments["$role"]=$(jq -r '.assignments.reviewer' "$template_file")
+  else
+    verifier=$role
+    assignments["$role"]=$(jq -r '.assignments.verifier' "$template_file")
+  fi
+done
+
+confirmation=$(omarchy menu select 'Dispatch coordinated task?' \
+  "󰄬"$'\t'"Send to $active_count active agents"$'\t'"send" \
+  "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 440) || exit 0
+[[ ${confirmation#*$'\t'} == send ]] || exit 0
+
+mkdir -p "$task_root"
+mkdir -p "$task_root/instructions"
+cp "$HOME/.config/agent-workspaces/protocol.md" "$task_root/PROTOCOL.md"
+cp "$HOME/.config/agent-workspaces/instructions/CLAUDE.md" "$task_root/instructions/CLAUDE.md"
+cp "$HOME/.config/agent-workspaces/instructions/AGENTS.md" "$task_root/instructions/AGENTS.md"
+cp "$HOME/.config/agent-workspaces/instructions/GROK.md" "$task_root/instructions/GROK.md"
+cp "$template_file" "$task_root/template.json"
+{
+  printf '# Agent Workspace Task %s\n\n' "$task_id"
+  printf 'Stage: %s\n' "$stage"
+  printf 'Template: %s · %s\n' "$template_id" "$(jq -r '.label' "$template_file")"
+  [[ -n ${AW_PARENT_TASK_ID:-} ]] && printf 'Parent: %s\n' "$AW_PARENT_TASK_ID"
+  [[ -n ${AW_ISSUE:-} ]] && printf 'Issue: %s\n' "$AW_ISSUE"
+  printf '\n'
+  printf '## Objective\n\n%s\n\n' "$prompt"
+  printf '## Coordination rules\n\n'
+  printf -- '- This manifest is immutable after dispatch.\n'
+  printf -- '- Work only inside your assigned worktree; never edit the integration checkout or another agent worktree.\n'
+  printf -- '- Record progress, findings, commits, and blockers only in your own status file.\n'
+  printf -- '- Integration is the merge gate. Do not merge branches yourself.\n\n'
+  printf '## Required evidence\n\n'
+  jq -r '.required_evidence[] | "- " + .' "$template_file"
+  printf '\n'
+  printf '## Assignments\n\n'
+  for role in "${active_roles[@]}"; do
+    printf -- '- **%s:** %s\n  - Worktree: `%s`\n  - Status: `%s/%s.status.md`\n' \
+      "${role^}" "${assignments[$role]}" "${role_paths[$role]}" "$task_root" "$role"
+  done
+  printf '\n## Integration checklist\n\n'
+  printf -- '- Review every status file and referenced commit.\n- Choose or combine changes intentionally.\n- Resolve overlaps in the integration checkout only.\n- Run final repository-wide validation before merging.\n'
+} >"$task_root/task.md"
+
+for role in "${active_roles[@]}"; do
+  {
+    printf '# %s status · %s\n\n' "${role^}" "$task_id"
+    printf 'State: dispatched\n\n## Findings\n\n## Changes or commits\n\n## Blockers\n'
+  } >"$task_root/$role.status.md"
+  jq -n --arg id "$task_id" --arg role "$role" --arg at "$(date --iso-8601=seconds)" \
+    '{schema_version:1,task_id:$id,role:$role,state:"dispatched",summary:"",updated_at:$at,evidence:[],commits:[],changed_files:[],blockers:[]}' \
+    >"$task_root/$role.status.json"
+done
+
+roles_json='{}'
+for role in "${active_roles[@]}"; do
+  roles_json=$(jq --arg role "$role" --arg assignment "${assignments[$role]}" --arg worktree "${role_paths[$role]}" \
+    --arg status_json "$task_root/$role.status.json" --arg report_file "$task_root/$role.status.md" \
+    '. + {($role): {assignment: $assignment, worktree: $worktree, status_json: $status_json, report_file: $report_file, state:"dispatched"}}' <<<"$roles_json")
+done
+jq -n \
+  --arg id "$task_id" \
+  --arg workspace_id "$workspace_id" \
+  --arg repository "$repository" \
+  --arg set "$set_slug" \
+  --arg objective "$prompt" \
+  --arg stage "$stage" \
+  --arg profile "$profile" \
+  --arg template_id "$template_id" \
+  --argjson template_version "$(jq '.schema_version' "$template_file")" \
+  --arg parent_id "${AW_PARENT_TASK_ID:-}" \
+  --arg issue "${AW_ISSUE:-}" \
+  --arg created_at "$(date --iso-8601=seconds)" \
+  --argjson roles "$roles_json" \
+  '{schema_version: 2, id: $id, workspace_id: $workspace_id, repository: $repository, set: $set,
+    objective: $objective, stage: $stage, template_id: $template_id, template_version: $template_version,
+    profile: $profile, status: "active", parent_id: $parent_id, issue: $issue, pr: {},
+    created_at: $created_at, updated_at: $created_at, roles: $roles,
+    gates: {triage_approved: false, execution_approved: false, integration_approved: false, pr_prepared: false, pr_approved: false},
+    transitions: [{from: null, to: "active", at: $created_at, actor: "dispatcher"}]}' >"$task_root/state.json"
+
+if [[ -n ${AW_PARENT_TASK_ID:-} ]]; then
+  parent_state="$(dirname "$task_root")/$AW_PARENT_TASK_ID/state.json"
+  if [[ -f $parent_state ]]; then
+    now=$(date --iso-8601=seconds)
+    temporary=$(mktemp "$(dirname "$parent_state")/.state.json.XXXXXX")
+    if [[ $stage == execute ]]; then
+      jq --arg child "$task_id" --arg at "$now" \
+        '.gates.triage_approved=true | .status="completed" | .child_id=$child | .updated_at=$at |
+         .transitions += [{from:"awaiting_triage",to:"completed",at:$at,actor:"user:approved-execution"}]' \
+        "$parent_state" >"$temporary"
+    else
+      jq --arg child "$task_id" --arg at "$now" \
+        '.gates.execution_approved=true | .status="completed" | .child_id=$child | .updated_at=$at |
+         .transitions += [{from:"awaiting_integration",to:"completed",at:$at,actor:"user:requested-follow-up"}]' \
+        "$parent_state" >"$temporary"
+    fi
+    mv "$temporary" "$parent_state"
+  fi
+fi
+
+target_names=()
+for role in "${active_roles[@]}"; do
+  case "$role" in
+    claude) agent_instructions="$task_root/instructions/CLAUDE.md" ;;
+    codex) agent_instructions="$task_root/instructions/AGENTS.md" ;;
+    grok) agent_instructions="$task_root/instructions/GROK.md" ;;
+    *) agent_instructions="$task_root/PROTOCOL.md" ;;
+  esac
+  instruction="Read $task_root/PROTOCOL.md, $agent_instructions, and $task_root/task.md, then follow your ${role^} assignment and the $template_id template. Work only in ${role_paths[$role]}. Record machine state with: agent-workspaces status --task '$task_root' --role '$role' --state in_progress --summary 'started'. Add command evidence with --command and --exit-code; finish with completed or blocked. Keep $task_root/$role.status.md as the detailed human report. Do not modify shared task files or any other agent's status."
+  buffer="aw-prompt-$$-$role"
+  tmux set-buffer -b "$buffer" -- "$instruction"
+  tmux paste-buffer -b "$buffer" -t "${role_panes[$role]}"
+  # Full-screen TUIs need one render cycle to finish bracketed-paste handling
+  # before Enter is interpreted as submit (Codex is especially sensitive).
+  sleep 0.15
+  tmux send-keys -t "${role_panes[$role]}" Enter
+  tmux delete-buffer -b "$buffer"
+  target_names+=("${role^}")
+done
+
+joined=$(IFS=', '; printf '%s' "${target_names[*]}")
+agent-workspaces refresh "$task_root" >/dev/null
+workspace_manifest="$workspace_root/workspace.json"
+if [[ ! -f $workspace_manifest ]]; then
+  configured_providers=$(jq -c '.providers' "$HOME/.config/agent-workspaces/config.json")
+  jq -n --arg id "$workspace_id" --arg repository "$repository" --arg set "$set_slug" --arg profile "$profile" --arg at "$(date --iso-8601=seconds)" \
+    --argjson providers "$configured_providers" \
+    '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,layout:"adaptive-grid",providers:$providers,created_at:$at,updated_at:$at}' >"$workspace_manifest"
+fi
+source "$HOME/.local/share/agent-workspaces-app/$(cat "$HOME/.local/share/agent-workspaces-app/current-version")/lib/core.sh" 2>/dev/null || true
+if declare -F aw_audit >/dev/null; then aw_audit "$workspace_root" task.dispatched "$(jq -cn --arg id "$task_id" --arg template "$template_id" --arg profile "$profile" '{task_id:$id,template:$template,profile:$profile}')" user; fi
+notify-send 'Coordinated task dispatched' "$joined · $task_id · ${workspace_labels[$workspace_id]}"
+

@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+failures=0
+
+check() { if "$@"; then printf 'ok - %s\n' "$*"; else printf 'not ok - %s\n' "$*"; failures=$((failures+1)); fi; }
+
+check bash -n "$root/bin/agent-workspaces" "$root/lib/core.sh" "$root/packaging/install" "$root/packaging/migrate" "$root/packaging/rollback"
+check bash -n "$root"/compat/bin/*
+for file in "$root/config/config.json" "$root/config/providers"/*.json "$root/schemas"/*.json; do check jq -e . "$file" >/dev/null; done
+
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+mkdir -p "$fixture/config/agent-workspaces/providers" "$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
+cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
+source "$root/lib/core.sh"
+
+[[ $(aw_provider_command codex fresh trusted) == *"--sandbox"*"workspace-write"*"--approve-for-me"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command claude fresh trusted) != *bypassPermissions* ]] || { printf 'not ok - trusted claude is not bypass\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command grok fresh yolo) == *bypassPermissions* ]] || { printf 'not ok - explicit yolo profile\n'; failures=$((failures+1)); }
+
+task="$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
+for role in claude codex grok; do
+  jq -n --arg role "$role" --arg file "$task/$role.status.json" '{($role):{status_json:$file,worktree:"/tmp"}}' >"$task/$role.role"
+  jq -n --arg role "$role" '{schema_version:1,task_id:"t1",role:$role,state:"completed",updated_at:"now",evidence:[],commits:[],changed_files:[],blockers:[]}' >"$task/$role.status.json"
+done
+roles=$(jq -s 'add' "$task"/*.role)
+jq -n --argjson roles "$roles" '{schema_version:2,id:"t1",workspace_id:"x:set",repository:"/tmp",stage:"execute",status:"active",roles:$roles,gates:{},transitions:[]}' >"$task/state.json"
+jq '.state="blocked"' "$task/grok.status.json" >"$task/grok.tmp" && mv "$task/grok.tmp" "$task/grok.status.json"
+[[ $(aw_task_refresh "$task") == blocked ]] || { printf 'not ok - blocked role blocks task\n'; failures=$((failures+1)); }
+
+if AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" status --task "$task" --role grok --state blocked >/dev/null 2>&1; then
+  printf 'not ok - blocker evidence is required\n'; failures=$((failures+1))
+else
+  printf 'ok - blocker evidence is required\n'
+fi
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" status --task "$task" --role grok --state blocked --blocker 'missing fixture' --summary 'blocked' >/dev/null
+
+printf '%s test failure(s)\n' "$failures"
+exit "$failures"

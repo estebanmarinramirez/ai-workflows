@@ -1,0 +1,106 @@
+#!/bin/bash
+
+mode=${1:-}
+repository=${2:-}
+
+[[ -d $repository ]] || exit 0
+repo_name=$(basename "$repository")
+repo_common_dir=$(cd "$repository" && realpath "$(git rev-parse --git-common-dir 2>/dev/null)") || exit 0
+repo_hash=$(printf '%s' "$repo_common_dir" | sha256sum | cut -c1-10)
+managed_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash"
+mapfile -t configured_agents < <(jq -r '.providers[]' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null)
+
+status_text() {
+  local path=$1 changes
+  changes=$(git -C "$path" status --porcelain 2>/dev/null | wc -l)
+  if ((changes > 0)); then printf '%s changed' "$changes"; else printf 'clean'; fi
+}
+
+print_agent_set() {
+  local set_path=$1 set_name agent path branch marker
+  set_name=$(basename "$set_path")
+  printf '▾ %s\n' "$set_name"
+  local last_agent=${configured_agents[-1]}
+  for agent in "${configured_agents[@]}"; do
+    path="$set_path/$agent"
+    [[ $agent == "$last_agent" ]] && marker='└─' || marker='├─'
+    if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      branch=$(git -C "$path" branch --show-current 2>/dev/null)
+      printf '  %s %-7s  %-32s  %s\n' "$marker" "${agent^}" "${branch:-detached}" "$(status_text "$path")"
+    else
+      printf '  %s %-7s  missing\n' "$marker" "${agent^}"
+    fi
+  done
+}
+
+case "$mode" in
+  repository)
+    branch=$(git -C "$repository" branch --show-current 2>/dev/null)
+    printf '\033[1m%s\033[0m\n' "$repo_name"
+    printf '%s · %s\n\n' "${branch:-detached}" "$(status_text "$repository")"
+
+    printf '\033[1mGit worktrees\033[0m\n'
+    mapfile -t worktree_paths < <(git -C "$repository" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+    if ((${#worktree_paths[@]} == 0)); then
+      printf '└─ none\n'
+    else
+      last_index=$((${#worktree_paths[@]} - 1))
+      for index in "${!worktree_paths[@]}"; do
+        path=${worktree_paths[$index]}
+        [[ $index == "$last_index" ]] && marker='└─' || marker='├─'
+        wt_branch=$(git -C "$path" branch --show-current 2>/dev/null)
+        printf '%s %-32s  %-28s  %s\n' "$marker" "${path#"$HOME"/}" "${wt_branch:-detached}" "$(status_text "$path")"
+      done
+    fi
+
+    printf '\n\033[1mAgent worktree sets\033[0m\n'
+    if [[ -d $managed_root ]] && find "$managed_root" -mindepth 1 -maxdepth 1 -type d -print -quit | grep -q .; then
+      while IFS= read -r set_path; do print_agent_set "$set_path"; done < <(
+        find "$managed_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort
+      )
+    else
+      printf '└─ none yet\n'
+    fi
+    ;;
+  set)
+    set_slug=${3:-}
+    if [[ $set_slug == "__new__" ]]; then
+      printf '\033[1mNew collaboration set\033[0m\n\n'
+      printf 'Creates %s isolated Git worktrees:\n' "${#configured_agents[@]}"
+      for index in "${!configured_agents[@]}"; do
+        [[ $index == $((${#configured_agents[@]} - 1)) ]] && marker='└─' || marker='├─'
+        printf '%s %s\n' "$marker" "${configured_agents[$index]^}"
+      done
+      printf '\n'
+      printf 'Each agent receives its own branch, persistent tmux session,\n'
+      printf 'and terminal window on a dedicated Hyprland workspace.\n'
+      exit 0
+    fi
+    printf '\033[1m%s / %s\033[0m\n\n' "$repo_name" "$set_slug"
+    print_agent_set "$managed_root/$set_slug"
+    workspace_file="$managed_root/$set_slug/.hypr-workspace"
+    if [[ -f $workspace_file ]]; then
+      read -r workspace <"$workspace_file"
+      printf '\nHyprland workspace: %s\n' "$workspace"
+    fi
+    session_prefix=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"aw-$repo_hash-$repo_name-$set_slug" | cut -c1-80)
+    live=0
+    attached=0
+    session_agents=("${configured_agents[@]}" integration)
+    for agent in "${session_agents[@]}"; do
+      session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$session_prefix-$agent" | cut -c1-100)
+      if tmux has-session -t "$session" 2>/dev/null; then
+        ((live++))
+        count=$(tmux display-message -p -t "$session:" '#{session_attached}' 2>/dev/null || printf 0)
+        ((count > 0)) && ((attached++))
+      fi
+    done
+    printf '\nSessions: %s/%s live · %s attached\n' "$live" "${#session_agents[@]}" "$attached"
+    if ((live == 0)); then
+      printf 'Opening this set restores saved agent conversations when available.\n'
+    elif ((attached < live)); then
+      printf 'Detached sessions will reconnect without restarting their agents.\n'
+    fi
+    ;;
+esac
+

@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install checks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck jq
+      - name: ShellCheck
+        run: shellcheck -x -S error bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run
+      - name: Tests
+        run: ./tests/run

@@ -1,0 +1,28 @@
+#!/bin/bash
+
+set -euo pipefail
+app_root="$HOME/.local/share/agent-workspaces-app"
+record="$app_root/last-backup"
+[[ -f $record ]] || { printf 'No Agent Workspaces rollback bundle is recorded.\n' >&2; exit 1; }
+backup=$(<"$record")
+[[ -d $backup && $backup == "$app_root/backups/"* ]] || { printf 'Invalid rollback bundle: %s\n' "$backup" >&2; exit 1; }
+
+if [[ -e $backup/agent-workspaces || -L $backup/agent-workspaces ]]; then
+  cp -a --remove-destination "$backup/agent-workspaces" "$HOME/.local/bin/agent-workspaces"
+fi
+for saved in "$backup"/omarchy-agent-* "$backup"/omarchy-tmux-panel "$backup"/omarchy-tmux-panel-preview; do
+  [[ -f $saved ]] || continue
+  cp "$saved" "$HOME/.local/bin/$(basename "$saved")"
+  chmod +x "$HOME/.local/bin/$(basename "$saved")"
+done
+if [[ -f $backup/config.json ]]; then
+  cp "$backup/config.json" "$HOME/.config/agent-workspaces/config.json"
+fi
+if [[ -d $backup/config-root ]]; then
+  mkdir -p "$HOME/.config/agent-workspaces"
+  cp -a "$backup/config-root/." "$HOME/.config/agent-workspaces/"
+fi
+if [[ -f $backup/omarchy-menu.jsonc ]]; then
+  cp "$backup/omarchy-menu.jsonc" "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+fi
+printf 'Restored managed files from %s. Worktrees, sessions, and task evidence were not changed.\n' "$backup"

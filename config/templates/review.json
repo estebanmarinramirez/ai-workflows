@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "review",
+  "label": "Review / discovery",
+  "description": "Independent evidence, convergence, and scoped recommendations; no production edits.",
+  "stage": "review",
+  "assignments": {
+    "lead": "Review lead — synthesize evidence and actionable findings. Do not implement production changes.",
+    "reviewer": "Analyst — investigate architecture, constraints, and risks independently. Do not edit production code.",
+    "verifier": "Verifier — reproduce the strongest claims independently and identify missing evidence. Do not edit production code."
+  },
+  "required_evidence": ["Relevant files and line-level evidence", "Reproduction or inspection commands", "Risks, unknowns, and a scoped recommendation"]
+}
+

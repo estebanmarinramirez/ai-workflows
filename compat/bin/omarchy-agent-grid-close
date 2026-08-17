@@ -1,0 +1,13 @@
+#!/bin/bash
+
+class_prefix=${1:?agent workspace class prefix required}
+
+mapfile -t addresses < <(hyprctl clients -j | jq -r --arg prefix "$class_prefix." \
+  '.[] | select((.class | startswith($prefix)) or (.initialClass | startswith($prefix))) | .address')
+
+for address in "${addresses[@]}"; do
+  hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null
+done
+
+printf 'Closed %s workspace windows; tmux sessions remain live.\n' "${#addresses[@]}"
+

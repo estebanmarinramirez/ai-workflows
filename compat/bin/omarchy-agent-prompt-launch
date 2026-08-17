@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# A menu leaf is started before the shell has completed the parent menu's
+# close lifecycle. Opening another menu request immediately can be canceled by
+# that late close event, so hand off after one short UI frame.
+sleep 0.25
+exec "$HOME/.local/bin/omarchy-agent-prompt"
+

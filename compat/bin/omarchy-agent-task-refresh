@@ -1,0 +1,3 @@
+#!/bin/bash
+exec agent-workspaces refresh "${1:?task directory required}"
+

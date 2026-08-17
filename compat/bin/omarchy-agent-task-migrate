@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -euo pipefail
+
+task_dir=${1:?task directory required}
+[[ -f $task_dir/task.md && ! -f $task_dir/state.json ]] || exit 0
+
+task_id=$(basename "$task_dir")
+set_root=$(dirname "$(dirname "$task_dir")")
+set_slug=$(basename "$set_root")
+managed_repo_root=$(dirname "$set_root")
+repo_key=$(basename "$managed_repo_root")
+repo_hash=${repo_key##*-}
+
+repository=''
+roles_json='{}'
+for status_file in "$task_dir"/*.status.md; do
+  [[ -f $status_file ]] || continue
+  role=$(basename "$status_file" .status.md)
+  worktree="$set_root/$role"
+  if [[ -z $repository && -d $worktree ]]; then
+    repository=$(git -C "$worktree" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)
+  fi
+  roles_json=$(jq --arg role "$role" --arg worktree "$worktree" --arg status_file "$status_file" \
+    '. + {($role): {assignment: "Migrated legacy round; see task manifest", worktree: $worktree, status_file: $status_file}}' <<<"$roles_json")
+done
+[[ -n $repository ]] || exit 1
+repo_name=$(basename "$repository")
+workspace_id="$repo_hash:$set_slug"
+objective=$(awk '/^## Objective/{capture=1; next} /^## /{if(capture) exit} capture && NF{print; exit}' "$task_dir/task.md")
+stage=$(sed -n 's/^Stage:[[:space:]]*//p' "$task_dir/task.md" | head -1)
+[[ -n $stage ]] || stage=review
+created_at=$(date --iso-8601=seconds -r "$task_dir/task.md")
+
+jq -n --arg id "$task_id" --arg workspace_id "$workspace_id" --arg repository "$repository" \
+  --arg set "$set_slug" --arg objective "$objective" --arg stage "$stage" --arg created_at "$created_at" \
+  --argjson roles "$roles_json" \
+  '{schema_version:1,id:$id,workspace_id:$workspace_id,repository:$repository,set:$set,objective:$objective,
+    stage:$stage,status:"active",parent_id:"",issue:"",created_at:$created_at,updated_at:$created_at,roles:$roles,
+    gates:{triage_approved:false,execution_approved:false,integration_approved:false,pr_prepared:false,pr_approved:false},
+    transitions:[{from:null,to:"active",at:$created_at,actor:"dispatcher:migration"}]}' >"$task_dir/state.json"
+

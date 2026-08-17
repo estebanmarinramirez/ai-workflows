@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "default_profile": "trusted",
+  "default_layout": "three-plus-integration",
+  "archive_after_days": 30,
+  "delete_archives_automatically": false,
+  "project_roots": ["~/Work", "~/Projects", "~/Code", "~/Developer"],
+  "providers": ["claude", "codex", "grok"]
+}

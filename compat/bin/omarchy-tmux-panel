@@ -1,0 +1,123 @@
+#!/bin/bash
+
+set -o pipefail
+source omarchy-restart-gum
+
+[[ -n ${TMUX:-} ]] && current_session=$(tmux display-message -p '#S') || current_session=''
+
+# `tmux panel` invoked from a shell without a client uses a tiny temporary
+# client session. Canceling must return to that shell rather than tmux choosing
+# another session; selecting a row switches the client before this pane exits.
+if [[ $current_session == __omarchy-panel ]]; then
+  trap 'tmux detach-client -s =__omarchy-panel 2>/dev/null || true' EXIT
+fi
+
+relative_group() {
+  local epoch=$1 today yesterday date_value
+  today=$(date +%F)
+  yesterday=$(date -d yesterday +%F)
+  date_value=$(date -d "@$epoch" +%F)
+  case "$date_value" in
+    "$today") printf 'Today' ;;
+    "$yesterday") printf 'Yesterday' ;;
+    *) date -d "@$epoch" '+%b %d' ;;
+  esac
+}
+
+while true; do
+  rows=()
+  while IFS=$'\t' read -r session created activity attached windows description; do
+    [[ -n $session ]] || continue
+    [[ $session == __omarchy-panel ]] && continue
+    group=$(relative_group "$activity")
+    time=$(date -d "@$activity" +%H:%M)
+    marker=' '
+    [[ $session == "$current_session" ]] && marker='●'
+    [[ -n $description ]] || description='No description'
+    label=$(printf '%-9s %5s  %s  %-42s  %-28s  %s win' "$group" "$time" "$marker" "$session" "$description" "$windows")
+    rows+=("$session"$'\t'"$label"$'\t'"$activity")
+  done < <(tmux list-sessions -F $'#{session_name}\t#{session_created}\t#{session_activity}\t#{session_attached}\t#{session_windows}\t#{@description}' | sort -t$'\t' -k3,3nr)
+
+  if ((${#rows[@]} == 0)); then
+    gum style --bold 'No tmux sessions are running.'
+    if gum confirm 'Open Agent Workspaces?'; then exec omarchy-agent-grid; fi
+    exit 0
+  fi
+
+  result=$(printf '%s\n' "${rows[@]}" | fzf \
+    --delimiter='\t' --with-nth=2 --nth=1 --accept-nth=1 \
+    --layout=reverse --no-border --info=inline-right --highlight-line \
+    --pointer='›' --prompt='Sessions  ' --separator='─' --scrollbar='│' \
+    --header='enter session · alt-o open 4 · alt-h hide 4 · alt-x end 4 · ctrl-w workspaces' \
+    --expect=enter,alt-o,alt-h,alt-x,ctrl-w,ctrl-e,ctrl-r,ctrl-n,ctrl-x \
+    --bind='tab:accept,btab:up' \
+    --preview='omarchy-tmux-panel-preview {1}' \
+    --preview-window='down,58%,border-top,wrap' \
+    --preview-label=' Session ' \
+    --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55},border:${BORDER_FOREGROUND:-#798186}") || exit 0
+
+  key=$(sed -n '1p' <<<"$result")
+  session=$(sed -n '2p' <<<"$result")
+  [[ -n $key ]] || { session=$(sed -n '1p' <<<"$result"); key=enter; }
+
+  case "$key" in
+    enter|'')
+      [[ -n $TMUX ]] && exec tmux switch-client -t "$session"
+      exec tmux attach-session -t "$session"
+      ;;
+    ctrl-w)
+      exec omarchy-agent-grid
+      ;;
+    alt-o|alt-h|alt-x)
+      repository=$(tmux show-option -qv -t "$session" @aw_repository)
+      set_slug=$(tmux show-option -qv -t "$session" @aw_set)
+      class_prefix=$(tmux show-option -qv -t "$session" @aw_class_prefix)
+      selected_workspace=$(tmux show-option -qv -t "$session" @aw_workspace_id)
+      if [[ -z $repository || -z $set_slug || -z $class_prefix || -z $selected_workspace ]]; then
+        gum style --foreground=196 'This is not a managed Agent Workspace session.'
+        sleep 1
+        continue
+      fi
+      case "$key" in
+        alt-o)
+          exec env OMARCHY_AGENT_REPOSITORY="$repository" OMARCHY_AGENT_SET="$set_slug" omarchy-agent-grid
+          ;;
+        alt-h)
+          omarchy-agent-grid-close "$class_prefix"
+          sleep 1
+          ;;
+        alt-x)
+          agent-workspaces end "$selected_workspace"
+          [[ $current_session != __omarchy-panel ]] && exit 0
+          ;;
+      esac
+      ;;
+    ctrl-e)
+      current=$(tmux show-option -qv -t "$session" @description)
+      value=$(gum input --header="Describe $session" --value="$current") || continue
+      tmux set-option -q -t "$session" @description "$value"
+      ;;
+    ctrl-r)
+      value=$(gum input --header="Rename $session" --value="$session") || continue
+      [[ -n $value && $value != *:* && $value != *.* ]] || { gum style --foreground=196 'Use a non-empty name without colons or periods.'; sleep 1; continue; }
+      tmux rename-session -t "$session" "$value"
+      [[ $current_session == "$session" ]] && current_session=$value
+      ;;
+    ctrl-n)
+      value=$(gum input --header='New session name' --placeholder='project-or-task') || continue
+      [[ -n $value ]] || continue
+      tmux new-session -d -s "$value" -c "$PWD"
+      description=$(gum input --header='Description (optional)') || true
+      [[ -n $description ]] && tmux set-option -q -t "$value" @description "$description"
+      ;;
+    ctrl-x)
+      if [[ $session == "$current_session" ]]; then
+        gum style --foreground=196 'Switch away before closing the current session.'
+        sleep 1
+      elif gum confirm "End '$session' and its running process? Files and saved agent history remain."; then
+        tmux kill-session -t "$session"
+      fi
+      ;;
+  esac
+done
+

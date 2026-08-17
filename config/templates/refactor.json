@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "refactor",
+  "label": "Safe refactor",
+  "description": "Behavior-preserving change with characterization and equivalence evidence.",
+  "stage": "execute",
+  "assignments": {
+    "lead": "Implementation lead — characterize current behavior, refactor in focused steps, prove equivalence, run gates, and commit.",
+    "reviewer": "Reviewer — inspect behavioral equivalence, hidden coupling, and scope independently. Do not edit production code.",
+    "verifier": "Verifier — run characterization, regression, and mutation checks independently. Limit edits to tests or fixtures."
+  },
+  "required_evidence": ["Current behavior characterized", "No intentional behavior change", "Focused diff with rollback path", "Repository-defined test, lint, and format gates"]
+}
+

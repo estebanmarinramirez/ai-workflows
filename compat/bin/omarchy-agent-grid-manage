@@ -1,0 +1,67 @@
+#!/bin/bash
+
+set -o pipefail
+source omarchy-restart-gum
+
+managed_base="$HOME/.local/share/agent-workspaces"
+rows=()
+mapfile -t configured_roles < <(jq -r '.providers[]' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null)
+expected_windows=$((${#configured_roles[@]} + 1))
+
+while IFS= read -r set_path; do
+  set_slug=$(basename "$set_path")
+  agent_path=''
+  for role in "${configured_roles[@]}"; do
+    if git -C "$set_path/$role" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      agent_path="$set_path/$role"
+      break
+    fi
+  done
+  [[ -n $agent_path ]] || continue
+
+  repository=$(git -C "$agent_path" worktree list --porcelain | sed -n 's/^worktree //p' | head -1)
+  [[ -d $repository ]] || continue
+  repo_name=$(basename "$repository")
+  repo_common_dir=$(cd "$repository" && realpath "$(git rev-parse --git-common-dir)")
+  repo_hash=$(printf '%s' "$repo_common_dir" | sha256sum | cut -c1-10)
+  workspace_id="$repo_hash:$set_slug"
+  class_set=$(sed -E 's/[^[:alnum:]_]/_/g' <<<"$set_slug")
+  class_prefix="org.omarchy.agentworkspaces.r$repo_hash.s$class_set"
+  live=$(tmux list-sessions -F '#{@aw_workspace_id}' 2>/dev/null | awk -v id="$workspace_id" '$0 == id {count++} END {print count+0}')
+  visible=$(hyprctl clients -j | jq --arg prefix "$class_prefix." '[.[] | select((.class | startswith($prefix)) or (.initialClass | startswith($prefix)))] | length')
+  label=$(printf '%-22s  %-24s  %s/%s live · %s/%s visible' "$set_slug" "$repo_name" "$live" "$expected_windows" "$visible" "$expected_windows")
+  rows+=("$repository"$'\t'"$set_slug"$'\t'"$class_prefix"$'\t'"$workspace_id"$'\t'"$label")
+done < <(find "$managed_base" -mindepth 2 -maxdepth 2 -type d -print 2>/dev/null | sort)
+
+if ((${#rows[@]} == 0)); then
+  gum style --bold 'No Agent Workspaces exist yet.'
+  if gum confirm 'Create one now?'; then exec omarchy-agent-grid; fi
+  exit 0
+fi
+
+selection=$(printf '%s\n' "${rows[@]}" | fzf \
+  --delimiter='\t' --with-nth=5 --nth=2,5 --accept-nth=1,2,3,4 \
+  --layout=reverse --no-border --info=inline-right --highlight-line \
+  --pointer='›' --prompt='Workspace  ' --separator='─' --scrollbar='│' \
+  --header='Choose a workspace to open, hide, or end as one group' \
+  --bind='tab:accept,btab:up' \
+  --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55},border:${BORDER_FOREGROUND:-#798186}") || exit 0
+
+IFS=$'\t' read -r repository set_slug class_prefix workspace_id <<<"$selection"
+action=$(printf '%s\n' \
+  "Open $expected_windows windows — reconnect and arrange" \
+  "Hide $expected_windows windows — keep agents running" \
+  "End $expected_windows sessions — stop agents, keep history and worktrees" | gum choose --header="$set_slug · $(basename "$repository")") || exit 0
+
+case "$action" in
+  'Open '*)
+    exec env OMARCHY_AGENT_REPOSITORY="$repository" OMARCHY_AGENT_SET="$set_slug" omarchy-agent-grid
+    ;;
+  'Hide '*)
+    omarchy-agent-grid-close "$class_prefix"
+    ;;
+  'End '*)
+    agent-workspaces end "$workspace_id"
+    ;;
+esac
+

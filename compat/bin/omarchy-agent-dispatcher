@@ -1,0 +1,176 @@
+#!/bin/bash
+
+set -o pipefail
+source omarchy-restart-gum
+
+managed_base="$HOME/.local/share/agent-workspaces"
+
+while IFS= read -r legacy_task; do
+  "$HOME/.local/bin/omarchy-agent-task-migrate" "$(dirname "$legacy_task")" || true
+done < <(find "$managed_base" -path '*/.coordination/*/task.md' -type f -print 2>/dev/null)
+
+while true; do
+  rows=()
+  while IFS= read -r state_file; do
+    task_dir=$(dirname "$state_file")
+    "$HOME/.local/bin/omarchy-agent-task-refresh" "$task_dir" >/dev/null || continue
+    id=$(jq -r '.id' "$state_file")
+    stage=$(jq -r '.stage' "$state_file")
+    status=$(jq -r '.status' "$state_file")
+    objective=$(jq -r '.objective | gsub("[\\r\\n]+"; " ")' "$state_file")
+    set_slug=$(jq -r '.set' "$state_file")
+    created=$(jq -r '.created_at' "$state_file")
+    label=$(printf '%-21s  %-10s  %-21s  %-18s  %s' "${created:0:16}" "$stage" "${status//_/ }" "$set_slug" "$objective")
+    rows+=("$task_dir"$'\t'"$label")
+  done < <(find "$managed_base" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null | sort -r)
+
+  rows+=("__new__"$'\t'"＋ New review round")
+  selection=$(printf '%s\n' "${rows[@]}" | fzf \
+    --delimiter='\t' --with-nth=2 --nth=2 --accept-nth=1 \
+    --layout=reverse --no-border --info=inline-right --highlight-line \
+    --pointer='›' --prompt='Dispatcher  ' --separator='─' --scrollbar='│' \
+    --header='Review → Triage → Execute → Verify → Integrate → PR' \
+    --bind='tab:accept,btab:up' \
+    --preview='omarchy-agent-dispatcher-preview {1}' \
+    --preview-window='down,60%,border-top,wrap' --preview-label=' Workflow ' \
+    --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55},border:${BORDER_FOREGROUND:-#798186}") || exit 0
+
+  if [[ $selection == __new__ ]]; then
+    exec "$HOME/.local/bin/omarchy-agent-prompt"
+  fi
+
+  state_file="$selection/state.json"
+  "$HOME/.local/bin/omarchy-agent-task-refresh" "$selection" >/dev/null
+  stage=$(jq -r '.stage' "$state_file")
+  status=$(jq -r '.status' "$state_file")
+  repository=$(jq -r '.repository' "$state_file")
+  set_slug=$(jq -r '.set' "$state_file")
+  workspace_id=$(jq -r '.workspace_id' "$state_file")
+  task_id=$(jq -r '.id' "$state_file")
+  template_id=$(jq -r '.template_id // empty' "$state_file")
+
+  actions=("View task and reports" "Open workspace" "Refresh status")
+  [[ $status == blocked ]] && actions=("Review blockers" "Dispatch blocker follow-up" "Mark task complete with waiver" "${actions[@]}")
+  [[ $stage == review && $status == awaiting_triage ]] && actions=("Approve scope → execution round" "Record blocked follow-up" "Mark review complete" "${actions[@]}")
+  [[ $stage =~ ^(execute|verify)$ && $status == awaiting_integration ]] && actions=("Prepare integration handoff" "Request verification round" "${actions[@]}")
+  [[ $status == integration_ready ]] && actions=("Record integration result" "${actions[@]}")
+  [[ $status == awaiting_pr ]] && actions=("Prepare PR checklist" "${actions[@]}")
+  [[ $status == awaiting_pr_review ]] && actions=("Approve PR handoff" "${actions[@]}")
+  [[ $status == ready_for_pr ]] && actions=("Publish draft PR" "${actions[@]}")
+  action=$(printf '%s\n' "${actions[@]}" | gum choose --header="${stage^} · ${status//_/ }") || continue
+
+  case "$action" in
+    'View task and reports')
+      less "$selection/task.md" "$selection"/*.status.md "$selection"/*.status.json
+      ;;
+    'Review blockers')
+      jq -r '.roles | to_entries[] | select(.value.state=="blocked") | .key' "$state_file" | while read -r blocked_role; do
+        printf '\n%s\n' "${blocked_role^}"
+        jq -r '.blockers[]? // empty' "$selection/$blocked_role.status.json"
+      done | less
+      ;;
+    'Dispatch blocker follow-up')
+      objective=$(omarchy menu input 'Resolved constraint and follow-up objective' --width 680) || continue
+      [[ -n ${objective//[[:space:]]/} ]] || continue
+      template_id=$(jq -r '.template_id // "review"' "$state_file")
+      exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE="$stage" AW_TEMPLATE="$template_id" \
+        AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/omarchy-agent-prompt"
+      ;;
+    'Mark task complete with waiver')
+      waiver=$(omarchy menu input 'Waiver reason (recorded in audit history)' --width 680) || continue
+      [[ -n ${waiver//[[:space:]]/} ]] || continue
+      now=$(date --iso-8601=seconds); temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" --arg waiver "$waiver" '.status="completed" | .waiver={reason:$waiver,at:$at} | .updated_at=$at | .transitions += [{from:"blocked",to:"completed",at:$at,actor:"user:waiver"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" task.waived user "$(jq -cn --arg reason "$waiver" '{reason:$reason}')"
+      ;;
+    'Open workspace')
+      exec env OMARCHY_AGENT_REPOSITORY="$repository" OMARCHY_AGENT_SET="$set_slug" omarchy-agent-grid
+      ;;
+    'Refresh status') ;;
+    'Approve scope'* )
+      objective=$(omarchy menu input 'Approved implementation scope' --width 680) || continue
+      [[ -n ${objective//[[:space:]]/} ]] || continue
+      issue=$(omarchy menu input 'Tracker issue (optional, e.g. #2)' --width 420) || issue=''
+      exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE=execute \
+        AW_PARENT_TASK_ID="$task_id" AW_ISSUE="$issue" "$HOME/.local/bin/omarchy-agent-prompt"
+      ;;
+    'Record blocked follow-up')
+      reason=$(omarchy menu input 'Missing evidence or blocker' --width 680) || continue
+      [[ -n ${reason//[[:space:]]/} ]] || continue
+      printf '# Blocked follow-up\n\nParent: %s\n\n%s\n' "$task_id" "$reason" >"$selection/blocked-follow-up.md"
+      now=$(date --iso-8601=seconds)
+      temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" '.status="blocked" | .updated_at=$at | .transitions += [{from:"awaiting_triage",to:"blocked",at:$at,actor:"user"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" task.blocked user "$(jq -cn --arg reason "$reason" '{reason:$reason}')"
+      ;;
+    'Mark review complete')
+      gum confirm 'Close this review without creating an execution round?' || continue
+      now=$(date --iso-8601=seconds)
+      temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" '.status="completed" | .updated_at=$at | .transitions += [{from:"awaiting_triage",to:"completed",at:$at,actor:"user"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" task.completed user '{"without_execution":true}'
+      ;;
+    'Prepare integration handoff')
+      gum confirm 'Approve an integration handoff? No commits will be merged automatically.' || continue
+      if ! agent-workspaces collision "$selection" >"$selection/collision-report.json"; then
+        gum style --foreground=196 'Overlapping agent changes detected. Review collision-report.json before integration approval.'
+        sleep 2
+        continue
+      fi
+      {
+        printf '# Integration handoff · %s\n\n' "$task_id"
+        printf 'Repository: `%s`\n\n' "$repository"
+        printf 'Review the following agent reports and referenced commits. Merge only in the integration checkout after independent validation.\n\n'
+        for report in "$selection"/*.status.md; do printf -- '- `%s`\n' "$report"; done
+      } >"$selection/integration.md"
+      now=$(date --iso-8601=seconds)
+      temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" '.gates.integration_approved=true | .status="integration_ready" | .updated_at=$at | .transitions += [{from:"awaiting_integration",to:"integration_ready",at:$at,actor:"user:approved-handoff"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" integration.approved user '{"collision_check":"passed"}'
+      ;;
+    'Record integration result')
+      evidence=$(omarchy menu input 'Integration commit and validation evidence' --width 700) || continue
+      [[ -n ${evidence//[[:space:]]/} ]] || continue
+      printf '# Integration result · %s\n\n%s\n' "$task_id" "$evidence" >"$selection/integration-result.md"
+      now=$(date --iso-8601=seconds)
+      temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" '.status="awaiting_pr" | .updated_at=$at | .transitions += [{from:"integration_ready",to:"awaiting_pr",at:$at,actor:"user:recorded-evidence"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" integration.recorded user "$(jq -cn --arg evidence "$evidence" '{evidence:$evidence}')"
+      ;;
+    'Request verification round')
+      objective=$(omarchy menu input 'Verification objective' --width 680) || continue
+      [[ -n ${objective//[[:space:]]/} ]] || continue
+      if [[ -n $template_id && -f $HOME/.config/agent-workspaces/templates/$template_id.json ]]; then
+        exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE=verify \
+          AW_TEMPLATE="$template_id" AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/omarchy-agent-prompt"
+      else
+        exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE=verify \
+          AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/omarchy-agent-prompt"
+      fi
+      ;;
+    'Prepare PR checklist')
+      gum confirm 'Approve preparation of a local PR checklist? This will not push or open a PR.' || continue
+      title=$(omarchy menu input 'Proposed PR title' --width 620) || continue
+      {
+        printf '# PR readiness · %s\n\n' "$task_id"
+        printf 'Title: %s\n\n' "$title"
+        printf -- '- [ ] Integration commit(s) reviewed\n- [ ] Full test gate passed\n- [ ] Formatting and lint passed\n- [ ] Issue reference verified\n- [ ] No blocked evidence folded into scope\n- [ ] Human approval to push and publish\n'
+      } >"$selection/pr-checklist.md"
+      now=$(date --iso-8601=seconds)
+      temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" '.gates.pr_prepared=true | .status="awaiting_pr_review" | .updated_at=$at | .transitions += [{from:"awaiting_pr",to:"awaiting_pr_review",at:$at,actor:"user:prepared"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" pr.prepared user "$(jq -cn --arg title "$title" '{title:$title}')"
+      ;;
+    'Approve PR handoff')
+      gum confirm 'Approve this validated branch as ready for a human-controlled push and PR? Nothing will be published now.' || continue
+      now=$(date --iso-8601=seconds)
+      temporary=$(mktemp "$selection/.state.json.XXXXXX")
+      jq --arg at "$now" '.gates.pr_approved=true | .status="ready_for_pr" | .updated_at=$at | .transitions += [{from:"awaiting_pr_review",to:"ready_for_pr",at:$at,actor:"user:approved-handoff"}]' "$state_file" >"$temporary" && mv "$temporary" "$state_file"
+      agent-workspaces audit "$selection" pr.approved user '{}'
+      ;;
+    'Publish draft PR')
+      exec agent-workspaces publish "$selection"
+      ;;
+  esac
+done
+

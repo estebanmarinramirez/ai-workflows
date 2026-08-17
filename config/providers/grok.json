@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "grok",
+  "label": "Grok Build",
+  "executable": "grok",
+  "process_pattern": "-grok,",
+  "fresh": ["grok"],
+  "resume": ["grok", "--resume", "{session_id}"],
+  "continue": ["grok", "--continue"],
+  "profiles": {
+    "safe": ["--permission-mode", "default"],
+    "trusted": ["--permission-mode", "acceptEdits"],
+    "yolo": ["--permission-mode", "bypassPermissions"]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "claude",
+  "label": "Claude Code",
+  "executable": "claude",
+  "process_pattern": "-claude,",
+  "fresh": ["claude"],
+  "resume": ["claude", "--resume", "{session_id}"],
+  "continue": ["claude", "--continue"],
+  "profiles": {
+    "safe": ["--permission-mode", "manual"],
+    "trusted": ["--permission-mode", "acceptEdits"],
+    "yolo": ["--permission-mode", "bypassPermissions"]
+  }
+}

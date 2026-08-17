@@ -1,0 +1,428 @@
+#!/bin/bash
+
+set -o pipefail
+
+# Match Omarchy's active theme even when it changed after login.
+source omarchy-restart-gum
+
+fzf_style=(
+  --layout=reverse
+  --no-border
+  --info=inline-right
+  --highlight-line
+  --pointer='›'
+  --prompt='Search  '
+  --separator='─'
+  --scrollbar='│'
+  --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55},border:${BORDER_FOREGROUND:-#798186},spinner:${GUM_SPIN_SPINNER_FOREGROUND:-#798186}"
+)
+
+for dependency in git gum fzf jq hyprctl tmux flock pstree xdg-terminal-exec agent-workspaces omarchy-agent-pane omarchy-agent-pane-active omarchy-agent-grid-preview; do
+  if ! command -v "$dependency" >/dev/null 2>&1; then
+    gum style --foreground=196 "Required command is missing: $dependency"
+    exit 1
+  fi
+done
+
+mapfile -t agent_roles < <(jq -r '.providers[]' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null)
+((${#agent_roles[@]} > 0)) || { gum style --foreground=196 'No providers configured in Agent Workspaces.'; exit 1; }
+for agent in "${agent_roles[@]}"; do
+  command -v "$agent" >/dev/null 2>&1 || { gum style --foreground=196 "Configured provider is not installed: $agent"; exit 1; }
+  [[ -f $HOME/.config/agent-workspaces/providers/$agent.json ]] || { gum style --foreground=196 "Provider manifest is missing: $agent"; exit 1; }
+done
+
+if [[ -n ${OMARCHY_AGENT_ROOTS:-} ]]; then
+  IFS=: read -r -a roots <<<"$OMARCHY_AGENT_ROOTS"
+else
+  roots=("$HOME/Work" "$HOME/Projects" "$HOME/Code" "$HOME/Developer")
+fi
+
+if [[ -n ${OMARCHY_AGENT_REPOSITORY:-} ]]; then
+  repository=$(realpath "$OMARCHY_AGENT_REPOSITORY" 2>/dev/null)
+  if ! git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    gum style --foreground=196 "Not a Git repository: ${OMARCHY_AGENT_REPOSITORY}"
+    exit 1
+  fi
+  repository=$(git -C "$repository" rev-parse --show-toplevel)
+else
+  declare -a repositories=()
+  for root in "${roots[@]}"; do
+    [[ -d $root ]] || continue
+    git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 && repositories+=("$(git -C "$root" rev-parse --show-toplevel)")
+    while IFS= read -r git_directory; do
+      repositories+=("${git_directory%/.git}")
+    done < <(find "$root" -mindepth 1 -maxdepth 5 -type d -name .git -print 2>/dev/null)
+  done
+
+  mapfile -t repositories < <(printf '%s\n' "${repositories[@]}" | awk 'NF && !seen[$0]++' | sort)
+  if ((${#repositories[@]} == 0)); then
+    gum style --foreground=196 "No Git repositories found in the configured project roots."
+    exit 1
+  fi
+
+  declare -a repository_rows=()
+  for repository in "${repositories[@]}"; do
+  # fzf rows are tab-delimited; skip pathological paths that cannot be
+  # represented without ambiguity rather than selecting the wrong repository.
+  [[ $repository == *$'\t'* || $repository == *$'\n'* ]] && continue
+  display=${repository#"$HOME"/}
+  branch=$(git -C "$repository" branch --show-current 2>/dev/null)
+  changed=$(git -C "$repository" status --porcelain 2>/dev/null | wc -l)
+  worktree_count=$(git -C "$repository" worktree list --porcelain 2>/dev/null | awk '$1 == "worktree" {count++} END {print count+0}')
+  repo_common_dir=$(cd "$repository" && realpath "$(git rev-parse --git-common-dir)")
+  repo_hash=$(printf '%s' "$repo_common_dir" | sha256sum | cut -c1-10)
+  managed_root="$HOME/.local/share/agent-workspaces/$(basename "$repository")-$repo_hash"
+  if [[ -d $managed_root ]]; then
+    set_count=$(find "$managed_root" -mindepth 1 -maxdepth 1 -type d -printf . 2>/dev/null | wc -c)
+    set_names=$(find "$managed_root" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null | sed 's/ $//')
+  else
+    set_count=0
+    set_names=""
+  fi
+  state="${branch:-detached}"
+  ((changed > 0)) && state+=" · $changed changed"
+  set_word="sets"; ((set_count == 1)) && set_word="set"
+  tree_word="worktrees"; ((worktree_count == 1)) && tree_word="worktree"
+  label="▾ $display    $state · $worktree_count $tree_word · $set_count agent $set_word"
+  [[ -n $set_names ]] && label+=" [$set_names]"
+    repository_rows+=("$repository"$'\t'"$label")
+  done
+
+  repository=$(printf '%s\n' "${repository_rows[@]}" | fzf \
+    --delimiter='\t' --with-nth=2 --nth=1 --accept-nth=1 \
+    "${fzf_style[@]}" --scheme=path \
+    --header='Repositories  ·  type to filter  ·  tab or enter to open' \
+    --bind='tab:accept,btab:up' \
+    --preview='omarchy-agent-grid-preview repository {1}' \
+    --preview-window='down,58%,border-top,wrap' \
+    --preview-label=' Worktrees ') || exit 130
+fi
+
+repo_name=$(basename "$repository")
+repo_common_dir=$(cd "$repository" && realpath "$(git rev-parse --git-common-dir)")
+repo_hash=$(printf '%s' "$repo_common_dir" | sha256sum | cut -c1-10)
+repo_worktree_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash"
+
+is_new=false
+if [[ -n ${OMARCHY_AGENT_SET:-} ]]; then
+  set_slug=$OMARCHY_AGENT_SET
+  if [[ ! $set_slug =~ ^[[:alnum:]._-]+$ || ! -d $repo_worktree_root/$set_slug ]]; then
+    gum style --foreground=196 "Unknown worktree set: $set_slug"
+    exit 1
+  fi
+else
+  declare -a set_rows=("__new__"$'\t'"＋ New collaboration set...")
+
+if [[ -d $repo_worktree_root ]]; then
+  while IFS= read -r set_directory; do
+    existing_set=$(basename "$set_directory")
+    details=()
+    for agent in "${agent_roles[@]}"; do
+      agent_path="$set_directory/$agent"
+      if git -C "$agent_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        agent_branch=$(git -C "$agent_path" branch --show-current 2>/dev/null)
+        agent_changes=$(git -C "$agent_path" status --porcelain 2>/dev/null | wc -l)
+        agent_state="${agent_branch##*/}"
+        ((agent_changes > 0)) && agent_state+=" ($agent_changes changed)"
+      else
+        agent_state="missing"
+      fi
+      details+=("${agent^}: $agent_state")
+    done
+    set_label="▾ $existing_set    ${details[0]}  ·  ${details[1]}  ·  ${details[2]}"
+    set_rows+=("$existing_set"$'\t'"$set_label")
+  done < <(find "$repo_worktree_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort)
+fi
+
+  set_preview=$(printf 'omarchy-agent-grid-preview set %q {1}' "$repository")
+  set_slug=$(printf '%s\n' "${set_rows[@]}" | fzf \
+    --delimiter='\t' --with-nth=2 --nth=1 --accept-nth=1 \
+    "${fzf_style[@]}" \
+    --header="Worktree sets · $repo_name  ·  tab or enter to open" \
+    --bind='tab:accept,btab:up' \
+    --preview="$set_preview" \
+    --preview-window='down,58%,border-top,wrap' \
+    --preview-label=' Agents ') || exit 130
+fi
+
+if [[ $set_slug == "__new__" ]]; then
+  is_new=true
+  default_set=$(date +%Y-%m-%d)
+  set_name=$(gum input \
+    --header="New collaboration set name" \
+    --placeholder="feature-name" \
+    --value="$default_set") || exit 130
+  set_slug=$(sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+|-+$//g' <<<"$set_name")
+  if [[ -z $set_slug ]]; then
+    gum style --foreground=196 "The collaboration set needs a valid name."
+    exit 1
+  fi
+  if [[ -e $repo_worktree_root/$set_slug ]]; then
+    gum style --foreground=196 "A collaboration set named '$set_slug' already exists. Choose it from the list instead."
+    exit 1
+  fi
+fi
+
+worktree_root="$repo_worktree_root/$set_slug"
+workspace_manifest="$worktree_root/workspace.json"
+if [[ -f $workspace_manifest ]]; then
+  permission_profile=$(jq -r '.profile // "trusted"' "$workspace_manifest")
+  mapfile -t agent_roles < <(jq -r '.providers[]' "$workspace_manifest")
+else
+  permission_profile=$(jq -r '.default_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null || printf trusted)
+fi
+[[ $permission_profile =~ ^(safe|trusted|yolo)$ ]] || permission_profile=trusted
+session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"aw-$repo_hash-$repo_name-$set_slug" | cut -c1-80)
+legacy_session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"agents-$repo_name-$set_slug" | cut -c1-80)
+
+if [[ $is_new == true ]]; then
+  gum style --bold "Worktrees: $worktree_root"
+  gum style "Integration shell: $repository"
+  gum confirm "Create the Claude, Grok, and Codex worktrees for '$set_slug'?" || exit 130
+fi
+
+mkdir -p "$worktree_root"
+exec {launch_lock_fd}>"$worktree_root/.launch.lock"
+if ! flock -n "$launch_lock_fd"; then
+  gum style --foreground=214 "This workspace is already opening. Its windows will appear shortly."
+  exit 0
+fi
+
+create_worktree() {
+  local agent=$1 path="$worktree_root/$1" branch="agents/$set_slug/$1"
+
+  if [[ -e $path ]]; then
+    if ! git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      gum style --foreground=196 "Existing path is not a Git worktree: $path"
+      return 1
+    fi
+    local existing_branch
+    local existing_common_dir
+    existing_common_dir=$(cd "$path" && realpath "$(git rev-parse --git-common-dir)")
+    if [[ $existing_common_dir != "$repo_common_dir" ]]; then
+      gum style --foreground=196 "Worktree belongs to another repository: $path"
+      return 1
+    fi
+    existing_branch=$(git -C "$path" branch --show-current)
+    if [[ $existing_branch != "$branch" ]]; then
+      gum style --foreground=196 "Worktree branch mismatch: $path uses $existing_branch, expected $branch"
+      return 1
+    fi
+    return 0
+  fi
+
+  if git -C "$repository" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repository" worktree add "$path" "$branch"
+  else
+    git -C "$repository" worktree add -b "$branch" "$path" HEAD
+  fi
+}
+
+for agent in "${agent_roles[@]}"; do
+  create_worktree "$agent" || exit 1
+done
+
+declare -A paths=() titles=()
+for agent in "${agent_roles[@]}"; do
+  paths[$agent]="$worktree_root/$agent"
+  titles[$agent]="$(jq -r '.label' "$HOME/.config/agent-workspaces/providers/$agent.json") · $set_slug"
+done
+paths[integration]="$repository"
+titles[integration]="Integration · $repo_name"
+roles=("${agent_roles[@]}" integration)
+
+# Existing windows can outlive an agent process and leave an idle shell in the
+# persistent tmux pane. Opening a workspace means restoring its agents too,
+# even when no terminal window needs to be spawned.
+ensure_agent_running() {
+  local role=$1 pane_session pane relaunch state_file
+  pane_session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$session_name-$role" | cut -c1-100)
+  tmux has-session -t "$pane_session" 2>/dev/null || return 0
+  pane=$(tmux list-panes -t "$pane_session" -F '#{pane_id}' | head -1)
+  omarchy-agent-pane-active "$role" "$pane_session" && return 0
+  case "$role" in
+    *)
+      [[ -f $HOME/.config/agent-workspaces/providers/$role.json ]] || return 0
+      provider_session_id=$(tmux show-option -qv -t "$pane_session" @aw_provider_session_id)
+      relaunch="$(agent-workspaces provider-command "$role" resume "$permission_profile" "$provider_session_id") || $(agent-workspaces provider-command "$role" fresh "$permission_profile")"
+      ;;
+  esac
+  state_file="$worktree_root/.state/$role.started"
+  mkdir -p "$(dirname "$state_file")"
+  touch "$state_file"
+  tmux send-keys -t "$pane" -l -- "$relaunch"
+  tmux send-keys -t "$pane" Enter
+}
+
+for role in "${agent_roles[@]}"; do ensure_agent_running "$role"; done
+
+class_set=$(sed -E 's/[^[:alnum:]_]/_/g' <<<"$set_slug")
+# GTK application-id components must begin with a letter and may not contain
+# hyphens. Ghostty silently falls back to its default class when this is invalid.
+class_prefix="org.omarchy.agentworkspaces.r$repo_hash.s$class_set"
+declare -A addresses=()
+terminal_id=$(xdg-terminal-exec --print-id 2>/dev/null)
+
+# Give every collaboration set its own stable Hyprland workspace. Prefer an
+# already-open set's workspace, then its saved workspace, then a free slot.
+workspace_state_file="$worktree_root/.hypr-workspace"
+workspace_id=$(hyprctl clients -j | jq -r --arg prefix "$class_prefix." \
+  '[.[] | select((.class | startswith($prefix)) or (.initialClass | startswith($prefix))) | .workspace.id][0] // empty')
+
+if [[ -z $workspace_id && -f $workspace_state_file ]]; then
+  read -r saved_workspace <"$workspace_state_file"
+  if [[ $saved_workspace =~ ^[0-9]+$ ]]; then
+    unrelated_count=$(hyprctl clients -j | jq --argjson id "$saved_workspace" --arg prefix "$class_prefix." \
+      '[.[] | select(.workspace.id == $id and (((.class | startswith($prefix)) or (.initialClass | startswith($prefix))) | not))] | length')
+    ((unrelated_count == 0)) && workspace_id=$saved_workspace
+  fi
+fi
+
+if [[ -z $workspace_id ]]; then
+  occupied_workspaces=$(hyprctl clients -j | jq -r '.[].workspace.id' | sort -nu)
+  for candidate in 6 7 8 9 10 1 2 3 4 5; do
+    if ! grep -qx "$candidate" <<<"$occupied_workspaces"; then
+      workspace_id=$candidate
+      break
+    fi
+  done
+fi
+
+if [[ -z $workspace_id ]]; then
+  workspace_id=$(hyprctl workspaces -j | jq '[.[].id | select(. > 0)] | max + 1')
+fi
+printf '%s\n' "$workspace_id" >"$workspace_state_file"
+hyprctl dispatch "hl.dsp.focus({ workspace = '$workspace_id' })" >/dev/null
+
+for role in "${roles[@]}"; do
+  app_class="$class_prefix.$role"
+  address=$(hyprctl clients -j | jq -r --arg class "$app_class" \
+    '.[] | select(.class == $class or .initialClass == $class) | .address' | head -1)
+  if [[ -z $address ]]; then
+    pane_session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$session_name-$role" | cut -c1-100)
+    legacy_pane_session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$legacy_session_name-$role" | cut -c1-100)
+    # Migrate sessions made before repository fingerprints were included in
+    # their identity. This prevents same-named repositories from colliding.
+    if ! tmux has-session -t "$pane_session" 2>/dev/null && tmux has-session -t "$legacy_pane_session" 2>/dev/null; then
+      tmux rename-session -t "$legacy_pane_session" "$pane_session"
+    fi
+    state_file="$worktree_root/.state/$role.started"
+    if [[ $terminal_id == *ghostty* ]]; then
+      # Ghostty's default GTK single-instance mode discards per-window classes
+      # when launched concurrently. Independent instances preserve identity.
+      (
+        exec {launch_lock_fd}>&-
+        setsid -f ghostty \
+          --gtk-single-instance=false \
+          --class="$app_class" \
+          --title="${titles[$role]}" \
+          --working-directory="${paths[$role]}" \
+          -e env AW_PERMISSION_PROFILE="$permission_profile" omarchy-agent-pane "$role" "$pane_session" "${paths[$role]}" "${titles[$role]} · $repo_name" "$state_file" "$repository" "$set_slug" "$class_prefix" "$repo_hash:$set_slug" >/dev/null 2>&1
+      )
+    else
+      (
+        exec {launch_lock_fd}>&-
+        setsid -f uwsm-app -- xdg-terminal-exec \
+          --app-id="$app_class" \
+          --title="${titles[$role]}" \
+          --dir="${paths[$role]}" \
+          -e env AW_PERMISSION_PROFILE="$permission_profile" omarchy-agent-pane "$role" "$pane_session" "${paths[$role]}" "${titles[$role]} · $repo_name" "$state_file" "$repository" "$set_slug" "$class_prefix" "$repo_hash:$set_slug" >/dev/null 2>&1
+      )
+    fi
+  fi
+done
+
+# Wait briefly for the compositor to register newly created terminal windows.
+for _ in $(seq 1 50); do
+  all_ready=true
+  for role in "${roles[@]}"; do
+    [[ -n ${addresses[$role]:-} ]] && continue
+    app_class="$class_prefix.$role"
+    addresses[$role]=$(hyprctl clients -j | jq -r --arg class "$app_class" \
+      '.[] | select(.class == $class or .initialClass == $class) | .address' | head -1)
+    [[ -n ${addresses[$role]} ]] || all_ready=false
+  done
+  [[ $all_ready == true ]] && break
+  sleep 0.1
+done
+
+for role in "${roles[@]}"; do
+  if [[ -z ${addresses[$role]:-} ]]; then
+    gum style --foreground=196 "Timed out waiting for the $role terminal window."
+    exit 1
+  fi
+done
+
+# Dwindle does not guarantee a balanced tree when restoring existing windows,
+# so calculate four deterministic quarters from the focused monitor's logical
+# work area. The gap matches Omarchy's outer-gap rhythm.
+monitor=$(hyprctl monitors -j | jq -c '.[] | select(.focused == true)' | head -1)
+scale=$(jq -r '.scale' <<<"$monitor")
+monitor_x=$(jq -r '.x' <<<"$monitor")
+monitor_y=$(jq -r '.y' <<<"$monitor")
+monitor_width=$(jq -r '.width' <<<"$monitor")
+monitor_height=$(jq -r '.height' <<<"$monitor")
+read -r reserved_left reserved_top reserved_right reserved_bottom < <(jq -r '.reserved | @tsv' <<<"$monitor")
+
+logical_x=$(awk "BEGIN {print int($monitor_x / $scale) + $reserved_left}")
+logical_y=$(awk "BEGIN {print int($monitor_y / $scale) + $reserved_top}")
+logical_width=$(awk "BEGIN {print int($monitor_width / $scale) - $reserved_left - $reserved_right}")
+logical_height=$(awk "BEGIN {print int($monitor_height / $scale) - $reserved_top - $reserved_bottom}")
+
+outer_gap=$(hyprctl getoption general:gaps_out -j | jq -r '(.css // "3") | split(" ")[0]' 2>/dev/null)
+inner_gap=$(hyprctl getoption general:gaps_in -j | jq -r '(.css // "2") | split(" ")[0]' 2>/dev/null)
+[[ $outer_gap =~ ^[0-9]+$ ]] || outer_gap=3
+[[ $inner_gap =~ ^[0-9]+$ ]] || inner_gap=2
+between_gap=$((inner_gap * 2))
+
+total_windows=${#roles[@]}
+if ((total_windows <= 4)); then columns=2; else columns=3; fi
+rows=$(((total_windows + columns - 1) / columns))
+usable_width=$((logical_width - outer_gap * 2 - between_gap * (columns - 1)))
+usable_height=$((logical_height - outer_gap * 2 - between_gap * (rows - 1)))
+cell_width=$((usable_width / columns))
+cell_height=$((usable_height / rows))
+
+place_cell() {
+  local role=$1 x=$2 y=$3 width=$4 height=$5 selector
+  selector="address:${addresses[$role]}"
+  hyprctl dispatch "hl.dsp.window.resize({ x = $width, y = $height, relative = false, window = '$selector' })" >/dev/null
+  hyprctl dispatch "hl.dsp.window.move({ x = $x, y = $y, relative = false, window = '$selector' })" >/dev/null
+}
+
+# Workspace moves can asynchronously retile a window. Complete those first,
+# then float the entire set before applying any exact geometry.
+for role in "${roles[@]}"; do
+  selector="address:${addresses[$role]}"
+  hyprctl dispatch "hl.dsp.window.move({ workspace = '$workspace_id', follow = false, window = '$selector' })" >/dev/null
+done
+sleep 0.1
+for role in "${roles[@]}"; do
+  selector="address:${addresses[$role]}"
+  hyprctl dispatch "hl.dsp.window.float({ action = 'set', window = '$selector' })" >/dev/null
+done
+sleep 0.1
+
+# Retry a missed transition (notably the final tiled window in Dwindle) before
+# sizing; this is idempotent for windows that are already floating.
+for role in "${roles[@]}"; do
+  selector="address:${addresses[$role]}"
+  is_floating=$(hyprctl clients -j | jq -r --arg address "${addresses[$role]}" '.[] | select(.address == $address) | .floating')
+  if [[ $is_floating != true ]]; then
+    hyprctl dispatch "hl.dsp.window.float({ action = 'set', window = '$selector' })" >/dev/null
+  fi
+done
+sleep 0.1
+
+for index in "${!roles[@]}"; do
+  role=${roles[$index]}
+  column=$((index % columns)); row=$((index / columns))
+  x=$((logical_x + outer_gap + column * (cell_width + between_gap)))
+  y=$((logical_y + outer_gap + row * (cell_height + between_gap)))
+  width=$cell_width; height=$cell_height
+  ((column == columns - 1)) && width=$((logical_x + logical_width - outer_gap - x))
+  ((row == rows - 1)) && height=$((logical_y + logical_height - outer_gap - y))
+  place_cell "$role" "$x" "$y" "$width" "$height"
+done
+hyprctl dispatch "hl.dsp.focus({ window = 'address:${addresses[integration]}' })" >/dev/null
+

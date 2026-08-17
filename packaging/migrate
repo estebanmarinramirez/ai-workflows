@@ -1,0 +1,74 @@
+#!/bin/bash
+
+set -euo pipefail
+source "$(dirname "$(realpath "$0")")/../lib/core.sh"
+
+mkdir -p "$AW_DATA_HOME"
+while IFS= read -r state_file; do
+  task_dir=$(dirname "$state_file")
+  workspace_root=${task_dir%/.coordination/*}
+  current_schema=$(jq -r '.schema_version // 1' "$state_file")
+  workspace_id=$(jq -r '.workspace_id' "$state_file")
+  repository=$(jq -r '.repository' "$state_file")
+  set_slug=$(jq -r '.set' "$state_file")
+  profile=$(jq -r '.profile // "trusted"' "$state_file")
+
+  if [[ $current_schema != 2 ]]; then
+    roles='{}'
+    while IFS=$'\t' read -r role assignment worktree old_status; do
+      status_json="$task_dir/$role.status.json"
+      if [[ ! -f $status_json ]]; then
+        raw=$(sed -n 's/^[[:space:]]*State:[[:space:]]*//Ip' "$old_status" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]')
+        case "$raw" in complete|completed|done|finished|verified|approved) role_state=completed;; blocked|waiting*) role_state=blocked;; *) role_state=dispatched;; esac
+        jq -n --arg id "$(basename "$task_dir")" --arg role "$role" --arg state "$role_state" --arg at "$(aw_now)" \
+          '{schema_version:1,task_id:$id,role:$role,state:$state,summary:"Migrated from Markdown status",updated_at:$at,evidence:[],commits:[],changed_files:[],blockers:[]}' >"$status_json"
+      fi
+      roles=$(jq --arg role "$role" --arg assignment "$assignment" --arg worktree "$worktree" --arg status_json "$status_json" --arg report "$old_status" \
+        '. + {($role):{assignment:$assignment,worktree:$worktree,status_json:$status_json,report_file:$report}}' <<<"$roles")
+    done < <(jq -r '.roles | to_entries[] | [.key,.value.assignment,.value.worktree,(.value.status_file // "")] | @tsv' "$state_file")
+
+    temporary=$(mktemp "$task_dir/.state.json.XXXXXX")
+    jq --arg profile "$profile" --argjson roles "$roles" \
+      '.schema_version=2 | .profile=$profile | .roles=$roles | .gates.pr_prepared //= false | .gates.pr_approved //= false | .pr //= {}' "$state_file" >"$temporary"
+    mv "$temporary" "$state_file"
+  else
+    # Idempotent repair only: retain every schema-v2 field and fill pointers or
+    # cached role states that an earlier preview migration may have omitted.
+    repaired=$(jq '.' "$state_file")
+    while IFS= read -r role; do
+      status_json="$task_dir/$role.status.json"; report_file="$task_dir/$role.status.md"
+      role_state=$(jq -r '.state // "dispatched"' "$status_json" 2>/dev/null || printf dispatched)
+      repaired=$(jq --arg role "$role" --arg status_json "$status_json" --arg report_file "$report_file" --arg state "$role_state" \
+        '.roles[$role].status_json //= $status_json | .roles[$role].report_file //= $report_file |
+         if .roles[$role].report_file=="" then .roles[$role].report_file=$report_file else . end |
+         .roles[$role].state=$state' <<<"$repaired")
+    done < <(jq -r '.roles|keys[]' "$state_file")
+    temporary=$(mktemp "$task_dir/.state.json.XXXXXX")
+    printf '%s\n' "$repaired" >"$temporary" && mv "$temporary" "$state_file"
+  fi
+
+  workspace_file="$workspace_root/workspace.json"
+  if [[ ! -f $workspace_file ]]; then
+    provider_roles=$(jq -c '[.roles|keys[]]' "$state_file")
+    jq -n --arg id "$workspace_id" --arg repository "$repository" --arg set "$set_slug" --arg profile "$profile" --argjson providers "$provider_roles" --arg at "$(aw_now)" \
+      '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,layout:"three-plus-integration",providers:$providers,created_at:$at,updated_at:$at}' >"$workspace_file"
+  fi
+  if [[ $current_schema != 2 ]]; then aw_audit "$workspace_root" migration.completed "$(jq -cn --arg from "$current_schema" '{from_schema:($from|tonumber),to_schema:2}')"; fi
+done < <(find "$AW_DATA_HOME" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null)
+
+# Adopt live sessions without restarting providers.
+while IFS=$'\t' read -r session workspace_id role; do
+  [[ -n $workspace_id ]] || continue
+  existing_profile=$(tmux show-option -qv -t "$session" @aw_profile)
+  # Sessions created by the pre-1.0 launcher used bypass permissions. Preserve
+  # that truth in metadata; a subsequent intentional relaunch uses the
+  # workspace's trusted default.
+  if [[ -z $existing_profile ]]; then
+    if [[ $role == integration ]]; then tmux set-option -q -t "$session" @aw_profile integration
+    else tmux set-option -q -t "$session" @aw_profile yolo
+    fi
+  fi
+  tmux set-option -q -t "$session" @aw_schema_version 2
+done < <(tmux list-sessions -F $'#{session_name}\t#{@aw_workspace_id}\t#{@aw_role}' 2>/dev/null || true)
+
+printf 'Migration complete. Existing worktrees and sessions were preserved.\n'
