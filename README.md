@@ -5,8 +5,8 @@ Agent Workspaces is an Omarchy-native control plane for persistent coding-agent 
 ## Safety model
 
 - `safe`: interactive approvals and workspace sandboxing.
-- `trusted` (default): edits are accepted inside isolated worktrees; Codex remains workspace-sandboxed with automatic review.
-- `yolo`: provider permission bypasses. This must be selected explicitly.
+- `trusted`: edits are accepted inside isolated worktrees; Codex remains workspace-sandboxed with automatic review. The Orchestrator always defaults to this constrained profile.
+- `yolo` (worker default): provider permission bypasses for isolated implementation worktrees. Changing a running worker's profile takes effect on its next restart.
 
 The integration checkout is human-controlled. No merge, push, or pull request happens as a consequence of an agent report.
 

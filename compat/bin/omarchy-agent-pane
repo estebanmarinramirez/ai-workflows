@@ -12,6 +12,7 @@ workspace_id=${9:-}
 profile=${AW_PERMISSION_PROFILE:-trusted}
 provider=$role
 [[ $role == orchestrator ]] && provider=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config/agent-workspaces/config.json")
+[[ $role == orchestrator ]] && profile=$(jq -r '.orchestrator_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json")
 orchestrator_model=$(jq -r '.orchestrator_model // empty' "$HOME/.config/agent-workspaces/config.json")
 
 set_session_metadata() {

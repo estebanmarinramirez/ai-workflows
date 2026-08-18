@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
-  "default_profile": "trusted",
+  "default_profile": "yolo",
   "default_layout": "three-plus-orchestrator",
   "orchestrator_provider": "codex",
   "orchestrator_model": "gpt-5.6-sol",
+  "orchestrator_profile": "trusted",
   "monitor_interval_seconds": 15,
   "event_reviewer": {
     "enabled": true,
