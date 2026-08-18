@@ -27,9 +27,13 @@ done
 if [[ -n ${AW_WORKSPACE_ID:-} ]]; then
   workspace_id=$AW_WORKSPACE_ID
   [[ -n ${workspace_labels[$workspace_id]:-} ]] || { notify-send 'Agent Dispatcher' 'The requested workspace has no live managed sessions.'; exit 1; }
+elif ((${#workspace_labels[@]} == 1)); then
+  # A chooser with one row looks like a dead end and adds no information.
+  # Continue directly to the development-template step.
+  workspace_id=${!workspace_labels[@]}
 else
-  workspace_selection=$(printf '%s\n' "${workspace_options[@]}" | omarchy menu select 'Prompt workspace' -- --width 420) || exit 0
-  workspace_id=${workspace_selection#*$'\t'}
+  workspace_selection=$(printf '%s\n' "${workspace_options[@]}" | omarchy menu select 'Choose workspace' -- --width 420) || exit 0
+  workspace_id=${workspace_selection##*$'\t'}
 fi
 
 declare -A role_sessions=()
@@ -248,4 +252,3 @@ fi
 source "$HOME/.local/share/agent-workspaces-app/$(cat "$HOME/.local/share/agent-workspaces-app/current-version")/lib/core.sh" 2>/dev/null || true
 if declare -F aw_audit >/dev/null; then aw_audit "$workspace_root" task.dispatched "$(jq -cn --arg id "$task_id" --arg template "$template_id" --arg profile "$profile" '{task_id:$id,template:$template,profile:$profile}')" user; fi
 notify-send 'Coordinated task dispatched' "$joined · $task_id · ${workspace_labels[$workspace_id]}"
-
