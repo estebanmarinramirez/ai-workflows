@@ -18,6 +18,9 @@ agent-workspaces dashboard
 agent-workspaces health [workspace-id]
 agent-workspaces snapshot WORKSPACE_ID [--write]
 agent-workspaces monitor WORKSPACE_ID
+agent-workspaces monitor-start WORKSPACE_ID
+agent-workspaces monitor-stop WORKSPACE_ID
+agent-workspaces event-review WORKSPACE_ID
 agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --objective TEXT
 agent-workspaces status --task DIR --role ROLE --state STATE [options]
 agent-workspaces refresh TASK_DIR
@@ -30,3 +33,5 @@ agent-workspaces migrate
 ```
 
 Run `make install` to deploy the CLI and user configuration. The installer creates a timestamped rollback bundle before replacing managed files.
+
+The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. The persistent conversational Orchestrator uses its separately configured flagship model.

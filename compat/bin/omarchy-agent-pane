@@ -12,6 +12,7 @@ workspace_id=${9:-}
 profile=${AW_PERMISSION_PROFILE:-trusted}
 provider=$role
 [[ $role == orchestrator ]] && provider=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config/agent-workspaces/config.json")
+orchestrator_model=$(jq -r '.orchestrator_model // empty' "$HOME/.config/agent-workspaces/config.json")
 
 set_session_metadata() {
   tmux set-option -q -t "$session" @description "$description"
@@ -38,12 +39,14 @@ case "$role" in
     resume=$(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id")
     ;;
   orchestrator)
-    monitor="flock -n $(printf %q "$directory/.monitor.lock") agent-workspaces monitor $(printf %q "$workspace_id") >/dev/null 2>&1 &"
+    monitor="agent-workspaces monitor-start $(printf %q "$workspace_id") >/dev/null 2>&1;"
     coordination_dir=${directory%/.orchestrator}/.coordination
     welcome="Read snapshot.md, introduce yourself as this workspace's Orchestrator, summarize the active workflow in a few lines, and ask what the user wants to coordinate."
-    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile") --add-dir $(printf %q "$coordination_dir") $(printf %q "$welcome")"
+    model_args=''
+    [[ $provider == codex && -n $orchestrator_model ]] && model_args="--model $(printf %q "$orchestrator_model")"
+    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile") $model_args --add-dir $(printf %q "$coordination_dir") $(printf %q "$welcome")"
     provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
-    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id") --add-dir $(printf %q "$coordination_dir")"
+    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id") $model_args --add-dir $(printf %q "$coordination_dir")"
     ;;
   integration) launch='' ;;
   *) printf 'Unknown agent role: %s\n' "$role" >&2; exit 1 ;;

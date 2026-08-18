@@ -169,10 +169,63 @@ case "$cmd" in
     workspace_id=${1:?workspace id}
     interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
     [[ $interval =~ ^[0-9]+$ && $interval -ge 5 ]] || interval=15
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    signature_file="$workspace_root/.orchestrator/.state-signature"
     while :; do
-      "$0" snapshot "$workspace_id" --write >/dev/null 2>&1 || true
+      snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
+      if [[ -s $snapshot_file ]]; then
+        signature=$(sed '/^Updated:/d' "$snapshot_file" | sha256sum | awk '{print $1}')
+        previous=''; [[ -f $signature_file ]] && read -r previous <"$signature_file"
+        printf '%s\n' "$signature" >"$signature_file"
+        if [[ -n $previous && $signature != "$previous" ]]; then
+          "$0" event-review "$workspace_id" >/dev/null 2>&1 &
+        fi
+      fi
       sleep "$interval"
     done
+    ;;
+  monitor-start)
+    workspace_id=${1:?workspace id}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    unit_slug=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$workspace_id" | cut -c1-80)
+    unit="agent-workspaces-monitor-$unit_slug.service"
+    if systemctl --user is-active --quiet "$unit"; then exit 0; fi
+    systemd-run --user --quiet --unit="${unit%.service}" --collect \
+      /usr/bin/flock -n "$workspace_root/.orchestrator/.monitor.lock" "$0" monitor "$workspace_id"
+    ;;
+  monitor-stop)
+    workspace_id=${1:?workspace id}
+    unit_slug=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$workspace_id" | cut -c1-80)
+    systemctl --user stop "agent-workspaces-monitor-$unit_slug.service" 2>/dev/null || true
+    ;;
+  event-review)
+    workspace_id=${1:?workspace id}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    orchestrator_root="$workspace_root/.orchestrator"
+    snapshot_file="$orchestrator_root/snapshot.md"
+    [[ -s $snapshot_file ]] || "$0" snapshot "$workspace_id" --write >/dev/null
+    enabled=$(jq -r '.event_reviewer.enabled // false' "$AW_CONFIG_FILE")
+    [[ $enabled == true ]] || exit 0
+    provider=$(jq -r '.event_reviewer.provider // "codex"' "$AW_CONFIG_FILE")
+    model=$(jq -r '.event_reviewer.model // empty' "$AW_CONFIG_FILE")
+    [[ $provider == codex ]] || aw_die "event reviewer provider is not supported yet: $provider"
+    [[ -n $model ]] || aw_die 'event reviewer model is not configured'
+    exec {review_lock}>"$orchestrator_root/.event-review.lock"
+    flock -n "$review_lock" || exit 0
+    temporary=$(mktemp "$orchestrator_root/.briefing.md.XXXXXX")
+    trap 'rm -f "$temporary"' EXIT
+    {
+      printf '%s\n\n' 'You are a lightweight event reviewer. Compare no prior narrative; summarize only the material current state in the snapshot below.'
+      printf '%s\n' 'Write at most 160 words with: What changed or matters now; Risks or blockers; Recommended next action. Do not run tools, edit files, dispatch work, or ask questions.'
+      cat "$snapshot_file"
+    } | codex exec --ephemeral --skip-git-repo-check --sandbox read-only --model "$model" \
+      --output-last-message "$temporary" - >/dev/null 2>&1 || exit 0
+    [[ -s $temporary ]] || exit 0
+    {
+      printf '# Event briefing\n\nGenerated: %s  \nModel: `%s`\n\n' "$(aw_now)" "$model"
+      cat "$temporary"
+      printf '\n'
+    } >"$orchestrator_root/briefing.md"
     ;;
   dispatch)
     workspace_id='' template='' objective='' lead=''
@@ -217,6 +270,7 @@ case "$cmd" in
     for session in "${sessions[@]}"; do tmux send-keys -t "$session" C-c 2>/dev/null || true; done
     sleep 1
     for session in "${sessions[@]}"; do tmux kill-session -t "$session" 2>/dev/null || true; done
+    "$0" monitor-stop "$workspace_id"
     printf 'Ended %s sessions. Worktrees and provider history remain.\n' "${#sessions[@]}"
     ;;
   recover)

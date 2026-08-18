@@ -44,6 +44,10 @@ fi
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" status --task "$task" --role grok --state blocked --blocker 'missing fixture' --summary 'blocked' >/dev/null
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 [[ -s $fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md ]] || { printf 'not ok - orchestrator snapshot\n'; failures=$((failures+1)); }
+signature_one=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
+signature_two=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
+[[ $signature_one == "$signature_two" ]] || { printf 'not ok - timestamp-free event signature\n'; failures=$((failures+1)); }
 
 printf '%s test failure(s)\n' "$failures"
 exit "$failures"

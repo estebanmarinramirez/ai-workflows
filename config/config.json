@@ -3,7 +3,13 @@
   "default_profile": "trusted",
   "default_layout": "three-plus-orchestrator",
   "orchestrator_provider": "codex",
+  "orchestrator_model": "gpt-5.6-sol",
   "monitor_interval_seconds": 15,
+  "event_reviewer": {
+    "enabled": true,
+    "provider": "codex",
+    "model": "gpt-5.6-luna"
+  },
   "archive_after_days": 30,
   "delete_archives_automatically": false,
   "project_roots": ["~/Work", "~/Projects", "~/Code", "~/Developer"],
