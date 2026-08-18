@@ -17,7 +17,8 @@ cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
 export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
 source "$root/lib/core.sh"
 
-[[ $(aw_provider_command codex fresh trusted) == *"--sandbox"*"workspace-write"*"--approve-for-me"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
+trusted_codex=$(aw_provider_command codex fresh trusted)
+[[ $trusted_codex == *"--approve-for-me"* && $trusted_codex != *"--sandbox"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) != *bypassPermissions* ]] || { printf 'not ok - trusted claude is not bypass\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh yolo) == *bypassPermissions* ]] || { printf 'not ok - explicit yolo profile\n'; failures=$((failures+1)); }
 

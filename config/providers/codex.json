@@ -9,7 +9,7 @@
   "continue": ["codex", "resume", "--last"],
   "profiles": {
     "safe": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
-    "trusted": ["--sandbox", "workspace-write", "--approve-for-me"],
+    "trusted": ["--approve-for-me"],
     "yolo": ["--dangerously-bypass-approvals-and-sandbox"]
   }
 }
