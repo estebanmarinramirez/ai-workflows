@@ -35,5 +35,6 @@
   "agent-launch.prompt": {"icon":"󰭹","label":"Prompt Agents","action":"omarchy-agent-prompt-launch","description":"Dispatch one coordinated task with lead, analyst, and verifier roles"},
   "agent-launch.sessions": {"icon":"","label":"Tmux Sessions","action":"omarchy-launch-floating-terminal-with-presentation tmux panel","description":"Browse persistent agent and terminal sessions"},
   "agent-launch.choose": {"icon":"","label":"Single Agent","action":"omarchy-launch-floating-terminal-with-presentation omarchy-agent-workspace","description":"Choose an agent, model, and project"},
+  "agent-launch.updates": {"icon":"󰚰","label":"Provider Updates","action":"omarchy-launch-floating-terminal-with-presentation omarchy-agent-provider-updates","description":"Update Claude, Codex, Grok, and future provider CLIs through their owning manager"},
   "agent-launch.default": {"icon":"","label":"Default Agent","action":"omarchy-agent","description":"Launch the configured default"},
 }

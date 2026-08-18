@@ -4,6 +4,7 @@
   "label": "Grok Build",
   "executable": "grok",
   "process_pattern": "-grok,",
+  "update": {"manager": "mise", "tool": "npm:@xai-official/grok"},
   "fresh": ["grok"],
   "resume": ["grok", "--resume", "{session_id}"],
   "continue": ["grok", "--continue"],

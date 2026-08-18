@@ -1,0 +1,110 @@
+#!/bin/bash
+
+set -euo pipefail
+source omarchy-restart-gum
+
+for dependency in mise jq fzf tmux notify-send; do
+  command -v "$dependency" >/dev/null 2>&1 || { gum style --foreground=196 "Required command is missing: $dependency"; exit 1; }
+done
+
+provider_root="$HOME/.config/agent-workspaces/providers"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}/agent-workspaces"
+mkdir -p "$state_root"
+
+declare -A provider_for=() label_for=() current_for=() latest_for=() active_for=()
+tools=()
+while IFS= read -r manifest; do
+  manager=$(jq -r '.update.manager // empty' "$manifest")
+  tool=$(jq -r '.update.tool // empty' "$manifest")
+  [[ $manager == mise && -n $tool ]] || continue
+  provider=$(jq -r '.id' "$manifest")
+  label=$(jq -r '.label' "$manifest")
+  tools+=("$tool")
+  provider_for["$tool"]=$provider
+  label_for["$tool"]=$label
+done < <(find "$provider_root" -maxdepth 1 -type f -name '*.json' -print | sort)
+
+((${#tools[@]})) || { gum style --foreground=214 'No provider update managers are configured.'; exit 0; }
+
+installed=$(mise ls --json "${tools[@]}")
+outdated=$(mise outdated --json "${tools[@]}" 2>/dev/null || printf '{}')
+
+rows=()
+for index in "${!tools[@]}"; do
+  tool=${tools[$index]}
+  current=$(jq -r ".[$index].version // \"not installed\"" <<<"$installed")
+  latest=$(jq -r --arg tool "$tool" '.[$tool].latest // empty' <<<"$outdated")
+  provider=${provider_for[$tool]}
+  active=$(tmux list-sessions -F $'#{@aw_role}\t#{@aw_provider}' 2>/dev/null | \
+    awk -F '\t' -v provider="$provider" '$1==provider || $2==provider {count++} END {print count+0}')
+  current_for["$tool"]=$current
+  latest_for["$tool"]=${latest:-$current}
+  active_for["$tool"]=$active
+  if [[ -n $latest ]]; then
+    status="$current → $latest"
+  else
+    status="$current · current"
+  fi
+  ((active > 0)) && status+=" · $active running"
+  rows+=("$tool"$'\t'"${label_for[$tool]}"$'\t'"$status"$'\t'"$([[ -n $latest ]] && printf update || printf current)")
+done
+
+selection=$(printf '%s\n' "${rows[@]}" | fzf \
+  --multi --delimiter='\t' --with-nth=2,3 --nth=2,3 --accept-nth=1,4 \
+  --layout=reverse --no-border --info=inline-right --highlight-line \
+  --pointer='›' --marker='✓' --prompt='Providers  ' --separator='─' --scrollbar='│' \
+  --header='Tab selects · Enter continues · running sessions update after restart' \
+  --bind='tab:toggle+down,btab:toggle+up' \
+  --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},marker:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55}") || exit 0
+
+selected_tools=()
+while IFS=$'\t' read -r tool status; do
+  [[ -n $tool ]] || continue
+  if [[ $status != update ]]; then
+    gum style --foreground=245 "${label_for[$tool]} is already current (${current_for[$tool]})."
+    continue
+  fi
+  selected_tools+=("$tool")
+done <<<"$selection"
+
+((${#selected_tools[@]})) || { gum style --foreground=245 'No updates selected.'; sleep 1; exit 0; }
+
+running=0
+for tool in "${selected_tools[@]}"; do running=$((running + active_for[$tool])); done
+message="Update ${#selected_tools[@]} provider CLI"
+((${#selected_tools[@]} != 1)) && message+='s'
+if ((running > 0)); then
+  message+="? $running running session(s) will keep their current versions until restarted."
+else
+  message+='?'
+fi
+gum confirm "$message" || exit 0
+
+failed=0
+for tool in "${selected_tools[@]}"; do
+  provider=${provider_for[$tool]}
+  before=${current_for[$tool]}
+  gum style --bold "Updating ${label_for[$tool]} · $before → ${latest_for[$tool]}"
+  if mise upgrade "$tool" --yes; then
+    after=$(mise ls --json "$tool" | jq -r '.[0].version')
+    jq -cn --arg at "$(date --iso-8601=seconds)" --arg provider "$provider" --arg manager mise \
+      --arg from "$before" --arg to "$after" '{at:$at,provider:$provider,manager:$manager,from:$from,to:$to,status:"completed"}' \
+      >>"$state_root/provider-updates.jsonl"
+  else
+    failed=1
+    jq -cn --arg at "$(date --iso-8601=seconds)" --arg provider "$provider" --arg manager mise \
+      --arg from "$before" '{at:$at,provider:$provider,manager:$manager,from:$from,status:"failed"}' \
+      >>"$state_root/provider-updates.jsonl"
+  fi
+done
+
+if ((failed)); then
+  notify-send 'Agent provider updates' 'One or more updates failed. Open Provider Updates for details.'
+  gum style --foreground=196 'One or more provider updates failed.'
+  exit 1
+fi
+
+notify-send 'Agent providers updated' 'Running sessions keep their old versions until restarted.'
+gum style --foreground=42 'Provider updates completed.'
+gum style --foreground=245 'Running sessions were not interrupted. Restart them when their current work is safe.'
+sleep 2

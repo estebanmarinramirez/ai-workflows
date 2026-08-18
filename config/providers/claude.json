@@ -4,6 +4,7 @@
   "label": "Claude Code",
   "executable": "claude",
   "process_pattern": "-claude,",
+  "update": {"manager": "mise", "tool": "claude"},
   "fresh": ["claude"],
   "resume": ["claude", "--resume", "{session_id}"],
   "continue": ["claude", "--continue"],

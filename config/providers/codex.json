@@ -4,6 +4,7 @@
   "label": "OpenAI Codex",
   "executable": "codex",
   "process_pattern": "-codex,",
+  "update": {"manager": "mise", "tool": "codex"},
   "fresh": ["codex"],
   "resume": ["codex", "resume", "{session_id}"],
   "continue": ["codex", "resume", "--last"],

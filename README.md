@@ -35,3 +35,5 @@ agent-workspaces migrate
 Run `make install` to deploy the CLI and user configuration. The installer creates a timestamped rollback bundle before replacing managed files.
 
 The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. The persistent conversational Orchestrator uses its separately configured flagship model.
+
+Provider manifests declare their CLI update manager. Use **Agent Workspaces → Provider Updates** to inspect and selectively update provider CLIs. Updates never interrupt running sessions; restarted sessions pick up the new binary.
