@@ -281,7 +281,15 @@ case "$cmd" in
       provider=$(tmux show-option -qv -t "$session" @aw_provider); provider=${provider:-$role}
       omarchy-agent-pane-active "$role" "$session" 2>/dev/null && continue
       directory=$(tmux display-message -p -t "$session" '#{pane_current_path}')
-      profile=$(tmux show-option -qv -t "$session" @aw_profile); profile=${profile:-trusted}
+      workspace_root=$(aw_workspace_root "$workspace_id" 2>/dev/null || true)
+      if [[ $role == orchestrator ]]; then
+        profile=$(jq -r '.orchestrator_profile // "trusted"' "$AW_CONFIG_FILE")
+      elif [[ -n $workspace_root && -f $workspace_root/workspace.json ]]; then
+        profile=$(jq -r '.profile // "trusted"' "$workspace_root/workspace.json")
+      else
+        profile=$(tmux show-option -qv -t "$session" @aw_profile); profile=${profile:-trusted}
+      fi
+      tmux set-option -q -t "$session" @aw_profile "$profile"
       session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id)
       if [[ -z $session_id ]]; then
         session_id=$("$0" discover-session "$provider" "$directory" || true)
