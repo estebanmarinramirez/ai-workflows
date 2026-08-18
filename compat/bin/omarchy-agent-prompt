@@ -238,9 +238,16 @@ for role in "${active_roles[@]}"; do
   tmux set-buffer -b "$buffer" -- "$instruction"
   tmux paste-buffer -b "$buffer" -t "${role_panes[$role]}"
   # Full-screen TUIs need one render cycle to finish bracketed-paste handling
-  # before Enter is interpreted as submit (Codex is especially sensitive).
-  sleep 0.15
+  # before Enter is interpreted as submit. Codex can occasionally consume the
+  # first Enter only as "finish paste", leaving a complete dispatch waiting in
+  # its composer. A delayed second Enter is harmless after submission and
+  # removes that unattended-workflow stall.
+  sleep 0.35
   tmux send-keys -t "${role_panes[$role]}" Enter
+  if [[ $role == codex ]]; then
+    sleep 0.65
+    tmux send-keys -t "${role_panes[$role]}" Enter
+  fi
   tmux delete-buffer -b "$buffer"
   target_names+=("${role^}")
 done
