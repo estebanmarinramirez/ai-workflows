@@ -16,6 +16,9 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 agent-workspaces doctor
 agent-workspaces dashboard
 agent-workspaces health [workspace-id]
+agent-workspaces snapshot WORKSPACE_ID [--write]
+agent-workspaces monitor WORKSPACE_ID
+agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --objective TEXT
 agent-workspaces status --task DIR --role ROLE --state STATE [options]
 agent-workspaces refresh TASK_DIR
 agent-workspaces collision TASK_DIR

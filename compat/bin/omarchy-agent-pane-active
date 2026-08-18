@@ -10,5 +10,6 @@ pane_pid=$(tmux list-panes -t "$session" -F '#{pane_pid}' | head -1)
 # The persistent pane is intentionally a Bash wrapper, so
 # pane_current_command can remain "bash" while the agent is its foreground
 # child. Inspect the actual process tree instead.
-pstree -ap "$pane_pid" 2>/dev/null | grep -q -- "-$role,"
-
+provider=$(tmux show-option -qv -t "$session" @aw_provider 2>/dev/null)
+provider=${provider:-$role}
+pstree -ap "$pane_pid" 2>/dev/null | grep -q -- "-$provider,"

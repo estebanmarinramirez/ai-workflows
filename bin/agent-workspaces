@@ -124,6 +124,72 @@ case "$cmd" in
     fi
     aw_workspace_risks "$workspace_id"
     ;;
+  snapshot)
+    workspace_id=${1:?workspace id}; shift
+    write=false
+    [[ ${1:-} == --write ]] && write=true
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    manifest="$workspace_root/workspace.json"
+    repository=$(jq -r '.repository' "$manifest")
+    set_slug=$(jq -r '.set' "$manifest")
+    now=$(aw_now)
+    content=$(mktemp)
+    {
+      printf '# Agent Workspace · %s\n\n' "$set_slug"
+      printf 'Updated: %s  \nRepository: `%s`  \nWorkspace: `%s`\n\n' "$now" "$repository" "$workspace_id"
+      printf '## Sessions\n\n```text\n'
+      aw_workspace_risks "$workspace_id"
+      printf '```\n\n## Workflows\n\n'
+      found=false
+      while IFS= read -r state; do
+        found=true
+        task=$(dirname "$state")
+        jq -r '"- `" + .id + "` · **" + .status + "** · " + .stage + " · " + .objective,
+          (.roles | to_entries[] | "  - " + .key + ": " + (.value.state // "dispatched"))' "$state"
+      done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null | sort -r)
+      [[ $found == true ]] || printf '_No workflows dispatched yet._\n'
+      printf '\n## Recent activity\n\n'
+      if [[ -s $workspace_root/.coordination/audit.jsonl ]]; then
+        tail -n 8 "$workspace_root/.coordination/audit.jsonl" | jq -r '"- " + .at + " · " + .event + " · " + .actor'
+      else
+        printf '_No recorded activity yet._\n'
+      fi
+    } >"$content"
+    if [[ $write == true ]]; then
+      target="$workspace_root/.orchestrator/snapshot.md"
+      mkdir -p "$(dirname "$target")"
+      mv "$content" "$target"
+      printf '%s\n' "$target"
+    else
+      cat "$content"
+      rm -f "$content"
+    fi
+    ;;
+  monitor)
+    workspace_id=${1:?workspace id}
+    interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
+    [[ $interval =~ ^[0-9]+$ && $interval -ge 5 ]] || interval=15
+    while :; do
+      "$0" snapshot "$workspace_id" --write >/dev/null 2>&1 || true
+      sleep "$interval"
+    done
+    ;;
+  dispatch)
+    workspace_id='' template='' objective='' lead=''
+    while (($#)); do
+      case "$1" in
+        --workspace) workspace_id=$2; shift 2 ;;
+        --template) template=$2; shift 2 ;;
+        --objective) objective=$2; shift 2 ;;
+        --lead) lead=$2; shift 2 ;;
+        *) aw_die "unknown dispatch option: $1" ;;
+      esac
+    done
+    [[ -n $workspace_id && -n $template && -n $objective && -n $lead ]] || \
+      aw_die 'dispatch requires --workspace, --template, --objective, and --lead'
+    exec env AW_WORKSPACE_ID="$workspace_id" AW_TEMPLATE="$template" AW_OBJECTIVE="$objective" \
+      AW_LEAD="$lead" AW_AUTO_CONFIRM=1 omarchy-agent-prompt
+    ;;
   dashboard)
     mapfile -t ids < <(tmux list-sessions -F '#{@aw_workspace_id}' 2>/dev/null | awk 'NF' | sort -u)
     ((${#ids[@]})) || aw_die 'no live Agent Workspaces'
@@ -158,15 +224,17 @@ case "$cmd" in
     while IFS=$'\t' read -r session role; do
       [[ -z $requested_role || $role == "$requested_role" ]] || continue
       [[ $role != integration ]] || continue
+      provider=$(tmux show-option -qv -t "$session" @aw_provider); provider=${provider:-$role}
       omarchy-agent-pane-active "$role" "$session" 2>/dev/null && continue
       directory=$(tmux display-message -p -t "$session" '#{pane_current_path}')
       profile=$(tmux show-option -qv -t "$session" @aw_profile); profile=${profile:-trusted}
       session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id)
       if [[ -z $session_id ]]; then
-        session_id=$("$0" discover-session "$role" "$directory" || true)
+        session_id=$("$0" discover-session "$provider" "$directory" || true)
         [[ -n $session_id ]] && tmux set-option -q -t "$session" @aw_provider_session_id "$session_id"
       fi
-      command=$(aw_provider_command "$role" resume "$profile" "$session_id")
+      command=$(aw_provider_command "$provider" resume "$profile" "$session_id")
+      [[ $role == orchestrator ]] && command="AW_WORKSPACE_ID=$(printf %q "$workspace_id") $command"
       pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
       tmux send-keys -t "$pane" -l -- "$command"; tmux send-keys -t "$pane" Enter
       printf 'Relaunched %s in %s (%s).\n' "$role" "$directory" "$profile"

@@ -14,8 +14,12 @@ fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/config/agent-workspaces/providers" "$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
 cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
+cp "$root/config/config.json" "$fixture/config/agent-workspaces/config.json"
 export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
 source "$root/lib/core.sh"
+
+jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex","grok"]}' \
+  >"$fixture/data/agent-workspaces/repo-hash/set/workspace.json"
 
 trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $trusted_codex == *"--approve-for-me"* && $trusted_codex != *"--sandbox"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
@@ -38,6 +42,8 @@ else
   printf 'ok - blocker evidence is required\n'
 fi
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" status --task "$task" --role grok --state blocked --blocker 'missing fixture' --summary 'blocked' >/dev/null
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
+[[ -s $fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md ]] || { printf 'not ok - orchestrator snapshot\n'; failures=$((failures+1)); }
 
 printf '%s test failure(s)\n' "$failures"
 exit "$failures"

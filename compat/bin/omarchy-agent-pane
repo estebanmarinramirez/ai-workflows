@@ -10,6 +10,8 @@ set_slug=${7:-}
 class_prefix=${8:-}
 workspace_id=${9:-}
 profile=${AW_PERMISSION_PROFILE:-trusted}
+provider=$role
+[[ $role == orchestrator ]] && provider=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config/agent-workspaces/config.json")
 
 set_session_metadata() {
   tmux set-option -q -t "$session" @description "$description"
@@ -18,6 +20,7 @@ set_session_metadata() {
   [[ -n $class_prefix ]] && tmux set-option -q -t "$session" @aw_class_prefix "$class_prefix"
   [[ -n $workspace_id ]] && tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
   tmux set-option -q -t "$session" @aw_role "$role"
+  tmux set-option -q -t "$session" @aw_provider "$provider"
   tmux set-option -q -t "$session" @aw_profile "$profile"
 }
 
@@ -30,9 +33,17 @@ fi
 
 case "$role" in
   claude|grok|codex)
-    fresh=$(agent-workspaces provider-command "$role" fresh "$profile")
+    fresh=$(agent-workspaces provider-command "$provider" fresh "$profile")
     provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
-    resume=$(agent-workspaces provider-command "$role" resume "$profile" "$provider_session_id")
+    resume=$(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id")
+    ;;
+  orchestrator)
+    monitor="flock -n $(printf %q "$directory/.monitor.lock") agent-workspaces monitor $(printf %q "$workspace_id") >/dev/null 2>&1 &"
+    coordination_dir=${directory%/.orchestrator}/.coordination
+    welcome="Read snapshot.md, introduce yourself as this workspace's Orchestrator, summarize the active workflow in a few lines, and ask what the user wants to coordinate."
+    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile") --add-dir $(printf %q "$coordination_dir") $(printf %q "$welcome")"
+    provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
+    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id") --add-dir $(printf %q "$coordination_dir")"
     ;;
   integration) launch='' ;;
   *) printf 'Unknown agent role: %s\n' "$role" >&2; exit 1 ;;
@@ -42,7 +53,7 @@ if tmux has-session -t "$session" 2>/dev/null; then
   set_session_metadata
   if [[ $role != integration ]]; then
     pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
-    if ! omarchy-agent-pane-active "$role" "$session"; then
+    if ! omarchy-agent-pane-active "$provider" "$session"; then
       relaunch=$fresh
       [[ $was_started == true ]] && relaunch="$resume || $fresh"
       tmux send-keys -t "$pane" -l -- "$relaunch"
@@ -62,10 +73,9 @@ if [[ $role != integration ]]; then
   fi
   # Keep an interactive shell in the pane if the agent exits, so the tmux
   # session remains available for review and manual relaunching.
-  tmux new-session -d -s "$session" -c "$directory" "bash -lc '$launch; agent-workspaces remember-session '$session' '$role' '$directory' >/dev/null 2>&1 || true; exec bash'"
+  tmux new-session -d -s "$session" -c "$directory" "bash -lc '$launch; agent-workspaces remember-session '$session' '$provider' '$directory' >/dev/null 2>&1 || true; exec bash'"
 else
   tmux new-session -d -s "$session" -c "$directory"
 fi
 set_session_metadata
 exec tmux attach-session -t "$session"
-

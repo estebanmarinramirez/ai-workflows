@@ -8,7 +8,7 @@ declare -A workspace_repositories=()
 declare -A workspace_sets=()
 
 while IFS=$'\t' read -r session workspace_id role repository set_slug; do
-  [[ -n $workspace_id && $role != integration ]] || continue
+  [[ -n $workspace_id && $role != integration && $role != orchestrator ]] || continue
   workspace_labels["$workspace_id"]="$set_slug · $(basename "$repository")"
   workspace_sessions["$workspace_id"]+="${workspace_sessions[$workspace_id]:+$'\n'}$session"
   workspace_repositories["$workspace_id"]=$repository
@@ -95,7 +95,10 @@ fi
 stage=${AW_STAGE:-$(jq -r '.stage' "$template_file")}
 case "$stage" in review|execute|verify|integrate) ;; *) notify-send 'Agent Dispatcher' "Unsupported workflow stage: $stage"; exit 1 ;; esac
 
-if ((active_count > 1)); then
+if [[ -n ${AW_LEAD:-} ]]; then
+  lead=$AW_LEAD
+  [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' "Requested lead is not active: $lead"; exit 1; }
+elif ((active_count > 1)); then
   lead_options=()
   for role in "${active_roles[@]}"; do lead_options+=("󰒓"$'\t'"${role^}"$'\t'"$role"); done
   lead_selection=$(printf '%s\n' "${lead_options[@]}" | omarchy menu select "${stage^} lead" -- --width 380) || exit 0
@@ -126,10 +129,12 @@ for role in "${active_roles[@]}"; do
   fi
 done
 
-confirmation=$(omarchy menu select 'Dispatch coordinated task?' \
-  "󰄬"$'\t'"Send to $active_count active agents"$'\t'"send" \
-  "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 440) || exit 0
-[[ ${confirmation#*$'\t'} == send ]] || exit 0
+if [[ ${AW_AUTO_CONFIRM:-0} != 1 ]]; then
+  confirmation=$(omarchy menu select 'Dispatch coordinated task?' \
+    "󰄬"$'\t'"Send to $active_count active agents"$'\t'"send" \
+    "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 440) || exit 0
+  [[ ${confirmation#*$'\t'} == send ]] || exit 0
+fi
 
 mkdir -p "$task_root"
 mkdir -p "$task_root/instructions"
@@ -252,3 +257,4 @@ fi
 source "$HOME/.local/share/agent-workspaces-app/$(cat "$HOME/.local/share/agent-workspaces-app/current-version")/lib/core.sh" 2>/dev/null || true
 if declare -F aw_audit >/dev/null; then aw_audit "$workspace_root" task.dispatched "$(jq -cn --arg id "$task_id" --arg template "$template_id" --arg profile "$profile" '{task_id:$id,template:$template,profile:$profile}')" user; fi
 notify-send 'Coordinated task dispatched' "$joined · $task_id · ${workspace_labels[$workspace_id]}"
+printf '%s\n' "$task_root"

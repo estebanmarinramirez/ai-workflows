@@ -125,7 +125,7 @@ aw_workspace_risks() {
   printf 'Workspace: %s\nActive tasks: %s\n' "$workspace_id" "$task_count"
   while IFS=$'\t' read -r session role; do
     [[ -n $session ]] || continue
-    if [[ $role != integration ]] && omarchy-agent-pane-active "$role" "$session" 2>/dev/null; then ((active_agents+=1)); fi
+    if [[ $role != integration && $role != orchestrator ]] && omarchy-agent-pane-active "$role" "$session" 2>/dev/null; then ((active_agents+=1)); fi
     worktree=$(tmux display-message -p -t "$session" '#{pane_current_path}' 2>/dev/null)
     [[ $role == integration && -n $repository ]] && worktree=$repository
     if git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
