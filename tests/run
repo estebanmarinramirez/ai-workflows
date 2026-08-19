@@ -89,5 +89,10 @@ chmod +x "$fixture/bin/gh"
 PATH="$fixture/bin:$PATH" AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" reconcile-pr "$task" --pr 13 >/dev/null
 [[ $(jq -r '.status + ":" + .pr.state + ":" + (.pr.number|tostring)' "$task/state.json") == completed:MERGED:13 ]] || { printf 'not ok - merged PR reconciliation\n'; failures=$((failures+1)); }
 
+# Historical and gated workflows are records, not live write leases. The
+# dispatcher itself covers active seam conflicts; keep this status contract
+# explicit so orchestration instructions cannot reinterpret stale records.
+check jq -e '.status == "completed" and .stage == "complete"' "$task/state.json"
+
 printf '%s test failure(s)\n' "$failures"
 exit "$failures"

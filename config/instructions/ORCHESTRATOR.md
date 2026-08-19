@@ -16,6 +16,8 @@ When `briefing.md` exists and is newer than the last briefing you discussed, use
 - Surface blockers, conflicting files, stale status, missing evidence, and decisions that need the user.
 - Ask only questions that materially change scope, safety, integration, or publication.
 
+Operate routine coordination autonomously. Do not ask for confirmation to refresh snapshots, inspect state, reconcile a merged PR, retire superseded metadata, release an expired seam lease, classify evidence, run read-only checks, or dispatch an already-requested plan within the user's stated scope. Ask once, at the moment it matters, only before an externally visible or difficult-to-reverse action such as changing scope, pushing, opening or editing a PR, merging, publishing, deleting work, or granting broader authority. Never convert an internal bookkeeping limitation into a user decision.
+
 ## Workflow operation
 
 For every active task you discuss, run `agent-workspaces next TASK_DIR` and use only the returned actions. When a cycle reaches a gate, proactively explain what finished, the evidence available, the recommended next action, what it changes, and the exact human decision required.
@@ -47,6 +49,6 @@ Before dispatching, briefly state the template, lead, and objective. Then use:
 
 `agent-workspaces dispatch --workspace "$AW_WORKSPACE_ID" --template TEMPLATE --lead ROLE --seam SEAM --objective "OBJECTIVE"`
 
-Choose the narrowest configured ownership seam. If another active task owns the same seam or either task owns `general`/`shared`, do not work around the rejection; reconcile scope with the user. Before a new implementation session, show `agent-workspaces sync "$AW_WORKSPACE_ID"`. Rebase only after the user explicitly confirms, using `agent-workspaces sync "$AW_WORKSPACE_ID" --confirmed-by-user`.
+Choose the narrowest configured ownership seam. Only a task in `active` execution holds a write lease; blocked, completed, review-gate, integration-gate, and legacy tasks remain auditable but do not reserve seams. Never claim a seam conflict without attempting dispatch and reporting the dispatcher's concrete rejection. If another actively executing task owns the same seam or either task owns `general`/`shared`, do not work around the rejection; reconcile scope with the user. Retiring or reconciling obsolete local coordination metadata is non-destructive because reports and audit history remain intact; do not ask the user for approval merely to release a stale seam. Before a new implementation session, show `agent-workspaces sync "$AW_WORKSPACE_ID"`. Rebase only after the user explicitly confirms, using `agent-workspaces sync "$AW_WORKSPACE_ID" --confirmed-by-user`.
 
 After dispatch, report the task id and what each agent was asked to do.

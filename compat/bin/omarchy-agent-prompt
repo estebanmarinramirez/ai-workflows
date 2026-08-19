@@ -123,7 +123,9 @@ while IFS= read -r active_state; do
   existing_status=$(jq -r '.status' "$active_state")
   existing_seam=$(jq -r '.seam // empty' "$active_state")
   [[ -n $existing_seam ]] || continue
-  [[ $existing_status =~ ^(completed|draft_pr)$ ]] && continue
+  # A seam is a write lease, not a permanent reservation. Once agents stop
+  # executing, their reports remain auditable without blocking new work.
+  [[ $existing_status == active ]] || continue
   [[ ${AW_PARENT_TASK_ID:-} == "$existing_id" ]] && continue
   if [[ $seam == general || $seam == shared || $existing_seam == general || $existing_seam == shared || $seam == "$existing_seam" ]]; then
     notify-send 'Agent Dispatcher' "Ownership conflict: '$seam' overlaps active task $existing_id ($existing_seam)."
