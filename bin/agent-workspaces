@@ -265,20 +265,57 @@ case "$cmd" in
     } >"$orchestrator_root/briefing.md"
     ;;
   dispatch)
-    workspace_id='' template='' objective='' lead=''
+    workspace_id='' template='' objective='' lead='' seam=general
     while (($#)); do
       case "$1" in
         --workspace) workspace_id=$2; shift 2 ;;
         --template) template=$2; shift 2 ;;
         --objective) objective=$2; shift 2 ;;
         --lead) lead=$2; shift 2 ;;
+        --seam) seam=$2; shift 2 ;;
         *) aw_die "unknown dispatch option: $1" ;;
       esac
     done
     [[ -n $workspace_id && -n $template && -n $objective && -n $lead ]] || \
       aw_die 'dispatch requires --workspace, --template, --objective, and --lead'
     exec env AW_WORKSPACE_ID="$workspace_id" AW_TEMPLATE="$template" AW_OBJECTIVE="$objective" \
-      AW_LEAD="$lead" AW_AUTO_CONFIRM=1 omarchy-agent-prompt
+      AW_LEAD="$lead" AW_SEAM="$seam" AW_AUTO_CONFIRM=1 omarchy-agent-prompt
+    ;;
+  sync)
+    workspace_id=${1:?workspace id}; shift
+    confirmed=false
+    while (($#)); do
+      case "$1" in
+        --confirmed-by-user) confirmed=true; shift ;;
+        *) aw_die "unknown sync option: $1" ;;
+      esac
+    done
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    manifest="$workspace_root/workspace.json"; repository=$(jq -r '.repository' "$manifest")
+    git -C "$repository" fetch --prune origin
+    base=$(aw_origin_base "$repository")
+    paths=(); roles=()
+    while IFS= read -r role; do
+      path="$workspace_root/$role"
+      [[ -d $path ]] || continue
+      roles+=("$role"); paths+=("$path")
+    done < <(jq -r '.providers[]' "$manifest")
+    printf 'Base: %s\n' "$base"
+    dirty_found=false
+    for index in "${!paths[@]}"; do
+      role=${roles[$index]}; path=${paths[$index]}
+      branch=$(git -C "$path" branch --show-current); dirty=$(git -C "$path" status --porcelain | wc -l)
+      read -r behind ahead < <(git -C "$path" rev-list --left-right --count "$base...HEAD")
+      printf '%-10s %-42s behind=%s ahead=%s dirty=%s\n' "$role" "$branch" "$behind" "$ahead" "$dirty"
+      ((dirty > 0)) && dirty_found=true
+    done
+    [[ $confirmed == true ]] || exit 0
+    [[ $dirty_found == false ]] || aw_die 'sync requires every worker worktree to be clean'
+    for index in "${!paths[@]}"; do
+      role=${roles[$index]}; path=${paths[$index]}
+      git -C "$path" rebase "$base" || { git -C "$path" rebase --abort 2>/dev/null || true; aw_die "rebase failed for $role"; }
+    done
+    aw_audit "$workspace_root" workspace.synced "$(jq -cn --arg base "$base" --arg machine "$(jq -r '.machine_id // "legacy"' "$manifest")" '{base:$base,machine_id:$machine}')" user:confirmed-via-orchestrator
     ;;
   next)
     task=${1:?task directory}
@@ -489,6 +526,10 @@ case "$cmd" in
     repository=$(jq -r '.repository' "$state"); title=$(jq -r '.pr.title // .objective' "$state"); branch=$(git -C "$repository" branch --show-current)
     [[ -n $branch ]] || aw_die 'integration checkout is detached'
     [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
+    git -C "$repository" fetch --prune origin
+    base=$(aw_origin_base "$repository")
+    read -r behind _ < <(git -C "$repository" rev-list --left-right --count "$base...HEAD")
+    ((behind == 0)) || aw_die "integration branch is $behind commit(s) behind $base; sync/rebase and revalidate before publishing"
     gh auth status >/dev/null 2>&1 || aw_die 'GitHub CLI is not authenticated'
     printf 'Repository: %s\nBranch: %s\nTitle: %s\n' "$repository" "$branch" "$title"
     if [[ $confirmed != true ]]; then gum confirm 'Push this branch and open a draft pull request?' || exit 0; fi

@@ -15,6 +15,18 @@ aw_require() { command -v "$1" >/dev/null 2>&1 || aw_die "missing dependency: $1
 aw_valid_state() { [[ $1 =~ ^(dispatched|in_progress|blocked|completed)$ ]]; }
 aw_valid_profile() { [[ $1 =~ ^(safe|trusted|yolo)$ ]]; }
 
+aw_origin_base() {
+  local repository=$1 base
+  base=$(git -C "$repository" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [[ -z $base ]]; then
+    for candidate in origin/main origin/master; do
+      git -C "$repository" show-ref --verify --quiet "refs/remotes/$candidate" && { base=$candidate; break; }
+    done
+  fi
+  [[ -n $base ]] || aw_die 'cannot determine the origin default branch'
+  printf '%s\n' "$base"
+}
+
 aw_atomic_jq() {
   local file=$1; shift
   local directory temporary
@@ -212,5 +224,6 @@ aw_collision_json() {
         critical:[$shared[]|select(test("(^|/)(Cargo.lock|package-lock.json|pnpm-lock.yaml|yarn.lock|.*migration.*)$";"i"))]}
     ]) as $overlaps |
     {base:$base,roles:$roles,merges:$merges,overlaps:$overlaps,
+      lockfile_policy:{manual_merge:false,instruction:"Resolve Cargo manifests first; take a known-good Cargo.lock side; regenerate affected packages with cargo update -p <crate> --precise <version>; run locked validation and review the diff.",files:([$overlaps[].files[] | select(endswith("Cargo.lock"))] | unique)},
       safe:(($overlaps|length)==0 and ([$merges[]|select(.clean==false)]|length)==0)}'
 }

@@ -115,6 +115,21 @@ task_id=$(date '+%Y%m%d-%H%M%S-%3N')
 task_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash/$set_slug/.coordination/$task_id"
 workspace_root=${task_root%/.coordination/*}
 profile=$(jq -r '.profile // "trusted"' "$workspace_root/workspace.json" 2>/dev/null || printf trusted)
+seam=${AW_SEAM:-general}
+allowed_paths=$(jq -c --arg seam "$seam" '.seams[$seam].paths // empty' "$HOME/.config/agent-workspaces/config.json")
+[[ -n $allowed_paths ]] || { notify-send 'Agent Dispatcher' "Unknown ownership seam: $seam"; exit 1; }
+while IFS= read -r active_state; do
+  existing_id=$(jq -r '.id' "$active_state")
+  existing_status=$(jq -r '.status' "$active_state")
+  existing_seam=$(jq -r '.seam // empty' "$active_state")
+  [[ -n $existing_seam ]] || continue
+  [[ $existing_status =~ ^(completed|draft_pr)$ ]] && continue
+  [[ ${AW_PARENT_TASK_ID:-} == "$existing_id" ]] && continue
+  if [[ $seam == general || $seam == shared || $existing_seam == general || $existing_seam == shared || $seam == "$existing_seam" ]]; then
+    notify-send 'Agent Dispatcher' "Ownership conflict: '$seam' overlaps active task $existing_id ($existing_seam)."
+    exit 1
+  fi
+done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
 
 declare -A assignments=()
 assignments["$lead"]=$(jq -r '.assignments.lead' "$template_file")
@@ -148,6 +163,8 @@ cp "$template_file" "$task_root/template.json"
   printf 'Stage: %s\n' "$stage"
   printf 'Template: %s · %s\n' "$template_id" "$(jq -r '.label' "$template_file")"
   [[ -n ${AW_PARENT_TASK_ID:-} ]] && printf 'Parent: %s\n' "$AW_PARENT_TASK_ID"
+  printf 'Ownership seam: %s\n' "$seam"
+  printf 'Allowed paths: %s\n' "$(jq -r 'join(", ")' <<<"$allowed_paths")"
   [[ -n ${AW_ISSUE:-} ]] && printf 'Issue: %s\n' "$AW_ISSUE"
   printf '\n'
   printf '## Objective\n\n%s\n\n' "$prompt"
@@ -190,6 +207,8 @@ jq -n \
   --arg repository "$repository" \
   --arg set "$set_slug" \
   --arg objective "$prompt" \
+  --arg seam "$seam" \
+  --argjson allowed_paths "$allowed_paths" \
   --arg stage "$stage" \
   --arg profile "$profile" \
   --arg template_id "$template_id" \
@@ -199,7 +218,7 @@ jq -n \
   --arg created_at "$(date --iso-8601=seconds)" \
   --argjson roles "$roles_json" \
   '{schema_version: 2, id: $id, workspace_id: $workspace_id, repository: $repository, set: $set,
-    objective: $objective, stage: $stage, template_id: $template_id, template_version: $template_version,
+    objective: $objective, seam: $seam, allowed_paths: $allowed_paths, stage: $stage, template_id: $template_id, template_version: $template_version,
     profile: $profile, status: "active", parent_id: $parent_id, issue: $issue, pr: {},
     created_at: $created_at, updated_at: $created_at, roles: $roles,
     gates: {triage_approved: false, execution_approved: false, integration_approved: false, pr_prepared: false, pr_approved: false},

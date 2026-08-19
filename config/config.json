@@ -14,5 +14,12 @@
   "archive_after_days": 30,
   "delete_archives_automatically": false,
   "project_roots": ["~/Work", "~/Projects", "~/Code", "~/Developer"],
+  "seams": {
+    "general": {"label": "General repository work", "paths": ["**"]},
+    "desktop": {"label": "Desktop and platform integration", "paths": ["desktop/**", "platform/**", "**/omarchy/**", "**/*omarchy*"]},
+    "execution": {"label": "Execution core and exchange integrations", "paths": ["execution/**", "exchanges/**", "connectors/**"]},
+    "tui": {"label": "Terminal UI and information architecture", "paths": ["tui/**", "ui/**"]},
+    "shared": {"label": "Explicitly shared surfaces", "paths": ["Cargo.lock", "**/palette/**", "**/*command*"]}
+  },
   "providers": ["claude", "codex", "grok"]
 }

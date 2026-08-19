@@ -22,7 +22,8 @@ agent-workspaces monitor-start WORKSPACE_ID
 agent-workspaces monitor-stop WORKSPACE_ID
 agent-workspaces attention WORKSPACE_ID
 agent-workspaces event-review WORKSPACE_ID
-agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --objective TEXT
+agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --seam SEAM --objective TEXT
+agent-workspaces sync WORKSPACE_ID [--confirmed-by-user]
 agent-workspaces next TASK_DIR
 agent-workspaces advance TASK_DIR ACTION --confirmed-by-user [--title TITLE] [--evidence TEXT]
 agent-workspaces integrate TASK_DIR --commit SHA [--commit SHA...] --confirmed-by-user

@@ -14,7 +14,14 @@ This task is coordinated by Agent Workspaces.
 - Work only in the assigned worktree.
 - Never edit the integration checkout, another agent's worktree, the task manifest, or another agent's status file.
 - One implementation lead owns production changes. Reviewers inspect independently; verifiers change only tests or fixtures when explicitly required.
+- Stay inside the task's declared ownership seam and allowed paths. Treat paths outside that seam as read-only unless the task explicitly identifies a shared-surface exception.
 - Do not merge, rebase, push, open a PR, or publish unless the task explicitly authorizes that transition.
+
+## Synchronization and shared files
+
+- Fetch and inspect divergence before starting a new implementation cycle and before publication. Rebase only from a clean worktree and only through the confirmed workspace sync transition.
+- Never hand-merge `Cargo.lock`. Resolve manifest intent first, take a known-good lockfile side, regenerate only affected packages with `cargo update -p <crate> --precise <version>` when possible, then run locked validation and review the lockfile diff.
+- Avoid a bare `cargo update` unless the task explicitly accepts unrelated dependency movement.
 
 ## Commands and evidence
 
@@ -27,4 +34,3 @@ This task is coordinated by Agent Workspaces.
 
 The first `State:` line must be one of: `dispatched`, `in-progress`, `blocked`, or `completed`.
 Keep findings, changes or commits, validation, and blockers concise and auditable.
-

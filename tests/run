@@ -9,6 +9,7 @@ check() { if "$@"; then printf 'ok - %s\n' "$*"; else printf 'not ok - %s\n' "$*
 check bash -n "$root/bin/agent-workspaces" "$root/lib/core.sh" "$root/packaging/install" "$root/packaging/migrate" "$root/packaging/rollback"
 check bash -n "$root"/compat/bin/*
 for file in "$root/config/config.json" "$root/config/providers"/*.json "$root/schemas"/*.json; do check jq -e . "$file" >/dev/null; done
+check jq -e '.seams.general.paths == ["**"] and (.seams.shared.paths | index("Cargo.lock") != null)' "$root/config/config.json"
 
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
@@ -17,6 +18,19 @@ cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
 cp "$root/config/config.json" "$fixture/config/agent-workspaces/config.json"
 export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
 source "$root/lib/core.sh"
+
+origin="$fixture/origin.git"
+repository="$fixture/repository"
+git init --bare --initial-branch=main "$origin" >/dev/null
+git init --initial-branch=main "$repository" >/dev/null
+git -C "$repository" config user.name fixture
+git -C "$repository" config user.email fixture@example.invalid
+git -C "$repository" commit --allow-empty -m initial >/dev/null
+git -C "$repository" remote add origin "$origin"
+git -C "$repository" push -u origin main >/dev/null
+git -C "$origin" symbolic-ref HEAD refs/heads/main
+git -C "$repository" fetch origin >/dev/null
+[[ $(aw_origin_base "$repository") == origin/main ]] || { printf 'not ok - origin default branch\n'; failures=$((failures+1)); }
 
 jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex","grok"]}' \
   >"$fixture/data/agent-workspaces/repo-hash/set/workspace.json"

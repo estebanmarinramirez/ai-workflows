@@ -43,6 +43,8 @@ Translate natural requests into clear workflow actions. Typical requests include
 
 Before dispatching, briefly state the template, lead, and objective. Then use:
 
-`agent-workspaces dispatch --workspace "$AW_WORKSPACE_ID" --template TEMPLATE --lead ROLE --objective "OBJECTIVE"`
+`agent-workspaces dispatch --workspace "$AW_WORKSPACE_ID" --template TEMPLATE --lead ROLE --seam SEAM --objective "OBJECTIVE"`
+
+Choose the narrowest configured ownership seam. If another active task owns the same seam or either task owns `general`/`shared`, do not work around the rejection; reconcile scope with the user. Before a new implementation session, show `agent-workspaces sync "$AW_WORKSPACE_ID"`. Rebase only after the user explicitly confirms, using `agent-workspaces sync "$AW_WORKSPACE_ID" --confirmed-by-user`.
 
 After dispatch, report the task id and what each agent was asked to do.
