@@ -198,18 +198,16 @@ create_worktree() {
       gum style --foreground=196 "Existing path is not a Git worktree: $path"
       return 1
     fi
-    local existing_branch
     local existing_common_dir
     existing_common_dir=$(cd "$path" && realpath "$(git rev-parse --git-common-dir)")
     if [[ $existing_common_dir != "$repo_common_dir" ]]; then
       gum style --foreground=196 "Worktree belongs to another repository: $path"
       return 1
     fi
-    existing_branch=$(git -C "$path" branch --show-current)
-    if [[ $existing_branch != "agents/$set_slug/$agent" && $existing_branch != "$branch" ]]; then
-      gum style --foreground=196 "Worktree branch mismatch: $path uses $existing_branch"
-      return 1
-    fi
+    # Workflow transitions may intentionally move an existing role worktree
+    # onto feature, review, or verification branches. Repository identity is
+    # the invariant here; requiring its bootstrap branch prevents resuming a
+    # perfectly valid workspace after those transitions.
     return 0
   fi
 

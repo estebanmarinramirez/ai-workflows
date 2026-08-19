@@ -143,7 +143,7 @@ aw_provider_command() {
 
 aw_workspace_risks() {
   local workspace_id=$1 session repository role worktree branch dirty ahead task_count active_agents=0
-  repository=$(tmux list-sessions -F $'#{@aw_workspace_id}\t#{@aw_repository}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$1==id {print $2; exit}')
+  repository=$(tmux list-sessions -F $'#{@aw_workspace_id}\t#{@aw_repository}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$1==id {print $2; exit}' || true)
   task_count=0
   while IFS= read -r state; do
     [[ $(jq -r '.workspace_id' "$state") == "$workspace_id" ]] || continue
