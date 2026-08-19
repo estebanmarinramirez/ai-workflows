@@ -144,8 +144,11 @@ case "$cmd" in
       while IFS= read -r state; do
         found=true
         task=$(dirname "$state")
+        aw_task_refresh "$task" >/dev/null || true
         jq -r '"- `" + .id + "` · **" + .status + "** · " + .stage + " · " + .objective,
           (.roles | to_entries[] | "  - " + .key + ": " + (.value.state // "dispatched"))' "$state"
+        next_label=$(aw_next_actions_json "$task" | jq -r '.[0].label // "No further action"')
+        printf '  - Next: %s\n' "$next_label"
       done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null | sort -r)
       [[ $found == true ]] || printf '_No workflows dispatched yet._\n'
       printf '\n## Recent activity\n\n'
@@ -178,11 +181,45 @@ case "$cmd" in
         previous=''; [[ -f $signature_file ]] && read -r previous <"$signature_file"
         printf '%s\n' "$signature" >"$signature_file"
         if [[ -n $previous && $signature != "$previous" ]]; then
+          "$0" attention "$workspace_id" >/dev/null 2>&1 || true
           "$0" event-review "$workspace_id" >/dev/null 2>&1 &
         fi
       fi
       sleep "$interval"
     done
+    ;;
+  attention)
+    workspace_id=${1:?workspace id}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    attention_file="$workspace_root/.orchestrator/attention.md"
+    temporary=$(mktemp "$workspace_root/.orchestrator/.attention.md.XXXXXX")
+    {
+      printf '# Human decisions\n\nUpdated: %s\n\n' "$(aw_now)"
+      found=false
+      while IFS= read -r state; do
+        task=$(dirname "$state"); status=$(jq -r '.status' "$state")
+        action=$(aw_next_actions_json "$task" | jq -c '.[0] // empty')
+        [[ -n $action ]] || continue
+        action_id=$(jq -r '.id' <<<"$action")
+        [[ $action_id != wait ]] || continue
+        found=true
+        printf '## %s · %s\n\n' "$(basename "$task")" "$status"
+        printf '%s\n\n' "$(jq -r '.label' <<<"$action")"
+        objective=$(jq -r '(.objective // "") | gsub("[\\r\\n]+"; " ") | if length > 420 then .[:417] + "..." else . end' "$state")
+        printf 'Objective: %s\n\n' "$objective"
+        break
+      done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null | sort -r)
+      [[ $found == true ]] || printf '_No human decision is currently required._\n'
+    } >"$temporary"
+    new_signature=$(sed '/^Updated:/d' "$temporary" | sha256sum | awk '{print $1}')
+    old_signature=''; [[ -f $attention_file ]] && old_signature=$(sed '/^Updated:/d' "$attention_file" | sha256sum | awk '{print $1}')
+    mv "$temporary" "$attention_file"
+    if [[ $new_signature != "$old_signature" ]] && rg -q '^## ' "$attention_file"; then
+      headline=$(awk '/^## / {sub(/^## /, ""); print; exit}' "$attention_file")
+      recommendation=$(awk 'found && NF {print; exit} /^## / {found=1}' "$attention_file")
+      notify-send -a 'Agent Workspaces' 'Workflow decision required' "$headline · $recommendation" 2>/dev/null || true
+    fi
+    printf '%s\n' "$attention_file"
     ;;
   monitor-start)
     workspace_id=${1:?workspace id}
@@ -243,6 +280,73 @@ case "$cmd" in
     exec env AW_WORKSPACE_ID="$workspace_id" AW_TEMPLATE="$template" AW_OBJECTIVE="$objective" \
       AW_LEAD="$lead" AW_AUTO_CONFIRM=1 omarchy-agent-prompt
     ;;
+  next)
+    task=${1:?task directory}
+    "$0" refresh "$task" >/dev/null
+    state="$task/state.json"
+    jq -n --arg task "$(basename "$task")" --arg status "$(jq -r '.status' "$state")" \
+      --arg stage "$(jq -r '.stage' "$state")" --argjson actions "$(aw_next_actions_json "$task")" \
+      '{task_id:$task,status:$status,stage:$stage,actions:$actions}'
+    ;;
+  advance)
+    task=${1:?task directory}; action=${2:?action}; shift 2
+    confirmed=false; title=''; evidence=''
+    while (($#)); do
+      case "$1" in
+        --confirmed-by-user) confirmed=true; shift ;;
+        --title) title=$2; shift 2 ;;
+        --evidence) evidence=$2; shift 2 ;;
+        *) aw_die "unknown advance option: $1" ;;
+      esac
+    done
+    [[ $confirmed == true ]] || aw_die 'advance requires --confirmed-by-user after explicit human approval'
+    state="$task/state.json"; [[ -f $state ]] || aw_die "missing task: $task"
+    "$0" refresh "$task" >/dev/null
+    status=$(jq -r '.status' "$state"); now=$(aw_now); workspace_root=${task%/.coordination/*}
+    case "$action" in
+      approve-integration)
+        [[ $status == awaiting_integration ]] || aw_die "approve-integration requires awaiting_integration, found $status"
+        jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'all assigned roles must be completed'
+        collision=$(aw_collision_json "$task")
+        printf '%s\n' "$collision" | jq . >"$task/collision-report.json"
+        [[ $(jq -r '.safe' <<<"$collision") == true ]] || aw_die 'agent branches have unresolved integration collisions'
+        temporary=$(mktemp "$task/.state.json.XXXXXX")
+        jq --arg at "$now" '.gates.integration_approved=true | .status="integration_ready" | .updated_at=$at | .transitions += [{from:"awaiting_integration",to:"integration_ready",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
+        aw_audit "$workspace_root" integration.approved '{"collision_check":"passed"}' user:confirmed-via-orchestrator
+        ;;
+      record-integration)
+        [[ $status == integration_ready ]] || aw_die "record-integration requires integration_ready, found $status"
+        [[ -n ${evidence//[[:space:]]/} ]] || aw_die 'record-integration requires --evidence'
+        integration_branch=$(jq -r '.integration.branch // empty' "$state")
+        [[ -n $integration_branch ]] || aw_die 'no integration commit plan has been applied'
+        repository=$(jq -r '.repository' "$state")
+        [[ $(git -C "$repository" branch --show-current) == "$integration_branch" ]] || aw_die 'integration checkout is not on the recorded integration branch'
+        [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
+        printf '# Integration result\n\n%s\n' "$evidence" >"$task/integration-result.md"
+        temporary=$(mktemp "$task/.state.json.XXXXXX")
+        jq --arg at "$now" '.status="awaiting_pr" | .updated_at=$at | .transitions += [{from:"integration_ready",to:"awaiting_pr",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
+        aw_audit "$workspace_root" integration.recorded "$(jq -cn --arg evidence "$evidence" '{evidence:$evidence}')" user:confirmed-via-orchestrator
+        ;;
+      prepare-pr)
+        [[ $status == awaiting_pr ]] || aw_die "prepare-pr requires awaiting_pr, found $status"
+        [[ -n ${title//[[:space:]]/} ]] || aw_die 'prepare-pr requires --title'
+        printf '# PR readiness\n\nTitle: %s\n\n- [ ] Integration commits reviewed\n- [ ] Full validation gate passed\n- [ ] Formatting and lint passed\n- [ ] Issue references verified\n- [ ] Human approval to publish\n' "$title" >"$task/pr-checklist.md"
+        [[ -f $task/pr-body.md ]] || printf 'Agent Workspaces task `%s`. Evidence and role reports are recorded in the workflow.\n' "$(basename "$task")" >"$task/pr-body.md"
+        temporary=$(mktemp "$task/.state.json.XXXXXX")
+        jq --arg at "$now" --arg title "$title" '.gates.pr_prepared=true | .pr.title=$title | .status="awaiting_pr_review" | .updated_at=$at | .transitions += [{from:"awaiting_pr",to:"awaiting_pr_review",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
+        aw_audit "$workspace_root" pr.prepared "$(jq -cn --arg title "$title" '{title:$title}')" user:confirmed-via-orchestrator
+        ;;
+      approve-pr)
+        [[ $status == awaiting_pr_review ]] || aw_die "approve-pr requires awaiting_pr_review, found $status"
+        [[ -f $task/integration-result.md ]] || aw_die 'integration evidence is missing'
+        temporary=$(mktemp "$task/.state.json.XXXXXX")
+        jq --arg at "$now" '.gates.pr_approved=true | .status="ready_for_pr" | .updated_at=$at | .transitions += [{from:"awaiting_pr_review",to:"ready_for_pr",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
+        aw_audit "$workspace_root" pr.approved '{}' user:confirmed-via-orchestrator
+        ;;
+      *) aw_die "unsupported advance action: $action" ;;
+    esac
+    "$0" next "$task"
+    ;;
   dashboard)
     mapfile -t ids < <(tmux list-sessions -F '#{@aw_workspace_id}' 2>/dev/null | awk 'NF' | sort -u)
     ((${#ids[@]})) || aw_die 'no live Agent Workspaces'
@@ -259,6 +363,58 @@ case "$cmd" in
     result=$(aw_collision_json "$task")
     printf '%s\n' "$result" | jq .
     if [[ $(jq -r '.safe' <<<"$result") != true ]]; then exit 2; fi
+    ;;
+  integrate)
+    task=${1:?task directory}; shift
+    confirmed=false; commits=()
+    while (($#)); do
+      case "$1" in
+        --confirmed-by-user) confirmed=true; shift ;;
+        --commit) commits+=("$2"); shift 2 ;;
+        *) aw_die "unknown integrate option: $1" ;;
+      esac
+    done
+    [[ $confirmed == true ]] || aw_die 'integrate requires --confirmed-by-user after explicit human approval'
+    ((${#commits[@]})) || aw_die 'integrate requires at least one --commit'
+    state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
+    [[ $(jq -r '.status' "$state") == integration_ready ]] || aw_die 'task must be integration_ready'
+    jq -e '.gates.integration_approved==true' "$state" >/dev/null || aw_die 'integration handoff is not approved'
+    repository=$(jq -r '.repository' "$state")
+    [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
+    original_branch=$(git -C "$repository" branch --show-current)
+    [[ -n $original_branch ]] || aw_die 'integration checkout is detached'
+    for commit in "${commits[@]}"; do
+      git -C "$repository" cat-file -e "$commit^{commit}" 2>/dev/null || aw_die "unknown commit: $commit"
+      jq -e --arg commit "$commit" '[.roles[].status_json] | map(select(. != null))' "$state" >/dev/null
+      reported=false
+      while IFS= read -r status_json; do
+        [[ -f $status_json ]] || continue
+        jq -e --arg commit "$commit" '.commits | index($commit) != null' "$status_json" >/dev/null && { reported=true; break; }
+      done < <(jq -r '.roles[].status_json // empty' "$state")
+      [[ $reported == true ]] || aw_die "commit was not reported by an assigned agent: $commit"
+    done
+    set_slug=$(jq -r '.set' "$state"); task_id=$(basename "$task")
+    branch=$(sed -E 's/[^[:alnum:]_.\/-]+/-/g' <<<"integration/$set_slug/$task_id")
+    git -C "$repository" show-ref --verify --quiet "refs/heads/$branch" && aw_die "integration branch already exists: $branch"
+    git -C "$repository" switch -c "$branch"
+    integrated=()
+    for commit in "${commits[@]}"; do
+      if git -C "$repository" merge-base --is-ancestor "$commit" HEAD; then continue; fi
+      if ! git -C "$repository" cherry-pick "$commit"; then
+        git -C "$repository" cherry-pick --abort 2>/dev/null || true
+        git -C "$repository" switch "$original_branch" >/dev/null 2>&1 || true
+        git -C "$repository" branch -D "$branch" >/dev/null 2>&1 || true
+        aw_die "integration conflict while cherry-picking $commit; checkout restored"
+      fi
+      integrated+=("$commit")
+    done
+    commits_json=$(printf '%s\n' "${commits[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')
+    jq -n --arg branch "$branch" --arg base "$original_branch" --arg at "$(aw_now)" --argjson commits "$commits_json" \
+      '{branch:$branch,base_branch:$base,selected_commits:$commits,integrated_at:$at}' >"$task/integration-plan.json"
+    aw_atomic_jq "$state" --arg branch "$branch" --arg at "$(aw_now)" --argjson commits "$commits_json" \
+      '.integration={branch:$branch,selected_commits:$commits,integrated_at:$at} | .updated_at=$at'
+    aw_audit "${task%/.coordination/*}" integration.commits.selected "$(jq -cn --arg branch "$branch" --argjson commits "$commits_json" '{branch:$branch,commits:$commits}')" user:confirmed-via-orchestrator
+    printf 'Integration branch: %s\nSelected commits: %s\n' "$branch" "${commits[*]}"
     ;;
   end)
     workspace_id=${1:?workspace id}
@@ -319,7 +475,12 @@ case "$cmd" in
     done < <(find "$AW_DATA_HOME" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null)
     ;;
   publish)
-    task=${1:?task directory}; state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
+    task=${1:?task directory}; shift
+    confirmed=false
+    while (($#)); do
+      case "$1" in --confirmed-by-user) confirmed=true; shift ;; *) aw_die "unknown publish option: $1" ;; esac
+    done
+    state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
     [[ $(jq -r '.status' "$state") == ready_for_pr ]] || aw_die 'task must be ready_for_pr'
     jq -e '.gates.integration_approved==true and .gates.pr_prepared==true and .gates.pr_approved==true' "$state" >/dev/null || aw_die 'integration and PR gates are not all approved'
     jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'every required role must be completed'
@@ -330,7 +491,7 @@ case "$cmd" in
     [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
     gh auth status >/dev/null 2>&1 || aw_die 'GitHub CLI is not authenticated'
     printf 'Repository: %s\nBranch: %s\nTitle: %s\n' "$repository" "$branch" "$title"
-    gum confirm 'Push this branch and open a draft pull request?' || exit 0
+    if [[ $confirmed != true ]]; then gum confirm 'Push this branch and open a draft pull request?' || exit 0; fi
     git -C "$repository" push -u origin "$branch"
     body_file="$task/pr-body.md"; [[ -f $body_file ]] || printf 'Agent Workspaces task `%s`. Evidence is recorded locally.\n' "$(basename "$task")" >"$body_file"
     url=$(cd "$repository" && gh pr create --draft --title "$title" --body-file "$body_file")

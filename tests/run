@@ -49,5 +49,25 @@ AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >
 signature_two=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
 [[ $signature_one == "$signature_two" ]] || { printf 'not ok - timestamp-free event signature\n'; failures=$((failures+1)); }
 
+jq '.status="awaiting_pr" | .gates.integration_approved=true' "$task/state.json" >"$task/state.tmp" && mv "$task/state.tmp" "$task/state.json"
+printf '# Integration result\n\nvalidated\n' >"$task/integration-result.md"
+[[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" next "$task" | jq -r '.actions[0].id') == prepare-pr ]] || { printf 'not ok - next action contract\n'; failures=$((failures+1)); }
+if AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" advance "$task" prepare-pr --title test >/dev/null 2>&1; then
+  printf 'not ok - human confirmation required\n'; failures=$((failures+1))
+else
+  printf 'ok - human confirmation required\n'
+fi
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" advance "$task" prepare-pr --title 'Test PR' --confirmed-by-user >/dev/null
+[[ $(jq -r '.status' "$task/state.json") == awaiting_pr_review ]] || { printf 'not ok - prepare PR transition\n'; failures=$((failures+1)); }
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" advance "$task" approve-pr --confirmed-by-user >/dev/null
+[[ $(jq -r '.status' "$task/state.json") == ready_for_pr ]] || { printf 'not ok - approve PR transition\n'; failures=$((failures+1)); }
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" attention x:set >/dev/null
+[[ -s $fixture/data/agent-workspaces/repo-hash/set/.orchestrator/attention.md ]] || { printf 'not ok - human attention card\n'; failures=$((failures+1)); }
+if AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" integrate "$task" --commit deadbeef >/dev/null 2>&1; then
+  printf 'not ok - integration confirmation required\n'; failures=$((failures+1))
+else
+  printf 'ok - integration confirmation required\n'
+fi
+
 printf '%s test failure(s)\n' "$failures"
 exit "$failures"

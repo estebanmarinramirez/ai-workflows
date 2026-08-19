@@ -52,6 +52,8 @@ aw_audit() {
   flock "$audit_lock"
   jq -cn --arg at "$(aw_now)" --arg event "$event" --arg actor "$actor" --argjson details "$details" \
     '{schema_version:1,at:$at,event:$event,actor:$actor,details:$details}' >>"$audit_file"
+  flock -u "$audit_lock"
+  exec {audit_lock}>&-
 }
 
 aw_task_refresh() {
@@ -83,6 +85,17 @@ aw_task_refresh() {
       execute|verify) next=awaiting_integration ;;
       integrate) next=awaiting_pr ;;
     esac
+  elif [[ $current == blocked && $any_blocked == false ]]; then
+    if [[ $all_completed == true ]]; then
+      stage=$(jq -r '.stage' <<<"$state")
+      case "$stage" in
+        review) next=awaiting_triage ;;
+        execute|verify) next=awaiting_integration ;;
+        integrate) next=awaiting_pr ;;
+      esac
+    else
+      next=active
+    fi
   fi
   now=$(aw_now)
   if [[ $next != "$current" ]]; then
@@ -95,6 +108,8 @@ aw_task_refresh() {
   local temporary
   temporary=$(mktemp "$task_dir/.state.json.XXXXXX")
   printf '%s\n' "$state" >"$temporary" && mv "$temporary" "$state_file"
+  flock -u "$task_lock"
+  exec {task_lock}>&-
   printf '%s\n' "$next"
 }
 
@@ -140,6 +155,31 @@ aw_workspace_risks() {
     fi
   done < <(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$3==id {print $1 "\t" $2}')
   printf 'Running agents: %s\n' "$active_agents"
+}
+
+aw_next_actions_json() {
+  local task_dir=$1 state_file="$1/state.json" status
+  [[ -f $state_file ]] || aw_die "missing task: $task_dir"
+  status=$(jq -r '.status' "$state_file")
+  case "$status" in
+    active) jq -cn '[{id:"wait",label:"Agents are still working",mutating:false}]' ;;
+    blocked) jq -cn '[{id:"resolve-blocker",label:"Review blockers and dispatch a focused follow-up",mutating:false}]' ;;
+    awaiting_triage) jq -cn '[{id:"dispatch-execution",label:"Approve scope and dispatch an execution cycle",mutating:true},{id:"complete-review",label:"Close the review without implementation",mutating:true}]' ;;
+    awaiting_integration) jq -cn '[{id:"approve-integration",label:"Validate collisions and approve an integration handoff",mutating:true},{id:"dispatch-verification",label:"Request another independent verification cycle",mutating:true}]' ;;
+    integration_ready)
+      if jq -e '(.integration.branch // "") != ""' "$state_file" >/dev/null; then
+        jq -cn '[{id:"record-integration",label:"Record validation evidence for the integrated branch",mutating:true}]'
+      else
+        jq -cn '[{id:"integrate",label:"Integrate an explicitly selected commit plan",mutating:true}]'
+      fi
+      ;;
+    awaiting_pr) jq -cn '[{id:"prepare-pr",label:"Prepare PR title, body, and readiness checklist",mutating:true}]' ;;
+    awaiting_pr_review) jq -cn '[{id:"approve-pr",label:"Approve the validated integration branch for publication",mutating:true}]' ;;
+    ready_for_pr) jq -cn '[{id:"publish",label:"Push and open a draft pull request",mutating:true,external:true}]' ;;
+    draft_pr) jq -cn '[{id:"review-pr",label:"Review the draft pull request and CI",mutating:false}]' ;;
+    completed) jq -cn '[]' ;;
+    *) jq -cn --arg status "$status" '[{id:"inspect",label:("Inspect unsupported workflow state: " + $status),mutating:false}]' ;;
+  esac
 }
 
 aw_collision_json() {

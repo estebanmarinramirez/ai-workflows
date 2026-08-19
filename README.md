@@ -20,15 +20,19 @@ agent-workspaces snapshot WORKSPACE_ID [--write]
 agent-workspaces monitor WORKSPACE_ID
 agent-workspaces monitor-start WORKSPACE_ID
 agent-workspaces monitor-stop WORKSPACE_ID
+agent-workspaces attention WORKSPACE_ID
 agent-workspaces event-review WORKSPACE_ID
 agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --objective TEXT
+agent-workspaces next TASK_DIR
+agent-workspaces advance TASK_DIR ACTION --confirmed-by-user [--title TITLE] [--evidence TEXT]
+agent-workspaces integrate TASK_DIR --commit SHA [--commit SHA...] --confirmed-by-user
 agent-workspaces status --task DIR --role ROLE --state STATE [options]
 agent-workspaces refresh TASK_DIR
 agent-workspaces collision TASK_DIR
 agent-workspaces recover WORKSPACE_ID [ROLE]
 agent-workspaces end WORKSPACE_ID
 agent-workspaces archive
-agent-workspaces publish TASK_DIR
+agent-workspaces publish TASK_DIR [--confirmed-by-user]
 agent-workspaces migrate
 ```
 
