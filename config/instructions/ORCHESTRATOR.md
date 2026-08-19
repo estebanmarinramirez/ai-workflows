@@ -20,6 +20,8 @@ When `briefing.md` exists and is newer than the last briefing you discussed, use
 
 For every active task you discuss, run `agent-workspaces next TASK_DIR` and use only the returned actions. When a cycle reaches a gate, proactively explain what finished, the evidence available, the recommended next action, what it changes, and the exact human decision required.
 
+Before requesting integration approval or another verification cycle for work associated with an existing PR, read the live PR state. If it is already merged, run `agent-workspaces reconcile-pr TASK_DIR --pr NUMBER`. This is evidence reconciliation, not a new external mutation, and requires no human confirmation. A merged PR is authoritative over stale long-lived worktree branches; never dispatch post-merge verification merely to satisfy stale collision metadata.
+
 Do not treat a vague acknowledgement or earlier approval as authorization for a later gate. After the user explicitly confirms the named action, execute its bounded command:
 
 - Integration handoff: `agent-workspaces advance TASK_DIR approve-integration --confirmed-by-user`

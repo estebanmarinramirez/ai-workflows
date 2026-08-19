@@ -401,6 +401,33 @@ case "$cmd" in
     printf '%s\n' "$result" | jq .
     if [[ $(jq -r '.safe' <<<"$result") != true ]]; then exit 2; fi
     ;;
+  reconcile-pr)
+    task=${1:?task directory}; shift
+    pr=''
+    while (($#)); do
+      case "$1" in
+        --pr) pr=$2; shift 2 ;;
+        *) aw_die "unknown reconcile-pr option: $1" ;;
+      esac
+    done
+    [[ $pr =~ ^[0-9]+$ ]] || aw_die 'reconcile-pr requires a numeric --pr'
+    state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
+    repository=$(jq -r '.repository' "$state")
+    pr_json=$(cd "$repository" && gh pr view "$pr" --json number,url,state,mergedAt,mergeCommit,statusCheckRollup) || aw_die "cannot read PR #$pr"
+    [[ $(jq -r '.state' <<<"$pr_json") == MERGED && $(jq -r '.mergedAt // empty' <<<"$pr_json") != '' ]] || aw_die "PR #$pr is not merged"
+    failing_checks=$(jq '[.statusCheckRollup[]? | select((.conclusion // .state // "") as $c | ($c != "SUCCESS" and $c != "SKIPPED" and $c != "NEUTRAL"))] | length' <<<"$pr_json")
+    merge_oid=$(jq -r '.mergeCommit.oid // empty' <<<"$pr_json"); merged_at=$(jq -r '.mergedAt' <<<"$pr_json"); url=$(jq -r '.url' <<<"$pr_json")
+    now=$(aw_now); previous=$(jq -r '.status' "$state")
+    aw_atomic_jq "$state" --argjson number "$pr" --arg url "$url" --arg merged_at "$merged_at" --arg merge_oid "$merge_oid" \
+      --arg at "$now" --arg from "$previous" --argjson failing_checks "$failing_checks" \
+      '.status="completed" | .stage="complete" | .updated_at=$at |
+       .pr += {number:$number,url:$url,state:"MERGED",merged_at:$merged_at,merge_commit:$merge_oid,failing_checks:$failing_checks} |
+       .transitions += [{from:$from,to:"completed",at:$at,actor:"system:github-reconciliation"}]'
+    aw_audit "${task%/.coordination/*}" pr.merged.reconciled \
+      "$(jq -cn --arg task "$(basename "$task")" --argjson pr "$pr" --arg url "$url" --arg merge_commit "$merge_oid" --argjson failing_checks "$failing_checks" '{task_id:$task,pr:$pr,url:$url,merge_commit:$merge_commit,failing_checks:$failing_checks}')" \
+      system:github-reconciliation
+    printf 'Task %s reconciled to completed from merged PR #%s (%s, failing checks recorded: %s).\n' "$(basename "$task")" "$pr" "$merge_oid" "$failing_checks"
+    ;;
   integrate)
     task=${1:?task directory}; shift
     confirmed=false; commits=()

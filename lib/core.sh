@@ -195,24 +195,42 @@ aw_next_actions_json() {
 }
 
 aw_collision_json() {
-  local task_dir=$1 state_file="$1/state.json" repository base role worktree
+  local task_dir=$1 state_file="$1/state.json" repository base role worktree status_json
   [[ -f $state_file ]] || aw_die "missing task: $task_dir"
   repository=$(jq -r '.repository' "$state_file")
   base=$(git -C "$repository" rev-parse HEAD)
   local entries='[]'
-  while IFS=$'\t' read -r role worktree; do
-    local files
-    files=$(git -C "$worktree" diff --name-only "$base...HEAD" 2>/dev/null | jq -Rsc 'split("\n")|map(select(length>0))')
-    entries=$(jq --arg role "$role" --arg worktree "$worktree" --argjson files "$files" '. + [{role:$role,worktree:$worktree,files:$files}]' <<<"$entries")
-  done < <(jq -r '.roles | to_entries[] | [.key,.value.worktree] | @tsv' "$state_file")
+  while IFS=$'\t' read -r role worktree status_json; do
+    local files commits commit commit_files
+    files='[]'; commits='[]'
+    if [[ -f $status_json ]]; then
+      files=$(jq -c '.changed_files // []' "$status_json")
+      commits=$(jq -c '.commits // []' "$status_json")
+      while IFS= read -r commit; do
+        [[ -n $commit ]] || continue
+        git -C "$worktree" cat-file -e "$commit^{commit}" 2>/dev/null || continue
+        commit_files=$(git -C "$worktree" show --format= --name-only "$commit" | jq -Rsc 'split("\n")|map(select(length>0))')
+        files=$(jq -c --argjson extra "$commit_files" '. + $extra | unique' <<<"$files")
+      done < <(jq -r '.[]' <<<"$commits")
+    fi
+    entries=$(jq --arg role "$role" --arg worktree "$worktree" --argjson files "$files" --argjson commits "$commits" \
+      '. + [{role:$role,worktree:$worktree,files:$files,commits:$commits}]' <<<"$entries")
+  done < <(jq -r '.roles | to_entries[] | [.key,.value.worktree,(.value.status_json // .value.status_file // "")] | @tsv' "$state_file")
   local merges='[]' count i j left_role right_role left_tree right_tree left_head right_head clean
   count=$(jq 'length' <<<"$entries")
   for ((i=0; i<count; i++)); do
     for ((j=i+1; j<count; j++)); do
       left_role=$(jq -r ".[$i].role" <<<"$entries"); right_role=$(jq -r ".[$j].role" <<<"$entries")
       left_tree=$(jq -r ".[$i].worktree" <<<"$entries"); right_tree=$(jq -r ".[$j].worktree" <<<"$entries")
-      left_head=$(git -C "$left_tree" rev-parse HEAD); right_head=$(git -C "$right_tree" rev-parse HEAD)
-      if git -C "$repository" merge-tree --write-tree --quiet "$left_head" "$right_head" >/dev/null 2>&1; then clean=true; else clean=false; fi
+      left_head=$(jq -r ".[$i].commits[-1] // empty" <<<"$entries")
+      right_head=$(jq -r ".[$j].commits[-1] // empty" <<<"$entries")
+      if [[ -z $left_head || -z $right_head ]]; then
+        clean=true
+      elif git -C "$repository" merge-tree --write-tree --quiet "$left_head" "$right_head" >/dev/null 2>&1; then
+        clean=true
+      else
+        clean=false
+      fi
       merges=$(jq --arg left "$left_role" --arg right "$right_role" --argjson clean "$clean" '. + [{left:$left,right:$right,clean:$clean}]' <<<"$merges")
     done
   done

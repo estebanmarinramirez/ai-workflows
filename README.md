@@ -30,6 +30,7 @@ agent-workspaces integrate TASK_DIR --commit SHA [--commit SHA...] --confirmed-b
 agent-workspaces status --task DIR --role ROLE --state STATE [options]
 agent-workspaces refresh TASK_DIR
 agent-workspaces collision TASK_DIR
+agent-workspaces reconcile-pr TASK_DIR --pr NUMBER
 agent-workspaces recover WORKSPACE_ID [ROLE]
 agent-workspaces end WORKSPACE_ID
 agent-workspaces archive
