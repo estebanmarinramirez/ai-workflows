@@ -77,7 +77,8 @@ if [[ $role != integration ]]; then
   fi
   # Keep an interactive shell in the pane if the agent exits, so the tmux
   # session remains available for review and manual relaunching.
-  tmux new-session -d -s "$session" -c "$directory" "bash -lc '$launch; agent-workspaces remember-session '$session' '$provider' '$directory' >/dev/null 2>&1 || true; exec bash'"
+  post_launch="$launch; agent-workspaces remember-session $(printf %q "$session") $(printf %q "$provider") $(printf %q "$directory") >/dev/null 2>&1 || true; exec bash"
+  tmux new-session -d -s "$session" -c "$directory" bash -lc "$post_launch"
 else
   tmux new-session -d -s "$session" -c "$directory"
 fi
