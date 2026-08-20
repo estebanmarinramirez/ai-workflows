@@ -48,6 +48,9 @@ trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $(aw_provider_command claude fresh trusted) == *"'--model' 'fable' '--effort' 'high'"* ]] || { printf 'not ok - frontier claude policy\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh trusted) == *"'--model' 'grok-4.6' '--reasoning-effort' 'high'"* ]] || { printf 'not ok - frontier grok policy\n'; failures=$((failures+1)); }
+orchestrator_codex=$(aw_provider_command codex resume yolo session-123 gpt-5.6-sol)
+[[ $(grep -o -- "'--model'" <<<"$orchestrator_codex" | wc -l) == 1 ]] || { printf 'not ok - orchestrator model deduplication\n'; failures=$((failures+1)); }
+[[ $orchestrator_codex == *"'resume' 'session-123'"* && $orchestrator_codex == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - orchestrator resume command\n'; failures=$((failures+1)); }
 
 mkdir -p "$fixture/grok/sessions/example"
 mkdir -p "$fixture/grok/logs"

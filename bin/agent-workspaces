@@ -23,8 +23,8 @@ case "$cmd" in
     exit "$failed"
     ;;
   provider-command)
-    provider=${1:?provider}; mode=${2:?fresh or resume}; profile=${3:?profile}; session_id=${4:-}
-    aw_provider_command "$provider" "$mode" "$profile" "$session_id"
+    provider=${1:?provider}; mode=${2:?fresh or resume}; profile=${3:?profile}; session_id=${4:-}; model_override=${5:-}
+    aw_provider_command "$provider" "$mode" "$profile" "$session_id" "$model_override"
     ;;
   discover-session)
     provider=${1:?provider}; directory=${2:?directory}; found=''

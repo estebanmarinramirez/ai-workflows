@@ -131,7 +131,7 @@ aw_task_refresh() {
 }
 
 aw_provider_command() {
-  local provider=$1 mode=$2 profile=$3 session_id=${4:-}
+  local provider=$1 mode=$2 profile=$3 session_id=${4:-} model_override=${5:-}
   local manifest="$AW_PROVIDER_HOME/$provider.json"
   [[ -f $manifest ]] || aw_die "unknown provider: $provider"
   aw_valid_profile "$profile" || aw_die "invalid permission profile: $profile"
@@ -142,6 +142,16 @@ aw_provider_command() {
     command_json=$(jq -c --arg profile "$profile" '.continue + .profiles[$profile]' "$manifest")
   else
     command_json=$(jq -c --arg profile "$profile" '.fresh + .profiles[$profile]' "$manifest")
+  fi
+  if [[ -n $model_override ]]; then
+    command_json=$(jq -c --arg model "$model_override" '
+      reduce .[] as $argument
+        ({command:[],skip:false};
+          if .skip then .skip=false
+          elif $argument == "--model" or $argument == "-m" then .skip=true
+          else .command += [$argument]
+          end)
+      | .command + ["--model",$model]' <<<"$command_json")
   fi
   jq -r '.[] | @sh' <<<"$command_json" | paste -sd' ' -
 }
