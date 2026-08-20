@@ -28,7 +28,6 @@ now = datetime.now().astimezone()
 today = now.strftime("%Y-%m-%d")
 recent_dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
 daily = defaultdict(int)
-daily_cost = defaultdict(int)
 models = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0})
 today_models = defaultdict(int)
 active_dates = set()
@@ -39,7 +38,7 @@ today_turns = 0
 
 if session_root.is_dir():
     for updates in session_root.rglob("updates.jsonl"):
-        previous = {"inputTokens": 0, "outputTokens": 0, "cachedReadTokens": 0, "cacheCreationTokens": 0, "costUsdTicks": 0}
+        previous = {"inputTokens": 0, "outputTokens": 0, "cachedReadTokens": 0, "cacheCreationTokens": 0}
         saw_usage = False
         try:
             lines = updates.open(encoding="utf-8", errors="replace")
@@ -76,7 +75,6 @@ if session_root.is_dir():
                 cache_write = delta["cacheCreationTokens"]
                 total = input_tokens + output_tokens + cache_read + cache_write
                 daily[day] += total
-                daily_cost[day] += delta["costUsdTicks"]
                 bucket = models[model]
                 bucket["inputTokens"] += input_tokens
                 bucket["outputTokens"] += output_tokens
@@ -87,15 +85,19 @@ if session_root.is_dir():
         if saw_usage:
             sessions += 1
 
-# Grok Build renders 5,000,000,000 USD ticks as $0.5000.
-today_cost = daily_cost[today] / 10_000_000_000
+config_path = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "agent-workspaces" / "config.json"
+plan = "Subscription"
+try:
+    plan = json.loads(config_path.read_text()).get("model_policy", {}).get("grok", {}).get("plan") or plan
+except (OSError, ValueError, AttributeError):
+    pass
 record = {
     "schemaVersion": 1,
     "id": "grok",
     "name": "Grok",
     "ready": sessions > 0,
-    "tierLabel": "Grok 4.6 · high",
-    "usageStatusText": f"Today’s recorded cost: ${today_cost:.2f}" if sessions else "No local Grok usage recorded",
+    "tierLabel": f"{plan} · Grok 4.6 · high",
+    "usageStatusText": "Local activity · subscription billing not inferred" if sessions else "No local Grok usage recorded",
     "authHelpText": "Run `grok` and sign in to begin recording usage.",
     "limits": [],
     "todayPrompts": today_turns,

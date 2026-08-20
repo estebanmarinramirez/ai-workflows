@@ -57,6 +57,7 @@ printf '%s\n' \
   >"$fixture/grok/sessions/example/updates.jsonl"
 grok_usage=$(GROK_HOME="$fixture/grok" python3 "$root/compat/bin/omarchy-agent-usage-grok")
 [[ $(jq -r '.todayPrompts, .todayTotalTokens, .todayTokensByModel["grok-4.6"]' <<<"$grok_usage") == $'2\n240\n240' ]] || { printf 'not ok - grok usage deltas\n'; failures=$((failures+1)); }
+[[ $(jq -r '.tierLabel' <<<"$grok_usage") == "Ultra · Grok 4.6 · high" && $(jq -r '.usageStatusText' <<<"$grok_usage") != *'$'* ]] || { printf 'not ok - grok subscription telemetry\n'; failures=$((failures+1)); }
 
 task="$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
 for role in claude codex grok; do
