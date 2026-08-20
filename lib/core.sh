@@ -12,7 +12,7 @@ AW_PROVIDER_HOME=$AW_CONFIG_HOME/providers
 aw_die() { printf 'agent-workspaces: %s\n' "$*" >&2; exit 1; }
 aw_now() { date --iso-8601=seconds; }
 aw_require() { command -v "$1" >/dev/null 2>&1 || aw_die "missing dependency: $1"; }
-aw_valid_state() { [[ $1 =~ ^(dispatched|in_progress|blocked|completed)$ ]]; }
+aw_valid_state() { [[ $1 =~ ^(deferred|dispatched|in_progress|blocked|completed)$ ]]; }
 aw_valid_profile() { [[ $1 =~ ^(safe|trusted|yolo)$ ]]; }
 
 aw_origin_base() {
@@ -69,7 +69,7 @@ aw_audit() {
 }
 
 aw_task_refresh() {
-  local task_dir=$1 state_file="$1/state.json" state status_file role role_state any_blocked=false all_completed=true
+  local task_dir=$1 state_file="$1/state.json" state status_file role role_state any_blocked=false all_completed=true any_deferred=false
   [[ -f $state_file ]] || aw_die "missing task state: $state_file"
   exec {task_lock}>"$task_dir/.state.lock"
   flock "$task_lock"
@@ -79,8 +79,11 @@ aw_task_refresh() {
     if [[ -f $status_file ]]; then
       role_state=$(jq -r '.state // "dispatched"' "$status_file" 2>/dev/null)
       aw_valid_state "$role_state" || role_state=dispatched
+      if [[ $role_state == deferred ]]; then
+        any_deferred=true
+      fi
       [[ $role_state == blocked ]] && any_blocked=true
-      [[ $role_state == completed ]] || all_completed=false
+      [[ $role_state == completed || $role_state == deferred ]] || all_completed=false
     fi
     state=$(jq --arg role "$role" --arg value "$role_state" '.roles[$role].state=$value' <<<"$state")
   done < <(jq -r '.roles | to_entries[] | [.key, (.value.status_json // .value.status_file)] | @tsv' <<<"$state")
@@ -88,7 +91,9 @@ aw_task_refresh() {
   local current next stage now
   current=$(jq -r '.status' <<<"$state")
   next=$current
-  if [[ $current == active && $any_blocked == true ]]; then
+  if [[ $current == active && $any_deferred == true && $all_completed == true ]]; then
+    next=awaiting_review
+  elif [[ $current == active && $any_blocked == true ]]; then
     next=blocked
   elif [[ $current == active && $all_completed == true ]]; then
     stage=$(jq -r '.stage' <<<"$state")
@@ -142,14 +147,20 @@ aw_provider_command() {
 }
 
 aw_workspace_risks() {
-  local workspace_id=$1 session repository role worktree branch dirty ahead task_count active_agents=0
+  local workspace_id=$1 session repository role worktree branch dirty ahead task_count overdue_count=0 active_agents=0 now task_status deadline
   repository=$(tmux list-sessions -F $'#{@aw_workspace_id}\t#{@aw_repository}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$1==id {print $2; exit}' || true)
   task_count=0
+  now=$(aw_now)
   while IFS= read -r state; do
     [[ $(jq -r '.workspace_id' "$state") == "$workspace_id" ]] || continue
-    [[ $(jq -r '.status' "$state") =~ ^(completed|ready_for_pr|draft_pr)$ ]] || ((task_count+=1))
+    task_status=$(jq -r '.status' "$state")
+    if [[ ! $task_status =~ ^(completed|ready_for_pr|draft_pr)$ ]]; then
+      ((task_count+=1))
+      deadline=$(jq -r '.delivery.deadline_at // empty' "$state")
+      [[ -n $deadline && $deadline < $now ]] && ((overdue_count+=1))
+    fi
   done < <(find "$AW_DATA_HOME" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null)
-  printf 'Workspace: %s\nActive tasks: %s\n' "$workspace_id" "$task_count"
+  printf 'Workspace: %s\nActive tasks: %s\nOver budget: %s\n' "$workspace_id" "$task_count" "$overdue_count"
   while IFS=$'\t' read -r session role; do
     [[ -n $session ]] || continue
     if [[ $role != integration && $role != orchestrator ]] && omarchy-agent-pane-active "$role" "$session" 2>/dev/null; then ((active_agents+=1)); fi
@@ -175,6 +186,7 @@ aw_next_actions_json() {
   status=$(jq -r '.status' "$state_file")
   case "$status" in
     active) jq -cn '[{id:"wait",label:"Agents are still working",mutating:false}]' ;;
+    awaiting_review) jq -cn '[{id:"activate-reviewers",label:"Release the immutable lead artifact to reviewers",mutating:true}]' ;;
     blocked) jq -cn '[{id:"resolve-blocker",label:"Review blockers and dispatch a focused follow-up",mutating:false}]' ;;
     awaiting_triage) jq -cn '[{id:"dispatch-execution",label:"Approve scope and dispatch an execution cycle",mutating:true},{id:"complete-review",label:"Close the review without implementation",mutating:true}]' ;;
     awaiting_integration) jq -cn '[{id:"approve-integration",label:"Validate collisions and approve an integration handoff",mutating:true},{id:"dispatch-verification",label:"Request another independent verification cycle",mutating:true}]' ;;

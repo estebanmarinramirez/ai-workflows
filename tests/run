@@ -56,6 +56,10 @@ else
   printf 'ok - blocker evidence is required\n'
 fi
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" status --task "$task" --role grok --state blocked --blocker 'missing fixture' --summary 'blocked' >/dev/null
+audit_before=$(jq -s '[.[] | select(.event=="role.status" and .details.role=="grok" and .details.state=="blocked")] | length' "$fixture/data/agent-workspaces/repo-hash/set/.coordination/audit.jsonl")
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" status --task "$task" --role grok --state blocked --blocker 'missing fixture' --summary 'blocked' >/dev/null
+audit_after=$(jq -s '[.[] | select(.event=="role.status" and .details.role=="grok" and .details.state=="blocked")] | length' "$fixture/data/agent-workspaces/repo-hash/set/.coordination/audit.jsonl")
+[[ $audit_before == "$audit_after" ]] || { printf 'not ok - duplicate status audit suppression\n'; failures=$((failures+1)); }
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 [[ -s $fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md ]] || { printf 'not ok - orchestrator snapshot\n'; failures=$((failures+1)); }
 signature_one=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
@@ -88,6 +92,14 @@ printf '%s\n' '#!/bin/bash' 'printf '\''%s\n'\'' '\''{"number":13,"url":"https:/
 chmod +x "$fixture/bin/gh"
 PATH="$fixture/bin:$PATH" AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" reconcile-pr "$task" --pr 13 >/dev/null
 [[ $(jq -r '.status + ":" + .pr.state + ":" + (.pr.number|tostring)' "$task/state.json") == completed:MERGED:13 ]] || { printf 'not ok - merged PR reconciliation\n'; failures=$((failures+1)); }
+
+deferred_task="$fixture/data/agent-workspaces/repo-hash/set/.coordination/deferred"
+mkdir -p "$deferred_task"
+jq -n '{schema_version:1,task_id:"deferred",role:"claude",state:"completed",summary:"lead",updated_at:"now",evidence:[],commits:["abc"],changed_files:[],blockers:[]}' >"$deferred_task/claude.status.json"
+jq -n '{schema_version:1,task_id:"deferred",role:"codex",state:"deferred",summary:"",updated_at:"now",evidence:[],commits:[],changed_files:[],blockers:[]}' >"$deferred_task/codex.status.json"
+jq -n --arg lead "$deferred_task/claude.status.json" --arg review "$deferred_task/codex.status.json" \
+  '{schema_version:2,id:"deferred",workspace_id:"x:set",repository:"/tmp",stage:"execute",status:"active",lead:"claude",roles:{claude:{status_json:$lead},codex:{status_json:$review}},gates:{},transitions:[]}' >"$deferred_task/state.json"
+[[ $(aw_task_refresh "$deferred_task") == awaiting_review ]] || { printf 'not ok - lead-first review barrier\n'; failures=$((failures+1)); }
 
 # Historical and gated workflows are records, not live write leases. The
 # dispatcher itself covers active seam conflicts; keep this status contract

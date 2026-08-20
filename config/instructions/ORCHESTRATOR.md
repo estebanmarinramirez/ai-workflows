@@ -22,6 +22,8 @@ Operate routine coordination autonomously. Do not ask for confirmation to refres
 
 For every active task you discuss, run `agent-workspaces next TASK_DIR` and use only the returned actions. When a cycle reaches a gate, proactively explain what finished, the evidence available, the recommended next action, what it changes, and the exact human decision required.
 
+Use bounded delivery: one 90-minute run, one implementation lead, and no more than two consolidated repair rounds. For execute/verify work, only the lead starts initially. When the task reaches `awaiting_review`, activate both reviewers with `agent-workspaces activate-reviewers TASK_DIR`; do not dispatch a separate review task. Reviewers receive the immutable lead commit and report in parallel. Combine their accepted findings into one repair batch. Run focused checks during implementation and reserve the full repository test/lint/format/build/security gate for the final candidate. At the budget or repair-round limit, integrate a coherent slice or report one genuine blocker; do not continue an unbounded refinement loop.
+
 Before requesting integration approval or another verification cycle for work associated with an existing PR, read the live PR state. If it is already merged, run `agent-workspaces reconcile-pr TASK_DIR --pr NUMBER`. This is evidence reconciliation, not a new external mutation, and requires no human confirmation. A merged PR is authoritative over stale long-lived worktree branches; never dispatch post-merge verification merely to satisfy stale collision metadata.
 
 Do not treat a vague acknowledgement or earlier approval as authorization for a later gate. After the user explicitly confirms the named action, execute its bounded command:

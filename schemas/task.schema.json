@@ -8,7 +8,7 @@
     "id": {"type": "string"},
     "workspace_id": {"type": "string"},
     "stage": {"enum": ["review", "execute", "verify", "integrate"]},
-    "status": {"enum": ["active", "blocked", "awaiting_triage", "awaiting_integration", "integration_ready", "awaiting_pr", "awaiting_pr_review", "ready_for_pr", "draft_pr", "completed"]},
+    "status": {"enum": ["active", "blocked", "awaiting_review", "awaiting_triage", "awaiting_integration", "integration_ready", "awaiting_pr", "awaiting_pr_review", "ready_for_pr", "draft_pr", "completed"]},
     "profile": {"enum": ["safe", "trusted", "yolo"]},
     "roles": {"type": "object", "minProperties": 1},
     "gates": {"type": "object"},

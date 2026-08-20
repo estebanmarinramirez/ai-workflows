@@ -14,6 +14,9 @@ This task is coordinated by Agent Workspaces.
 - Work only in the assigned worktree.
 - Never edit the integration checkout, another agent's worktree, the task manifest, or another agent's status file.
 - One implementation lead owns production changes. Reviewers inspect independently; verifiers change only tests or fixtures when explicitly required.
+- Execute and verify workflows are lead-first. A deferred reviewer must remain idle until the dispatcher activates review after an immutable lead commit exists.
+- Consolidate accepted findings into one repair batch. Do not create or request a separate workflow for each finding.
+- Use focused checks while iterating; reserve full repository gates for the final candidate unless the task explicitly requires otherwise.
 - Stay inside the task's declared ownership seam and allowed paths. Treat paths outside that seam as read-only unless the task explicitly identifies a shared-surface exception.
 - Do not merge, rebase, push, open a PR, or publish unless the task explicitly authorizes that transition.
 

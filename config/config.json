@@ -6,6 +6,13 @@
   "orchestrator_model": "gpt-5.6-sol",
   "orchestrator_profile": "yolo",
   "monitor_interval_seconds": 15,
+  "delivery_policy": {
+    "run_budget_minutes": 90,
+    "max_repair_rounds": 2,
+    "lead_first": true,
+    "full_gate_phase": "final",
+    "review_requires_lead_commit": true
+  },
   "event_reviewer": {
     "enabled": true,
     "provider": "codex",

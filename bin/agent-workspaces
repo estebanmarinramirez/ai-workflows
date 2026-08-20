@@ -87,12 +87,13 @@ case "$cmd" in
       fi
       if [[ -n $command_run && $exit_code != 0 ]]; then aw_die 'completion evidence must have a zero exit code'; fi
     fi
+    before=$(jq -c 'del(.updated_at) | .evidence |= map(del(.at))' "$status_file")
     args=(--arg state "$state" --arg summary "$summary" --arg at "$now")
     filter='.state=$state | .updated_at=$at | if $summary!="" then .summary=$summary else . end'
     if [[ -n $command_run ]]; then
       [[ $exit_code =~ ^-?[0-9]+$ ]] || aw_die '--exit-code is required and must be numeric with --command'
       args+=(--arg command "$command_run" --argjson exit_code "$exit_code")
-      filter+=' | .evidence += [{command:$command,exit_code:$exit_code,at:$at}]'
+      filter+=' | if any(.evidence[]?; .command==$command and .exit_code==$exit_code) then . else .evidence += [{command:$command,exit_code:$exit_code,at:$at}] end'
     fi
     if [[ -n $blocker ]]; then args+=(--arg blocker "$blocker"); filter+=' | .blockers += [$blocker] | .blockers |= unique'; fi
     if ((${#commits[@]})); then
@@ -105,7 +106,10 @@ case "$cmd" in
     fi
     aw_atomic_jq "$status_file" "${args[@]}" "$filter"
     workspace_root=${task%/.coordination/*}
-    aw_audit "$workspace_root" role.status "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg state "$state" '{task_id:$task,role:$role,state:$state}')" "$role"
+    after=$(jq -c 'del(.updated_at) | .evidence |= map(del(.at))' "$status_file")
+    if [[ $before != "$after" ]]; then
+      aw_audit "$workspace_root" role.status "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg state "$state" '{task_id:$task,role:$role,state:$state}')" "$role"
+    fi
     aw_task_refresh "$task" >/dev/null
     printf '%s\n' "$status_file"
     ;;
@@ -316,6 +320,46 @@ case "$cmd" in
       git -C "$path" rebase "$base" || { git -C "$path" rebase --abort 2>/dev/null || true; aw_die "rebase failed for $role"; }
     done
     aw_audit "$workspace_root" workspace.synced "$(jq -cn --arg base "$base" --arg machine "$(jq -r '.machine_id // "legacy"' "$manifest")" '{base:$base,machine_id:$machine}')" user:confirmed-via-orchestrator
+    ;;
+  activate-reviewers)
+    task=${1:?task directory}; state="$task/state.json"
+    [[ -f $state ]] || aw_die 'missing state.json'
+    "$0" refresh "$task" >/dev/null
+    [[ $(jq -r '.status' "$state") == awaiting_review ]] || aw_die 'task is not awaiting reviewer activation'
+    lead=$(jq -r '.lead // empty' "$state"); [[ -n $lead ]] || aw_die 'task has no recorded lead'
+    lead_status=$(jq -r --arg lead "$lead" '.roles[$lead].status_json' "$state")
+    [[ $(jq -r '.state' "$lead_status") == completed ]] || aw_die 'lead has not completed'
+    if [[ $(jq -r '.delivery_policy.review_requires_lead_commit // true' "$AW_CONFIG_FILE") == true && $(jq '.commits | length' "$lead_status") -eq 0 ]]; then
+      aw_die 'review activation requires an immutable lead commit'
+    fi
+    workspace_id=$(jq -r '.workspace_id' "$state"); template_id=$(jq -r '.template_id' "$state")
+    deferred=()
+    while IFS= read -r role; do deferred+=("$role"); done < <(jq -r '.roles | to_entries[] | select(.value.state=="deferred") | .key' "$state")
+    ((${#deferred[@]})) || aw_die 'no deferred reviewers'
+    declare -A reviewer_sessions=()
+    for role in "${deferred[@]}"; do
+      session=$(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}' 2>/dev/null | awk -F '\t' -v role="$role" -v id="$workspace_id" '$2==role && $3==id {print $1; exit}')
+      [[ -n $session ]] || aw_die "no live tmux session for reviewer: $role"
+      reviewer_sessions[$role]=$session
+    done
+    roles_json=$(printf '%s\n' "${deferred[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')
+    for role in "${deferred[@]}"; do
+      aw_atomic_jq "$task/$role.status.json" --arg at "$(aw_now)" '.state="dispatched" | .updated_at=$at'
+    done
+    aw_atomic_jq "$state" --arg at "$(aw_now)" --argjson roles "$roles_json" \
+      '.status="active" | .updated_at=$at | .roles |= reduce $roles[] as $role (. ; .[$role].state="dispatched") | .transitions += [{from:"awaiting_review",to:"active",at:$at,actor:"dispatcher:reviewers-activated"}]'
+    for role in "${deferred[@]}"; do
+      session=${reviewer_sessions[$role]}
+      pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
+      worktree=$(jq -r --arg role "$role" '.roles[$role].worktree' "$state")
+      case "$role" in claude) guide="$task/instructions/CLAUDE.md" ;; codex) guide="$task/instructions/AGENTS.md" ;; grok) guide="$task/instructions/GROK.md" ;; *) guide="$task/PROTOCOL.md" ;; esac
+      instruction="The implementation lead has published an immutable artifact. Read $task/PROTOCOL.md, $guide, $task/task.md, and the lead status in $lead_status. Review only the task-scoped lead commits. Work only in $worktree. Consolidate findings into one report; do not create follow-up workflows. Record status with agent-workspaces status --task '$task' --role '$role'."
+      buffer="aw-review-$$-$role"; tmux set-buffer -b "$buffer" -- "$instruction"; tmux paste-buffer -b "$buffer" -t "$pane"; sleep 0.35; tmux send-keys -t "$pane" Enter
+      [[ $role == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
+      tmux delete-buffer -b "$buffer"
+    done
+    aw_audit "${task%/.coordination/*}" reviewers.activated "$(jq -cn --arg task "$(basename "$task")" --argjson roles "$roles_json" '{task_id:$task,roles:$roles}')"
+    printf 'Activated reviewers: %s\n' "${deferred[*]}"
     ;;
   next)
     task=${1:?task directory}
