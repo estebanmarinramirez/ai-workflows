@@ -22,8 +22,41 @@ def local_day(timestamp):
         return datetime.now().strftime("%Y-%m-%d")
 
 
+def latest_subscription(log_path):
+    """Read the newest billing snapshot without parsing an unbounded log."""
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            start = max(0, size - 8 * 1024 * 1024)
+            stream.seek(start)
+            data = stream.read()
+    except OSError:
+        return None
+    if start:
+        data = data.split(b"\n", 1)[-1]
+    for raw in reversed(data.splitlines()):
+        try:
+            event = json.loads(raw)
+            context = event.get("ctx") or {}
+            config = context.get("config") or {}
+            used = config.get("creditUsagePercent")
+            if used is None:
+                continue
+            period = config.get("currentPeriod") or {}
+            return {
+                "tier": context.get("subscriptionTier") or "Subscription",
+                "used": max(0.0, min(100.0, float(used))),
+                "reset": period.get("end") or config.get("billingPeriodEnd") or "",
+            }
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return None
+
+
 home = Path.home()
-session_root = Path(os.environ.get("GROK_HOME", home / ".grok")) / "sessions"
+grok_root = Path(os.environ.get("GROK_HOME", home / ".grok"))
+session_root = grok_root / "sessions"
 now = datetime.now().astimezone()
 today = now.strftime("%Y-%m-%d")
 recent_dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
@@ -91,15 +124,27 @@ try:
     plan = json.loads(config_path.read_text()).get("model_policy", {}).get("grok", {}).get("plan") or plan
 except (OSError, ValueError, AttributeError):
     pass
+subscription = latest_subscription(grok_root / "logs" / "unified.jsonl")
+if subscription:
+    plan = subscription["tier"]
+limits = []
+if subscription:
+    limits.append({
+        "label": "Weekly subscription pool",
+        "title": "Weekly pool",
+        "percent": subscription["used"] / 100.0,
+        "resetsAt": subscription["reset"],
+    })
+ready = sessions > 0 or subscription is not None
 record = {
     "schemaVersion": 1,
     "id": "grok",
     "name": "Grok",
-    "ready": sessions > 0,
+    "ready": ready,
     "tierLabel": f"{plan} · Grok 4.6 · high",
-    "usageStatusText": "" if sessions else "Authentication needed",
-    "authHelpText": "" if sessions else "Run `grok` and sign in to begin recording usage.",
-    "limits": [],
+    "usageStatusText": "" if ready else "Authentication needed",
+    "authHelpText": "" if ready else "Run `grok` and sign in to begin recording usage.",
+    "limits": limits,
     "todayPrompts": today_turns,
     "todaySessions": len(today_session_ids),
     "todayTotalTokens": daily[today],

@@ -50,14 +50,17 @@ trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $(aw_provider_command grok fresh trusted) == *"'--model' 'grok-4.6' '--reasoning-effort' 'high'"* ]] || { printf 'not ok - frontier grok policy\n'; failures=$((failures+1)); }
 
 mkdir -p "$fixture/grok/sessions/example"
+mkdir -p "$fixture/grok/logs"
 now_epoch=$(date +%s)
 printf '%s\n' \
   "{\"timestamp\":$now_epoch,\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\",\"usage\":{\"inputTokens\":100,\"outputTokens\":10,\"cachedReadTokens\":50,\"cacheCreationTokens\":0,\"costUsdTicks\":1000000000,\"modelUsage\":{\"grok-4.6\":{}}}}}}" \
   "{\"timestamp\":$now_epoch,\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\",\"usage\":{\"inputTokens\":150,\"outputTokens\":20,\"cachedReadTokens\":70,\"cacheCreationTokens\":0,\"costUsdTicks\":1500000000,\"modelUsage\":{\"grok-4.6\":{}}}}}}" \
   >"$fixture/grok/sessions/example/updates.jsonl"
+printf '%s\n' '{"ctx":{"subscriptionTier":"SuperGrok Heavy","config":{"creditUsagePercent":39,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-14T14:44:59Z","end":"2026-08-21T14:44:59Z"}}}}' >"$fixture/grok/logs/unified.jsonl"
 grok_usage=$(GROK_HOME="$fixture/grok" python3 "$root/compat/bin/omarchy-agent-usage-grok")
 [[ $(jq -r '.todayPrompts, .todayTotalTokens, .todayTokensByModel["grok-4.6"]' <<<"$grok_usage") == $'2\n240\n240' ]] || { printf 'not ok - grok usage deltas\n'; failures=$((failures+1)); }
-[[ $(jq -r '.tierLabel' <<<"$grok_usage") == "Ultra · Grok 4.6 · high" && $(jq -r '.usageStatusText + .authHelpText' <<<"$grok_usage") == "" ]] || { printf 'not ok - grok subscription telemetry\n'; failures=$((failures+1)); }
+[[ $(jq -r '.tierLabel' <<<"$grok_usage") == "SuperGrok Heavy · Grok 4.6 · high" && $(jq -r '.usageStatusText + .authHelpText' <<<"$grok_usage") == "" ]] || { printf 'not ok - grok subscription telemetry\n'; failures=$((failures+1)); }
+[[ $(jq -r '.limits[0] | [.title,.percent,.resetsAt] | @tsv' <<<"$grok_usage") == $'Weekly pool\t0.39\t2026-08-21T14:44:59Z' ]] || { printf 'not ok - grok authoritative weekly limit\n'; failures=$((failures+1)); }
 
 task="$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
 for role in claude codex grok; do
