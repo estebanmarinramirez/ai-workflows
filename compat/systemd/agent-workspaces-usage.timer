@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep Agent Workspaces usage records current
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

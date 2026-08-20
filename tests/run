@@ -7,7 +7,13 @@ failures=0
 check() { if "$@"; then printf 'ok - %s\n' "$*"; else printf 'not ok - %s\n' "$*"; failures=$((failures+1)); fi; }
 
 check bash -n "$root/bin/agent-workspaces" "$root/lib/core.sh" "$root/packaging/install" "$root/packaging/migrate" "$root/packaging/rollback"
-check bash -n "$root"/compat/bin/*
+for file in "$root"/compat/bin/*; do
+  if head -n1 "$file" | grep -q python; then
+    check python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' "$file"
+  else
+    check bash -n "$file"
+  fi
+done
 for file in "$root/config/config.json" "$root/config/providers"/*.json "$root/schemas"/*.json; do check jq -e . "$file" >/dev/null; done
 check jq -e '.seams.general.paths == ["**"] and (.seams.shared.paths | index("Cargo.lock") != null)' "$root/config/config.json"
 
@@ -39,6 +45,18 @@ trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $trusted_codex == *"--approve-for-me"* && $trusted_codex != *"--sandbox"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) != *bypassPermissions* ]] || { printf 'not ok - trusted claude is not bypass\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh yolo) == *bypassPermissions* ]] || { printf 'not ok - explicit yolo profile\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command claude fresh trusted) == *"'--model' 'fable' '--effort' 'high'"* ]] || { printf 'not ok - frontier claude policy\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command grok fresh trusted) == *"'--model' 'grok-4.6' '--reasoning-effort' 'high'"* ]] || { printf 'not ok - frontier grok policy\n'; failures=$((failures+1)); }
+
+mkdir -p "$fixture/grok/sessions/example"
+now_epoch=$(date +%s)
+printf '%s\n' \
+  "{\"timestamp\":$now_epoch,\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\",\"usage\":{\"inputTokens\":100,\"outputTokens\":10,\"cachedReadTokens\":50,\"cacheCreationTokens\":0,\"costUsdTicks\":1000000000,\"modelUsage\":{\"grok-4.6\":{}}}}}}" \
+  "{\"timestamp\":$now_epoch,\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\",\"usage\":{\"inputTokens\":150,\"outputTokens\":20,\"cachedReadTokens\":70,\"cacheCreationTokens\":0,\"costUsdTicks\":1500000000,\"modelUsage\":{\"grok-4.6\":{}}}}}}" \
+  >"$fixture/grok/sessions/example/updates.jsonl"
+grok_usage=$(GROK_HOME="$fixture/grok" python3 "$root/compat/bin/omarchy-agent-usage-grok")
+[[ $(jq -r '.todayPrompts, .todayTotalTokens, .todayTokensByModel["grok-4.6"]' <<<"$grok_usage") == $'2\n240\n240' ]] || { printf 'not ok - grok usage deltas\n'; failures=$((failures+1)); }
 
 task="$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
 for role in claude codex grok; do

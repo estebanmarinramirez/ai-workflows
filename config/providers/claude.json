@@ -5,9 +5,9 @@
   "executable": "claude",
   "process_pattern": "-claude,",
   "update": {"manager": "mise", "tool": "claude"},
-  "fresh": ["claude"],
-  "resume": ["claude", "--resume", "{session_id}"],
-  "continue": ["claude", "--continue"],
+  "fresh": ["claude", "--model", "fable", "--effort", "high"],
+  "resume": ["claude", "--resume", "{session_id}", "--model", "fable", "--effort", "high"],
+  "continue": ["claude", "--continue", "--model", "fable", "--effort", "high"],
   "profiles": {
     "safe": ["--permission-mode", "manual"],
     "trusted": ["--permission-mode", "acceptEdits"],

@@ -13,7 +13,7 @@ case "$cmd" in
   version|--version) printf '%s\n' "$AW_VERSION" ;;
   doctor)
     failed=0
-    for dep in bash git jq flock tmux fzf gum hyprctl gh; do
+    for dep in bash git jq flock tmux fzf gum hyprctl gh python3; do
       if command -v "$dep" >/dev/null; then printf 'ok       %s\n' "$dep"; else printf 'missing  %s\n' "$dep"; failed=1; fi
     done
     for provider in "$AW_PROVIDER_HOME"/*.json; do

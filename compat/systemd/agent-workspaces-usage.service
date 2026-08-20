@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh Agent Workspaces usage records for Omarchy
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-workspaces-usage-update

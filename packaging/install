@@ -9,8 +9,9 @@ backup_root="$HOME/.local/share/agent-workspaces-app/backups/$(date +%Y%m%d-%H%M
 config_root="${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces"
 menu_file="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
 bin_root="$HOME/.local/bin"
+systemd_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
-mkdir -p "$install_root" "$backup_root" "$config_root/providers" "$bin_root"
+mkdir -p "$install_root" "$backup_root" "$config_root/providers" "$bin_root" "$systemd_root"
 [[ -d $config_root ]] && cp -a "$config_root" "$backup_root/config-root"
 managed_bins=("$bin_root/agent-workspaces")
 for source_file in "$root/compat/bin"/*; do managed_bins+=("$bin_root/$(basename "$source_file")"); done
@@ -42,10 +43,16 @@ for source_file in "$install_root/compat/bin"/*; do
   cp "$source_file" "$target"
   chmod +x "$target"
 done
+for source_file in "$install_root/compat/systemd"/*; do
+  cp "$source_file" "$systemd_root/$(basename "$source_file")"
+done
 cp "$install_root/compat/omarchy/omarchy-menu.jsonc" "$menu_file"
 chmod +x "$install_root/bin/agent-workspaces" "$install_root/packaging/migrate" "$install_root/packaging/rollback"
 printf '%s\n' "$version" >"$HOME/.local/share/agent-workspaces-app/current-version"
 printf '%s\n' "$backup_root" >"$HOME/.local/share/agent-workspaces-app/last-backup"
 "$bin_root/agent-workspaces" migrate
 "$bin_root/agent-workspaces" doctor
+systemctl --user daemon-reload
+systemctl --user enable --now agent-workspaces-usage.timer
+systemctl --user start agent-workspaces-usage.service
 printf 'Installed Agent Workspaces %s. Rollback bundle: %s\n' "$version" "$backup_root"

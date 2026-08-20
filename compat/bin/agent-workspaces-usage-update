@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Refresh Agent Workspaces' additional records for Omarchy's native Agents panel.
+set -uo pipefail
+usage_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+mkdir -p "$usage_dir"
+status=0
+for entry in "grok:omarchy-agent-usage-grok" "agent-workspaces:omarchy-agent-usage-workspaces"; do
+  id=${entry%%:*}
+  collector="$HOME/.local/bin/${entry#*:}"
+  record=$($collector) || { status=1; continue; }
+  jq -e . >/dev/null <<<"$record" || { status=1; continue; }
+  temporary=$(mktemp "$usage_dir/.$id.XXXXXX")
+  printf '%s\n' "$record" >"$temporary"
+  mv "$temporary" "$usage_dir/$id.json"
+done
+exit "$status"

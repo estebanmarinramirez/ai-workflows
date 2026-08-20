@@ -44,3 +44,14 @@ Run `make install` to deploy the CLI and user configuration. The installer creat
 The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. The persistent conversational Orchestrator uses its separately configured flagship model.
 
 Provider manifests declare their CLI update manager. Use **Agent Workspaces → Provider Updates** to inspect and selectively update provider CLIs. Updates never interrupt running sessions; restarted sessions pick up the new binary.
+
+## Models and usage
+
+The default worker policy favors frontier quality: Claude uses `fable` at high effort, Codex uses `gpt-5.6-sol`, and Grok uses `grok-4.6` at high reasoning effort. The event reviewer stays on `gpt-5.6-luna` at low effort because it summarizes deterministic state changes rather than writing production code. Provider commands and the documented policy live in `config/providers/` and `config/config.json`.
+
+Agent Workspaces extends Omarchy's native **Agents** bar panel rather than installing a separate widget. Its user-local updater preserves Omarchy's Claude and Codex collectors and adds:
+
+- Grok local token totals, model attribution, and the cost value recorded by Grok's own session events.
+- Agent Workspaces operational health: active, blocked, and over-budget workflows.
+
+Run `agent-workspaces-usage-update` to refresh the added records immediately. A user-level timer keeps them current every two minutes; Omarchy continues refreshing its built-in provider records normally. The figures are local operational telemetry, not a provider invoice: account limits come from each provider's authenticated CLI where available, while local session totals measure work recorded on this machine.

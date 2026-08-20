@@ -5,9 +5,9 @@
   "executable": "codex",
   "process_pattern": "-codex,",
   "update": {"manager": "mise", "tool": "codex"},
-  "fresh": ["codex"],
-  "resume": ["codex", "resume", "{session_id}"],
-  "continue": ["codex", "resume", "--last"],
+  "fresh": ["codex", "--model", "gpt-5.6-sol"],
+  "resume": ["codex", "resume", "{session_id}", "--model", "gpt-5.6-sol"],
+  "continue": ["codex", "resume", "--last", "--model", "gpt-5.6-sol"],
   "profiles": {
     "safe": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
     "trusted": ["--approve-for-me"],

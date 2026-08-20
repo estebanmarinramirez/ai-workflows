@@ -5,9 +5,9 @@
   "executable": "grok",
   "process_pattern": "-grok,",
   "update": {"manager": "mise", "tool": "npm:@xai-official/grok"},
-  "fresh": ["grok"],
-  "resume": ["grok", "--resume", "{session_id}"],
-  "continue": ["grok", "--continue"],
+  "fresh": ["grok", "--model", "grok-4.6", "--reasoning-effort", "high"],
+  "resume": ["grok", "--resume", "{session_id}", "--model", "grok-4.6", "--reasoning-effort", "high"],
+  "continue": ["grok", "--continue", "--model", "grok-4.6", "--reasoning-effort", "high"],
   "profiles": {
     "safe": ["--permission-mode", "default"],
     "trusted": ["--permission-mode", "acceptEdits"],

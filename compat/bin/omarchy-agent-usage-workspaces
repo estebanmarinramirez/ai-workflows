@@ -1,0 +1,31 @@
+#!/bin/bash
+
+set -euo pipefail
+data_root="${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces"
+now=$(date --iso-8601=seconds)
+tasks=0 active=0 blocked=0 overdue=0 workspaces=0
+declare -A days=()
+while IFS= read -r _; do ((workspaces+=1)); done < <(find "$data_root" -name workspace.json -type f -print 2>/dev/null)
+while IFS= read -r state; do
+  ((tasks+=1))
+  status=$(jq -r '.status // "unknown"' "$state")
+  created=$(jq -r '.created_at // empty' "$state"); day=${created%%T*}
+  [[ -n $day ]] && days[$day]=$(( ${days[$day]:-0} + 1 ))
+  case "$status" in completed|draft_pr|ready_for_pr) ;; blocked) ((blocked+=1)) ;; *) ((active+=1)) ;; esac
+  deadline=$(jq -r '.delivery.deadline_at // empty' "$state")
+  [[ -n $deadline && $deadline < $now && ! $status =~ ^(completed|draft_pr|ready_for_pr)$ ]] && ((overdue+=1))
+done < <(find "$data_root" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null)
+recent='[]'
+for offset in 6 5 4 3 2 1 0; do
+  day=$(date -d "-$offset days" +%F); count=${days[$day]:-0}
+  recent=$(jq -c --arg day "$day" --argjson count "$count" '. + [{date:$day,messageCount:$count}]' <<<"$recent")
+done
+budget_percent=0
+((tasks > 0)) && budget_percent=$((100 * overdue / tasks))
+jq -cn --arg at "$now" --arg status "$active active · $blocked blocked · $overdue over budget" \
+  --argjson tasks "$tasks" --argjson workspaces "$workspaces" --argjson active "$active" \
+  --argjson budget_percent "$budget_percent" --argjson recent "$recent" \
+  '{schemaVersion:1,id:"agent-workspaces",name:"Agent Workspaces",ready:true,tierLabel:"Bounded delivery · 90m",usageStatusText:$status,
+    limits:[{label:"Over-budget workflows",percent:$budget_percent}],todayPrompts:$active,todaySessions:$workspaces,
+    todayTotalTokens:0,todayTokensByModel:{},recentDays:$recent,totalPrompts:$tasks,totalSessions:$workspaces,
+    activeDays:([$recent[]|select(.messageCount>0)]|length),modelUsage:{},hasLocalStats:true,updatedAt:$at}'

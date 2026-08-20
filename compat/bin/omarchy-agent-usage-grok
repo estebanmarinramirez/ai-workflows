@@ -1,0 +1,114 @@
+#!/usr/bin/python3
+"""Emit Omarchy's native Agents usage contract from local Grok sessions."""
+
+import json
+import os
+from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+
+
+def number(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def local_day(timestamp):
+    try:
+        return datetime.fromtimestamp(float(timestamp)).astimezone().strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError):
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+home = Path.home()
+session_root = Path(os.environ.get("GROK_HOME", home / ".grok")) / "sessions"
+now = datetime.now().astimezone()
+today = now.strftime("%Y-%m-%d")
+recent_dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
+daily = defaultdict(int)
+daily_cost = defaultdict(int)
+models = defaultdict(lambda: {"inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0})
+today_models = defaultdict(int)
+active_dates = set()
+today_session_ids = set()
+sessions = 0
+turns = 0
+today_turns = 0
+
+if session_root.is_dir():
+    for updates in session_root.rglob("updates.jsonl"):
+        previous = {"inputTokens": 0, "outputTokens": 0, "cachedReadTokens": 0, "cacheCreationTokens": 0, "costUsdTicks": 0}
+        saw_usage = False
+        try:
+            lines = updates.open(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with lines:
+            for raw in lines:
+                try:
+                    event = json.loads(raw)
+                    update = event.get("params", {}).get("update", {})
+                    if update.get("sessionUpdate") != "turn_completed":
+                        continue
+                    usage = update.get("usage") or {}
+                    if not usage:
+                        continue
+                except (ValueError, AttributeError):
+                    continue
+                saw_usage = True
+                day = local_day(event.get("timestamp"))
+                active_dates.add(day)
+                if day == today:
+                    today_session_ids.add(str(updates.parent))
+                turns += 1
+                if day == today:
+                    today_turns += 1
+                current = {key: number(usage.get(key)) for key in previous}
+                delta = {key: max(0, current[key] - previous[key]) for key in previous}
+                previous = current
+                model_usage = usage.get("modelUsage") or {}
+                model = next(iter(model_usage), "grok")
+                input_tokens = delta["inputTokens"]
+                output_tokens = delta["outputTokens"]
+                cache_read = delta["cachedReadTokens"]
+                cache_write = delta["cacheCreationTokens"]
+                total = input_tokens + output_tokens + cache_read + cache_write
+                daily[day] += total
+                daily_cost[day] += delta["costUsdTicks"]
+                bucket = models[model]
+                bucket["inputTokens"] += input_tokens
+                bucket["outputTokens"] += output_tokens
+                bucket["cacheReadInputTokens"] += cache_read
+                bucket["cacheCreationInputTokens"] += cache_write
+                if day == today:
+                    today_models[model] += total
+        if saw_usage:
+            sessions += 1
+
+# Grok Build renders 5,000,000,000 USD ticks as $0.5000.
+today_cost = daily_cost[today] / 10_000_000_000
+record = {
+    "schemaVersion": 1,
+    "id": "grok",
+    "name": "Grok",
+    "ready": sessions > 0,
+    "tierLabel": "Grok 4.6 · high",
+    "usageStatusText": f"Today’s recorded cost: ${today_cost:.2f}" if sessions else "No local Grok usage recorded",
+    "authHelpText": "Run `grok` and sign in to begin recording usage.",
+    "limits": [],
+    "todayPrompts": today_turns,
+    "todaySessions": len(today_session_ids),
+    "todayTotalTokens": daily[today],
+    "todayTokensByModel": dict(today_models),
+    "recentDays": [{"date": day, "messageCount": daily[day]} for day in recent_dates],
+    "totalPrompts": turns,
+    "totalSessions": sessions,
+    "activeDays": len(active_dates),
+    "activeDates": sorted(active_dates),
+    "modelUsage": dict(models),
+    "hasLocalStats": True,
+    "updatedAt": now.isoformat(),
+}
+print(json.dumps(record, separators=(",", ":")))
