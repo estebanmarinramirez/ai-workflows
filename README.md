@@ -52,6 +52,6 @@ The default worker policy favors frontier quality: Claude uses `fable` at high e
 Agent Workspaces extends Omarchy's native **Agents** bar panel rather than installing a separate widget. Its user-local updater preserves Omarchy's Claude and Codex collectors and adds:
 
 - Grok's authoritative shared weekly subscription percentage, reset time, local token totals, and model attribution. API-equivalent cost fields embedded in sessions are deliberately excluded because they are not subscription charges or model-specific limits.
-- Agent Workspaces operational health: active, blocked, and over-budget workflows.
+- Workspace delivery health: only the newest workflow per workspace is considered current; historical records feed seven-day completions without inflating blocked or active counts. The panel also shows current delivery-budget pressure.
 
 Run `agent-workspaces-usage-update` to refresh the added records immediately. A user-level timer keeps them current every two minutes; Omarchy continues refreshing its built-in provider records normally. The figures are local operational telemetry, not a provider invoice: account limits come from each provider's authenticated CLI where available, while local session totals measure work recorded on this machine.

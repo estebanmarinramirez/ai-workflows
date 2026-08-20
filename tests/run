@@ -123,6 +123,17 @@ jq -n --arg lead "$deferred_task/claude.status.json" --arg review "$deferred_tas
   '{schema_version:2,id:"deferred",workspace_id:"x:set",repository:"/tmp",stage:"execute",status:"active",lead:"claude",roles:{claude:{status_json:$lead},codex:{status_json:$review}},gates:{},transitions:[]}' >"$deferred_task/state.json"
 [[ $(aw_task_refresh "$deferred_task") == awaiting_review ]] || { printf 'not ok - lead-first review barrier\n'; failures=$((failures+1)); }
 
+now_iso=$(date --iso-8601=seconds)
+old_iso=$(date -d '-1 hour' --iso-8601=seconds)
+deadline_iso=$(date -d '+90 minutes' --iso-8601=seconds)
+jq --arg created "$old_iso" '.created_at=$created' "$task/state.json" >"$task/state.tmp" && mv "$task/state.tmp" "$task/state.json"
+jq --arg created "$now_iso" --arg deadline "$deadline_iso" \
+  '.created_at=$created | .delivery={mode:"bounded",run_budget_minutes:90,deadline_at:$deadline}' \
+  "$deferred_task/state.json" >"$deferred_task/state.tmp" && mv "$deferred_task/state.tmp" "$deferred_task/state.json"
+workspace_usage=$(python3 "$root/compat/bin/omarchy-agent-usage-workspaces")
+[[ $(jq -r '.tierLabel' <<<"$workspace_usage") == '1 running · 1 review · 1 done/7d' ]] || { printf 'not ok - current workspace lifecycle metrics\n'; failures=$((failures+1)); }
+[[ $(jq -r '.limits[0].title' <<<"$workspace_usage") == 'Delivery budget' ]] || { printf 'not ok - current delivery budget metric\n'; failures=$((failures+1)); }
+
 # Historical and gated workflows are records, not live write leases. The
 # dispatcher itself covers active seam conflicts; keep this status contract
 # explicit so orchestration instructions cannot reinterpret stale records.
