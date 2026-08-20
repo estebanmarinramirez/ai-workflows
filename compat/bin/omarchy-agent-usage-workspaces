@@ -25,7 +25,7 @@ budget_percent=0
 jq -cn --arg at "$now" --arg status "$active active · $blocked blocked · $overdue over budget" \
   --argjson tasks "$tasks" --argjson workspaces "$workspaces" --argjson active "$active" \
   --argjson budget_percent "$budget_percent" --argjson recent "$recent" \
-  '{schemaVersion:1,id:"agent-workspaces",name:"Agent Workspaces",ready:true,tierLabel:"Bounded delivery · 90m",usageStatusText:$status,
+  '{schemaVersion:1,id:"agent-workspaces",name:"Workspaces",ready:true,tierLabel:"Bounded delivery · 90m",usageStatusText:$status,
     limits:[{label:"Over-budget workflows",percent:$budget_percent}],todayPrompts:$active,todaySessions:$workspaces,
     todayTotalTokens:0,todayTokensByModel:{},recentDays:$recent,totalPrompts:$tasks,totalSessions:$workspaces,
     activeDays:([$recent[]|select(.messageCount>0)]|length),modelUsage:{},hasLocalStats:true,updatedAt:$at}'
