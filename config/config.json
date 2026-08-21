@@ -12,6 +12,13 @@
     "grok": {"model": "grok-4.6", "effort": "high", "plan": "Ultra"},
     "event_reviewer": {"model": "gpt-5.6-luna", "effort": "low"}
   },
+  "build_policy": {
+    "iteration": "focused-debug-checks",
+    "final_gate_runs": 1,
+    "release_build_phase": "final-candidate",
+    "compiler_cache": "auto-sccache",
+    "share_target_directories": false
+  },
   "monitor_interval_seconds": 15,
   "delivery_policy": {
     "run_budget_minutes": 90,

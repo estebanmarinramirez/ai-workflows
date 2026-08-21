@@ -17,6 +17,9 @@ This task is coordinated by Agent Workspaces.
 - Execute and verify workflows are lead-first. A deferred reviewer must remain idle until the dispatcher activates review after an immutable lead commit exists.
 - Consolidate accepted findings into one repair batch. Do not create or request a separate workflow for each finding.
 - Use focused checks while iterating; reserve full repository gates for the final candidate unless the task explicitly requires otherwise.
+- During implementation, prefer the narrowest debug-profile command that proves the change: a targeted test, package test, `cargo check`, or the repository equivalent. Do not run release/LTO builds, full-workspace suites, or duplicate an unchanged gate result before the final candidate unless the defect is release-specific.
+- Run the repository-wide test/lint/format/build/security gate once on the final candidate after accepted review repairs. Reuse exact-commit evidence instead of rerunning it in every agent worktree.
+- Keep each worktree's build directory independent. When `RUSTC_WRAPPER=sccache` is provided by the launcher, use it; never point multiple concurrent worktrees at one writable Cargo `target/` directory.
 - Stay inside the task's declared ownership seam and allowed paths. Treat paths outside that seam as read-only unless the task explicitly identifies a shared-surface exception.
 - Do not merge, rebase, push, open a PR, or publish unless the task explicitly authorizes that transition.
 

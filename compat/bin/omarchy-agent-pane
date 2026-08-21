@@ -14,6 +14,11 @@ provider=$role
 [[ $role == orchestrator ]] && provider=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config/agent-workspaces/config.json")
 [[ $role == orchestrator ]] && profile=$(jq -r '.orchestrator_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json")
 orchestrator_model=$(jq -r '.orchestrator_model // empty' "$HOME/.config/agent-workspaces/config.json")
+worker_env=''
+if [[ $role != orchestrator && $role != integration ]] && command -v sccache >/dev/null 2>&1; then
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sccache"
+  worker_env="env RUSTC_WRAPPER=sccache SCCACHE_DIR=$(printf %q "$cache_dir")"
+fi
 
 set_session_metadata() {
   tmux set-option -q -t "$session" @description "$description"
@@ -35,9 +40,9 @@ fi
 
 case "$role" in
   claude|grok|codex)
-    fresh=$(agent-workspaces provider-command "$provider" fresh "$profile")
+    fresh="$worker_env $(agent-workspaces provider-command "$provider" fresh "$profile")"
     provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
-    resume=$(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id")
+    resume="$worker_env $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id")"
     ;;
   orchestrator)
     monitor="agent-workspaces monitor-start $(printf %q "$workspace_id") >/dev/null 2>&1;"

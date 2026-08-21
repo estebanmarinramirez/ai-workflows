@@ -196,6 +196,8 @@ cp "$template_file" "$task_root/template.json"
   if [[ $stage != review && $lead_first == true ]]; then
     printf -- '- Lead-first delivery: reviewers remain deferred until the lead publishes an immutable commit.\n'
     printf -- '- Run budget: %s minutes. Consolidate findings; do not spawn one workflow per finding.\n\n' "$budget_minutes"
+    printf -- '- Build economy: use focused debug-profile checks while implementing. Do not run release/LTO or full-workspace gates until the final candidate unless the defect is release-specific.\n'
+    printf -- '- Final validation: after consolidated review repairs, run the complete repository gate once and reuse that exact-commit evidence across roles. Never share writable build directories between worktrees.\n\n'
   fi
   printf '## Required evidence\n\n'
   jq -r '.required_evidence[] | "- " + .' "$template_file"
