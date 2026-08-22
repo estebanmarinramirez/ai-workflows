@@ -13,5 +13,4 @@ Required fields:
 
 Templates define outcomes and evidence. Concrete build, test, lint, and formatting commands stay in the repository's own instruction files and project configuration so a template remains portable across languages and build systems.
 
-Automation may select a template with `AW_TEMPLATE=bugfix omarchy-agent-prompt`.
-
+Automation may select a template with `AW_TEMPLATE=bugfix agent-workspaces-prompt`.

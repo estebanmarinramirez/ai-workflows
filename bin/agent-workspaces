@@ -282,8 +282,10 @@ case "$cmd" in
     done
     [[ -n $workspace_id && -n $template && -n $objective && -n $lead ]] || \
       aw_die 'dispatch requires --workspace, --template, --objective, and --lead'
+    prompt_dispatcher="${AW_PROMPT_DISPATCHER:-$HOME/.local/bin/agent-workspaces-prompt}"
+    [[ -x $prompt_dispatcher ]] || aw_die "workflow prompt dispatcher not found: $prompt_dispatcher"
     exec env AW_WORKSPACE_ID="$workspace_id" AW_TEMPLATE="$template" AW_OBJECTIVE="$objective" \
-      AW_LEAD="$lead" AW_SEAM="$seam" AW_AUTO_CONFIRM=1 omarchy-agent-prompt
+      AW_LEAD="$lead" AW_SEAM="$seam" AW_AUTO_CONFIRM=1 "$prompt_dispatcher"
     ;;
   sync)
     workspace_id=${1:?workspace id}; shift

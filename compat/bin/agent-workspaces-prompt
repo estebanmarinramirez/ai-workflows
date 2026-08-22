@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Workflow-specific prompt dispatcher. Deliberately does not use Omarchy's
+# reserved omarchy-agent-prompt command name.
+
 set -o pipefail
 
 declare -A workspace_labels=()

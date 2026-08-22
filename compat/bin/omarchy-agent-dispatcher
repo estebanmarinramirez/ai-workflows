@@ -36,7 +36,7 @@ while true; do
     --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55},border:${BORDER_FOREGROUND:-#798186}") || exit 0
 
   if [[ $selection == __new__ ]]; then
-    exec "$HOME/.local/bin/omarchy-agent-prompt"
+    exec "$HOME/.local/bin/agent-workspaces-prompt"
   fi
 
   state_file="$selection/state.json"
@@ -74,7 +74,7 @@ while true; do
       [[ -n ${objective//[[:space:]]/} ]] || continue
       template_id=$(jq -r '.template_id // "review"' "$state_file")
       exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE="$stage" AW_TEMPLATE="$template_id" \
-        AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/omarchy-agent-prompt"
+        AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/agent-workspaces-prompt"
       ;;
     'Mark task complete with waiver')
       waiver=$(omarchy menu input 'Waiver reason (recorded in audit history)' --width 680) || continue
@@ -92,7 +92,7 @@ while true; do
       [[ -n ${objective//[[:space:]]/} ]] || continue
       issue=$(omarchy menu input 'Tracker issue (optional, e.g. #2)' --width 420) || issue=''
       exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE=execute \
-        AW_PARENT_TASK_ID="$task_id" AW_ISSUE="$issue" "$HOME/.local/bin/omarchy-agent-prompt"
+        AW_PARENT_TASK_ID="$task_id" AW_ISSUE="$issue" "$HOME/.local/bin/agent-workspaces-prompt"
       ;;
     'Record blocked follow-up')
       reason=$(omarchy menu input 'Missing evidence or blocker' --width 680) || continue
@@ -142,10 +142,10 @@ while true; do
       [[ -n ${objective//[[:space:]]/} ]] || continue
       if [[ -n $template_id && -f $HOME/.config/agent-workspaces/templates/$template_id.json ]]; then
         exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE=verify \
-          AW_TEMPLATE="$template_id" AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/omarchy-agent-prompt"
+          AW_TEMPLATE="$template_id" AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/agent-workspaces-prompt"
       else
         exec env AW_WORKSPACE_ID="$workspace_id" AW_OBJECTIVE="$objective" AW_STAGE=verify \
-          AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/omarchy-agent-prompt"
+          AW_PARENT_TASK_ID="$task_id" "$HOME/.local/bin/agent-workspaces-prompt"
       fi
       ;;
     'Prepare PR checklist')
@@ -173,4 +173,3 @@ while true; do
       ;;
   esac
 done
-
