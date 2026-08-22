@@ -172,6 +172,39 @@ case "$cmd" in
       rm -f "$content"
     fi
     ;;
+  reconcile-agents)
+    workspace_id=${1:?workspace id}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    grace=$(jq -r '.idle_status_grace_seconds // 45' "$AW_CONFIG_FILE")
+    [[ $grace =~ ^[0-9]+$ && $grace -ge 15 ]] || grace=45
+    now_epoch=$(date +%s)
+    while IFS= read -r state; do
+      task=$(dirname "$state")
+      [[ $(jq -r '.status' "$state") == active ]] || continue
+      while IFS=$'\t' read -r role role_state status_file updated_at; do
+        [[ $role_state == dispatched || $role_state == in_progress ]] || continue
+        updated_epoch=$(date -d "$updated_at" +%s 2>/dev/null || printf '0')
+        ((now_epoch - updated_epoch >= grace)) || continue
+        session=$(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}\t#{@aw_provider}' 2>/dev/null |
+          awk -F '\t' -v role="$role" -v id="$workspace_id" '$2==role && $3==id {print $1 "\t" $4; exit}')
+        [[ -n $session ]] || continue
+        provider=${session#*$'\t'}; session=${session%%$'\t'*}; provider=${provider:-$role}
+        pane=$(tmux list-panes -t "$session" -F '#{pane_id}' 2>/dev/null | head -1)
+        [[ -n $pane ]] || continue
+        capture=$(tmux capture-pane -p -t "$pane" -S -30 2>/dev/null) || continue
+        aw_orchestrator_prompt_idle "$provider" <<<"$capture" || continue
+        blocker="Agent returned to its idle prompt without publishing required status. Inspect the $provider transcript; restart the provider session if its command host or CLI became unavailable."
+        "$0" status --task "$task" --role "$role" --state blocked \
+          --summary 'Agent turn ended without a coordination report' --blocker "$blocker" >/dev/null
+        aw_audit "$workspace_root" agent.unreported-idle \
+          "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg provider "$provider" '{task_id:$task,role:$role,provider:$provider}')" monitor
+      done < <(jq -r '.roles | to_entries[] | [.key,.value.state,(.value.status_json // .value.status_file),(.value.updated_at // "1970-01-01T00:00:00Z")] | @tsv' "$state" |
+        while IFS=$'\t' read -r role role_state status_file state_updated; do
+          status_updated=$(jq -r '.updated_at // empty' "$status_file" 2>/dev/null)
+          printf '%s\t%s\t%s\t%s\n' "$role" "$role_state" "$status_file" "${status_updated:-$state_updated}"
+        done)
+    done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
+    ;;
   monitor)
     workspace_id=${1:?workspace id}
     interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
@@ -179,6 +212,7 @@ case "$cmd" in
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
     signature_file="$workspace_root/.orchestrator/.state-signature"
     while :; do
+      "$0" reconcile-agents "$workspace_id" >/dev/null 2>&1 || true
       snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
       if [[ -s $snapshot_file ]]; then
         signature=$(sed '/^Updated:/d' "$snapshot_file" | sha256sum | awk '{print $1}')
@@ -223,6 +257,7 @@ case "$cmd" in
     tmux set-buffer -b "$buffer" -- "$prompt"
     tmux paste-buffer -b "$buffer" -t "$pane" -d
     tmux send-keys -t "$pane" Enter
+    [[ $provider == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
     temporary=$(mktemp "$workspace_root/.orchestrator/.wake-signature.XXXXXX")
     printf '%s\n' "$signature" >"$temporary"
     mv "$temporary" "$delivered_file"
@@ -398,6 +433,33 @@ case "$cmd" in
     done
     aw_audit "${task%/.coordination/*}" reviewers.activated "$(jq -cn --arg task "$(basename "$task")" --argjson roles "$roles_json" '{task_id:$task,roles:$roles}')"
     printf 'Activated reviewers: %s\n' "${deferred[*]}"
+    ;;
+  retry-agent)
+    task=${1:?task directory}; role=${2:?role}; state="$task/state.json"
+    [[ -f $state ]] || aw_die 'missing state.json'
+    status_file=$(jq -r --arg role "$role" '.roles[$role].status_json // .roles[$role].status_file // empty' "$state")
+    [[ -n $status_file && -f $status_file ]] || aw_die "role is not assigned: $role"
+    [[ $(jq -r '.state' "$status_file") == blocked ]] || aw_die "retry requires a blocked role: $role"
+    workspace_id=$(jq -r '.workspace_id' "$state")
+    session=$(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}' 2>/dev/null |
+      awk -F '\t' -v role="$role" -v id="$workspace_id" '$2==role && $3==id {print $1; exit}')
+    [[ -n $session ]] || aw_die "no live tmux session for role: $role"
+    provider=$(tmux show-option -qv -t "$session" @aw_provider); provider=${provider:-$role}
+    pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
+    capture=$(tmux capture-pane -p -t "$pane" -S -30 2>/dev/null) || aw_die 'cannot inspect provider pane'
+    aw_orchestrator_prompt_idle "$provider" <<<"$capture" || aw_die 'provider is not safely idle'
+    lead=$(jq -r '.lead // empty' "$state")
+    lead_status=$(jq -r --arg lead "$lead" '.roles[$lead].status_json // .roles[$lead].status_file // empty' "$state")
+    worktree=$(jq -r --arg role "$role" '.roles[$role].worktree' "$state")
+    case "$role" in claude) guide="$task/instructions/CLAUDE.md" ;; codex) guide="$task/instructions/AGENTS.md" ;; grok) guide="$task/instructions/GROK.md" ;; *) guide="$task/PROTOCOL.md" ;; esac
+    instruction="Retry the same assigned workflow after an infrastructure failure; do not create a new workflow. Read $task/PROTOCOL.md, $guide, $task/task.md, and the lead status in $lead_status. Review only the task-scoped lead commits. Work only in $worktree. Consolidate findings into one report and record status with agent-workspaces status --task '$task' --role '$role'."
+    aw_atomic_jq "$status_file" --arg at "$(aw_now)" '.state="dispatched" | .summary="" | .blockers=[] | .updated_at=$at'
+    aw_task_refresh "$task" >/dev/null
+    buffer="aw-retry-$$-$role"; tmux set-buffer -b "$buffer" -- "$instruction"; tmux paste-buffer -b "$buffer" -t "$pane"; sleep 0.35; tmux send-keys -t "$pane" Enter
+    [[ $role == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
+    tmux delete-buffer -b "$buffer"
+    aw_audit "${task%/.coordination/*}" agent.retried "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" '{task_id:$task,role:$role}')" orchestrator
+    printf 'Retried %s for task %s.\n' "$role" "$(basename "$task")"
     ;;
   next)
     task=${1:?task directory}

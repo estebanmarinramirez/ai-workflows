@@ -20,6 +20,7 @@
     "share_target_directories": false
   },
   "monitor_interval_seconds": 15,
+  "idle_status_grace_seconds": 45,
   "delivery_policy": {
     "run_budget_minutes": 90,
     "max_repair_rounds": 2,

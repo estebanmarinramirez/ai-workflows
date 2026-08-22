@@ -45,7 +45,7 @@ The monitor itself is deterministic and consumes no model tokens. When material 
 
 Worker sessions use focused debug-profile checks during implementation. Full repository validation, including release/LTO builds, runs once on the final reviewed commit unless the task is specifically release-only. Worktrees retain separate build directories; if `sccache` is installed, new worker sessions enable it automatically to reuse safe compiler artifacts across worktrees.
 
-Provider manifests declare their CLI update manager. Use **Agent Workspaces → Provider Updates** to inspect and selectively update provider CLIs. Updates never interrupt running sessions; restarted sessions pick up the new binary.
+Provider manifests declare their CLI update manager. Use **Agent Workspaces → Provider Updates** to inspect and selectively update provider CLIs. Updates retain the prior provider installation so running sessions and their lazily spawned command hosts remain usable; restarted sessions pick up the new binary.
 
 ## Models and usage
 

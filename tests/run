@@ -17,11 +17,13 @@ done
 for file in "$root/config/config.json" "$root/config/providers"/*.json "$root/schemas"/*.json; do check jq -e . "$file" >/dev/null; done
 check jq -e '.seams.general.paths == ["**"] and (.seams.shared.paths | index("Cargo.lock") != null)' "$root/config/config.json"
 check jq -e '.build_policy.final_gate_runs == 1 and .build_policy.release_build_phase == "final-candidate" and .build_policy.share_target_directories == false' "$root/config/config.json"
+check jq -e '.idle_status_grace_seconds >= 15' "$root/config/config.json"
 if rg -n 'omarchy-agent-prompt' "$root/bin/agent-workspaces" "$root/compat/bin/omarchy-agent-dispatcher" >/dev/null; then
   printf 'not ok - reserved Omarchy prompt command collision\n'; failures=$((failures+1))
 else
   printf 'ok - reserved Omarchy prompt command collision\n'
 fi
+rg -q 'mise upgrade "\$tool" --yes --no-prune' "$root/compat/bin/omarchy-agent-provider-updates" || { printf 'not ok - provider updates retain live runtime\n'; failures=$((failures+1)); }
 
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT

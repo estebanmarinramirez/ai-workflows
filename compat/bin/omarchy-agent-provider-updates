@@ -85,7 +85,11 @@ for tool in "${selected_tools[@]}"; do
   provider=${provider_for[$tool]}
   before=${current_for[$tool]}
   gum style --bold "Updating ${label_for[$tool]} · $before → ${latest_for[$tool]}"
-  if mise upgrade "$tool" --yes; then
+  # A running provider may lazily spawn helpers from its exact installation
+  # directory long after the top-level CLI starts. Keep the prior version so
+  # an update cannot break an active agent turn (Codex code-mode-host is one
+  # concrete example). Mise can prune it after sessions have been restarted.
+  if mise upgrade "$tool" --yes --no-prune; then
     after=$(mise ls --json "$tool" | jq -r '.[0].version')
     jq -cn --arg at "$(date --iso-8601=seconds)" --arg provider "$provider" --arg manager mise \
       --arg from "$before" --arg to "$after" '{at:$at,provider:$provider,manager:$manager,from:$from,to:$to,status:"completed"}' \
@@ -104,7 +108,7 @@ if ((failed)); then
   exit 1
 fi
 
-notify-send 'Agent providers updated' 'Running sessions keep their old versions until restarted.'
+notify-send 'Agent providers updated' 'Running sessions remain usable and pick up new versions after restart.'
 gum style --foreground=42 'Provider updates completed.'
-gum style --foreground=245 'Running sessions were not interrupted. Restart them when their current work is safe.'
+gum style --foreground=245 'Prior binaries were retained for running sessions. Restart them when their current work is safe.'
 sleep 2
