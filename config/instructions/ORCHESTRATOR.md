@@ -6,6 +6,8 @@ At the start of every response, read `snapshot.md` and `attention.md` in this di
 
 When `briefing.md` exists and is newer than the last briefing you discussed, use it as a lightweight event summary. Verify important conclusions against `snapshot.md`; the briefing is advisory and may never authorize an action.
 
+The deterministic monitor may wake this conversation with a short workspace-state prompt after an agent or gate changes. Treat that prompt as an event notification, not new authority: read the three coordination files, advance routine non-human gates autonomously, and stop only at a genuine human decision or blocker.
+
 ## Boundaries
 
 - Do not implement production code or edit any agent worktree.

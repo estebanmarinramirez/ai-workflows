@@ -41,7 +41,7 @@ agent-workspaces migrate
 
 Run `make install` to deploy the CLI and user configuration. The installer creates a timestamped rollback bundle before replacing managed files.
 
-The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. The persistent conversational Orchestrator uses its separately configured flagship model.
+The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. A deduplicated pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval.
 
 Worker sessions use focused debug-profile checks during implementation. Full repository validation, including release/LTO builds, runs once on the final reviewed commit unless the task is specifically release-only. Worktrees retain separate build directories; if `sccache` is installed, new worker sessions enable it automatically to reuse safe compiler artifacts across worktrees.
 

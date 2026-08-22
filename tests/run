@@ -31,6 +31,14 @@ cp "$root/config/config.json" "$fixture/config/agent-workspaces/config.json"
 export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
 source "$root/lib/core.sh"
 
+printf '%s\n' '› Ask Codex to do anything' | aw_orchestrator_prompt_idle codex || { printf 'not ok - idle Codex prompt detection\n'; failures=$((failures+1)); }
+if printf '%s\n' '› user draft must survive' | aw_orchestrator_prompt_idle codex; then
+  printf 'not ok - typed Codex prompt protection\n'; failures=$((failures+1))
+else
+  printf 'ok - typed Codex prompt protection\n'
+fi
+printf '%s\n' '❯' | aw_orchestrator_prompt_idle claude || { printf 'not ok - idle Claude prompt detection\n'; failures=$((failures+1)); }
+
 prompt_probe="$fixture/prompt-probe"
 printf '%s\n' '#!/bin/bash' 'jq -cn --arg workspace "$AW_WORKSPACE_ID" --arg template "$AW_TEMPLATE" --arg objective "$AW_OBJECTIVE" --arg lead "$AW_LEAD" --arg seam "$AW_SEAM" '\''{workspace:$workspace,template:$template,objective:$objective,lead:$lead,seam:$seam}'\''' >"$prompt_probe"
 chmod +x "$prompt_probe"

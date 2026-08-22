@@ -156,6 +156,16 @@ aw_provider_command() {
   jq -r '.[] | @sh' <<<"$command_json" | paste -sd' ' -
 }
 
+aw_orchestrator_prompt_idle() {
+  local provider=$1 content
+  content=$(cat)
+  case "$provider" in
+    codex) grep -Eq '^[[:space:]]*›[[:space:]]+Ask Codex to do anything[[:space:]]*$' <<<"$content" ;;
+    claude|grok) grep -Eq '^[[:space:]]*❯[[:space:]]*$' <<<"$content" ;;
+    *) return 1 ;;
+  esac
+}
+
 aw_workspace_risks() {
   local workspace_id=$1 session repository role worktree branch dirty ahead task_count overdue_count=0 active_agents=0 now task_status deadline
   repository=$(tmux list-sessions -F $'#{@aw_workspace_id}\t#{@aw_repository}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$1==id {print $2; exit}' || true)

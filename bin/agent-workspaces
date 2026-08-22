@@ -186,11 +186,47 @@ case "$cmd" in
         printf '%s\n' "$signature" >"$signature_file"
         if [[ -n $previous && $signature != "$previous" ]]; then
           "$0" attention "$workspace_id" >/dev/null 2>&1 || true
-          "$0" event-review "$workspace_id" >/dev/null 2>&1 &
+          "$0" event-review "$workspace_id" >/dev/null 2>&1 || true
+          printf '%s\n' "$signature" >"$workspace_root/.orchestrator/.pending-wake"
         fi
+      fi
+      if [[ -s $workspace_root/.orchestrator/.pending-wake ]]; then
+        read -r pending_signature <"$workspace_root/.orchestrator/.pending-wake"
+        "$0" wake "$workspace_id" "$pending_signature" >/dev/null 2>&1 || true
       fi
       sleep "$interval"
     done
+    ;;
+  wake)
+    workspace_id=${1:?workspace id}; signature=${2:?state signature}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    pending_file="$workspace_root/.orchestrator/.pending-wake"
+    delivered_file="$workspace_root/.orchestrator/.wake-signature"
+    delivered=''; [[ -f $delivered_file ]] && read -r delivered <"$delivered_file"
+    if [[ $delivered == "$signature" ]]; then
+      [[ ! -f $pending_file ]] || mv "$pending_file" "$workspace_root/.orchestrator/.pending-wake.delivered"
+      exit 0
+    fi
+    session=''; provider=''
+    while IFS='|' read -r candidate role candidate_workspace candidate_provider; do
+      if [[ $role == orchestrator && $candidate_workspace == "$workspace_id" ]]; then
+        session=$candidate; provider=${candidate_provider:-codex}; break
+      fi
+    done < <(tmux list-sessions -F '#{session_name}|#{@aw_role}|#{@aw_workspace_id}|#{@aw_provider}' 2>/dev/null || true)
+    [[ -n $session ]] || exit 75
+    pane=$(tmux list-panes -t "$session" -F '#{pane_id}' 2>/dev/null | head -1)
+    [[ -n $pane ]] || exit 75
+    capture=$(tmux capture-pane -p -t "$pane" -S -30 2>/dev/null) || exit 75
+    aw_orchestrator_prompt_idle "$provider" <<<"$capture" || exit 75
+    prompt='Workspace state changed. Read briefing.md, snapshot.md, and attention.md now. Continue routine coordination autonomously under AGENTS.md. Advance non-human gates; stop and report only when a genuine human decision is required.'
+    buffer="aw-orchestrator-wake-$$"
+    tmux set-buffer -b "$buffer" -- "$prompt"
+    tmux paste-buffer -b "$buffer" -t "$pane" -d
+    tmux send-keys -t "$pane" Enter
+    temporary=$(mktemp "$workspace_root/.orchestrator/.wake-signature.XXXXXX")
+    printf '%s\n' "$signature" >"$temporary"
+    mv "$temporary" "$delivered_file"
+    [[ ! -f $pending_file ]] || mv "$pending_file" "$workspace_root/.orchestrator/.pending-wake.delivered"
     ;;
   attention)
     workspace_id=${1:?workspace id}
