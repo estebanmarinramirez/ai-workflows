@@ -1,6 +1,25 @@
-# Agent Workspaces
+# Workspaces
 
-Agent Workspaces is an Omarchy-native control plane for persistent coding-agent worktrees. It coordinates independent providers, tmux sessions, evidence-backed tasks, integration gates, and approval-gated draft pull requests.
+Workspaces is a portable control plane for persistent coding-agent worktrees. It coordinates independent providers, tmux sessions, evidence-backed tasks, integration gates, and approval-gated publication. Omarchy provides the richest desktop adapter; macOS uses the same coordination core through a terminal-native interface.
+
+## Install
+
+### Omarchy
+
+```bash
+make install
+```
+
+### macOS
+
+Install Homebrew, clone this repository, then run:
+
+```bash
+make install-macos
+workspaces
+```
+
+The macOS installer uses Homebrew Bash and GNU compatibility tools, installs a `launchd` monitor per opened workspace, and keeps all agents in persistent tmux sessions. `workspaces-open /path/to/repository my-feature` is the non-interactive entry point. Desktop window tiling is intentionally optional; tmux persistence and the coordination contract do not depend on a particular terminal or window manager.
 
 ## Safety model
 
@@ -39,9 +58,11 @@ agent-workspaces publish TASK_DIR [--confirmed-by-user]
 agent-workspaces migrate
 ```
 
-Run `make install` to deploy the CLI and user configuration. The installer creates a timestamped rollback bundle before replacing managed files.
+The Omarchy installer creates a timestamped rollback bundle before replacing managed files.
 
 The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. A deduplicated pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval.
+
+Visible provider prompts are not treated as completion signals because some CLIs render their composer while tools are still running. Workflow state changes only from explicit agent reports, confirmed process failure, or an operator-initiated recovery.
 
 Worker sessions use focused debug-profile checks during implementation. Full repository validation, including release/LTO builds, runs once on the final reviewed commit unless the task is specifically release-only. Worktrees retain separate build directories; if `sccache` is installed, new worker sessions enable it automatically to reuse safe compiler artifacts across worktrees.
 

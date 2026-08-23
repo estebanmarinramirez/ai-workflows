@@ -51,6 +51,11 @@ for source_file in "$install_root/compat/bin"/*; do
   cp "$source_file" "$target"
   chmod +x "$target"
 done
+for source_file in "$install_root/compat/portable"/*; do
+  target="$bin_root/$(basename "$source_file")"
+  cp "$source_file" "$target"
+  chmod +x "$target"
+done
 for source_file in "$install_root/compat/systemd"/*; do
   cp "$source_file" "$systemd_root/$(basename "$source_file")"
 done

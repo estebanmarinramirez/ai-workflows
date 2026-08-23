@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+
+choice=$(printf '%s\n' 'Open workspace' 'Workflow dashboard' 'Tmux sessions' 'Provider health' |
+  fzf --layout=reverse --no-border --pointer='›' --prompt='Workspaces  ') || exit 0
+case "$choice" in
+  'Open workspace') exec workspaces-open ;;
+  'Workflow dashboard') exec agent-workspaces dashboard ;;
+  'Tmux sessions') exec tmux list-sessions ;;
+  'Provider health') exec agent-workspaces doctor ;;
+esac

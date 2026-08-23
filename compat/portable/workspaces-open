@@ -1,0 +1,52 @@
+#!/bin/bash
+set -euo pipefail
+
+repository=${1:-}
+if [[ -z $repository ]]; then
+  mapfile -t repositories < <(find "$HOME/Developer" "$HOME/Work" "$HOME/Projects" "$HOME/Code" -maxdepth 4 -type d -name .git -print 2>/dev/null | sed 's#/.git$##' | sort -u)
+  ((${#repositories[@]})) || { printf 'No Git repositories found. Pass one explicitly: workspaces-open PATH [NAME]\n' >&2; exit 1; }
+  repository=$(printf '%s\n' "${repositories[@]}" | fzf --scheme=path --prompt='Repository  ') || exit 0
+fi
+repository=$(cd "$repository" && pwd)
+git -C "$repository" rev-parse --is-inside-work-tree >/dev/null
+set_name=${2:-default}; set_slug=$(tr -cs '[:alnum:]_-' '-' <<<"$set_name" | sed 's/^-//;s/-$//')
+repo_hash=$(printf '%s' "$repository" | shasum -a 256 | cut -c1-10)
+repo_name=$(basename "$repository")
+workspace_id="$repo_hash:$set_slug"
+root="${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces/$repo_name-$repo_hash/$set_slug"
+mkdir -p "$root/.coordination" "$root/.orchestrator"
+cp "$HOME/.config/agent-workspaces/instructions/ORCHESTRATOR.md" "$root/.orchestrator/AGENTS.md"
+base=$(git -C "$repository" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'HEAD')
+providers=(claude codex grok)
+for role in "${providers[@]}"; do
+  path="$root/$role"; branch="agents/$set_slug/$role"
+  if [[ ! -d $path ]]; then
+    git -C "$repository" show-ref --verify --quiet "refs/heads/$branch" && git -C "$repository" worktree add "$path" "$branch" || git -C "$repository" worktree add -b "$branch" "$path" "$base"
+  fi
+done
+jq -n --arg id "$workspace_id" --arg repository "$repository" --arg set "$set_slug" --arg at "$(date --iso-8601=seconds)" --argjson providers ' ["claude","codex","grok"] ' \
+  '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:"trusted",layout:"tmux",providers:$providers,created_at:$at,updated_at:$at}' >"$root/workspace.json"
+for role in "${providers[@]}"; do
+  session="aw-$repo_hash-$repo_name-$set_slug-$role"; path="$root/$role"
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    command=$(agent-workspaces provider-command "$role" resume trusted '' '')
+    tmux new-session -d -s "$session" -c "$path" bash -lc "$command; exec bash"
+    tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
+    tmux set-option -q -t "$session" @aw_role "$role"
+    tmux set-option -q -t "$session" @aw_provider "$role"
+    tmux set-option -q -t "$session" @aw_repository "$repository"
+    tmux set-option -q -t "$session" @aw_set "$set_slug"
+  fi
+done
+session="aw-$repo_hash-$repo_name-$set_slug-orchestrator"
+if ! tmux has-session -t "$session" 2>/dev/null; then
+  command=$(agent-workspaces provider-command codex fresh trusted '' "$(jq -r '.orchestrator_model' "$HOME/.config/agent-workspaces/config.json")")
+  tmux new-session -d -s "$session" -c "$root/.orchestrator" bash -lc "AW_WORKSPACE_ID=$(printf %q "$workspace_id") $command; exec bash"
+  tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
+  tmux set-option -q -t "$session" @aw_role orchestrator
+  tmux set-option -q -t "$session" @aw_provider codex
+  tmux set-option -q -t "$session" @aw_repository "$repository"
+  tmux set-option -q -t "$session" @aw_set "$set_slug"
+fi
+agent-workspaces monitor-start "$workspace_id"
+exec tmux attach-session -t "$session"

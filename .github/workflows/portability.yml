@@ -1,0 +1,28 @@
+name: portability
+on:
+  push:
+  pull_request:
+jobs:
+  shell:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            brew install bash coreutils findutils jq tmux fzf gum
+            echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+            echo "$(brew --prefix)/opt/findutils/libexec/gnubin" >> "$GITHUB_PATH"
+          else
+            sudo apt-get update
+            sudo apt-get install -y jq tmux fzf
+          fi
+      - name: Static portability checks
+        shell: bash
+        run: make portability-check
+      - name: Core tests
+        if: runner.os == 'Linux'
+        run: make test

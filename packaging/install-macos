@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $(uname -s) == Darwin ]] || { printf 'This installer is for macOS.\n' >&2; exit 1; }
+command -v brew >/dev/null 2>&1 || { printf 'Install Homebrew first: https://brew.sh\n' >&2; exit 1; }
+
+brew install bash coreutils findutils git jq tmux fzf gum gh mise python@3.13
+root=$(cd "$(dirname "$0")/.." && pwd)
+version=$(<"$root/VERSION")
+app_root="$HOME/.local/share/workspaces/$version"
+config_root="$HOME/.config/agent-workspaces"
+bin_root="$HOME/.local/bin"
+backup_root="$HOME/.local/share/workspaces/backups/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$app_root" "$config_root/providers" "$config_root/instructions" "$config_root/templates" "$bin_root" "$backup_root"
+[[ ! -d $app_root/bin ]] || cp -a "$app_root" "$backup_root/app"
+cp -a "$root/bin" "$root/lib" "$root/schemas" "$root/packaging" "$app_root/"
+cp "$root/config/providers"/*.json "$config_root/providers/"
+cp "$root/config/instructions"/*.md "$config_root/instructions/"
+cp "$root/config/templates"/* "$config_root/templates/"
+cp "$root/config/protocol.md" "$config_root/protocol.md"
+[[ -f $config_root/config.json ]] || cp "$root/config/config.json" "$config_root/config.json"
+
+brew_prefix=$(brew --prefix)
+wrapper_path="$brew_prefix/opt/coreutils/libexec/gnubin:$brew_prefix/opt/findutils/libexec/gnubin:$brew_prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+for name in agent-workspaces; do
+  target="$bin_root/$name"
+  printf '#!%s/bin/bash\nexport PATH=%q\nexec %q "$@"\n' "$brew_prefix" "$wrapper_path" "$app_root/bin/$name" >"$target"
+  chmod +x "$target"
+done
+for source_file in "$root/compat/portable"/*; do
+  target="$bin_root/$(basename "$source_file")"
+  cp "$source_file" "$target"
+  chmod +x "$target"
+done
+"$bin_root/agent-workspaces" migrate
+"$bin_root/agent-workspaces" doctor
+printf 'Workspaces %s installed. Add %s to PATH, then run: workspaces\n' "$version" "$bin_root"

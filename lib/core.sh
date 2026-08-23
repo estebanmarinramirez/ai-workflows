@@ -12,6 +12,19 @@ AW_PROVIDER_HOME=$AW_CONFIG_HOME/providers
 aw_die() { printf 'agent-workspaces: %s\n' "$*" >&2; exit 1; }
 aw_now() { date --iso-8601=seconds; }
 aw_require() { command -v "$1" >/dev/null 2>&1 || aw_die "missing dependency: $1"; }
+aw_platform() { [[ $(uname -s) == Darwin ]] && printf 'macos\n' || printf 'linux\n'; }
+aw_notify() {
+  local title=$1 message=$2
+  if [[ $(aw_platform) == macos ]]; then
+    /usr/bin/osascript - "$title" "$message" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  display notification (item 2 of argv) with title (item 1 of argv)
+end run
+APPLESCRIPT
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -a 'Workspaces' "$title" "$message" 2>/dev/null || true
+  fi
+}
 aw_valid_state() { [[ $1 =~ ^(deferred|dispatched|in_progress|blocked|completed)$ ]]; }
 aw_valid_profile() { [[ $1 =~ ^(safe|trusted|yolo)$ ]]; }
 
@@ -183,7 +196,7 @@ aw_workspace_risks() {
   printf 'Workspace: %s\nActive tasks: %s\nOver budget: %s\n' "$workspace_id" "$task_count" "$overdue_count"
   while IFS=$'\t' read -r session role; do
     [[ -n $session ]] || continue
-    if [[ $role != integration && $role != orchestrator ]] && omarchy-agent-pane-active "$role" "$session" 2>/dev/null; then ((active_agents+=1)); fi
+    if [[ $role != integration && $role != orchestrator ]] && agent-workspaces-pane-active "$role" "$session" 2>/dev/null; then ((active_agents+=1)); fi
     worktree=$(tmux display-message -p -t "$session" '#{pane_current_path}' 2>/dev/null)
     [[ $role == integration && -n $repository ]] && worktree=$repository
     if git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then

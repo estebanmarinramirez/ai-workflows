@@ -14,6 +14,7 @@ for file in "$root"/compat/bin/*; do
     check bash -n "$file"
   fi
 done
+for file in "$root"/compat/portable/*; do check bash -n "$file"; done
 for file in "$root/config/config.json" "$root/config/providers"/*.json "$root/schemas"/*.json; do check jq -e . "$file" >/dev/null; done
 check jq -e '.seams.general.paths == ["**"] and (.seams.shared.paths | index("Cargo.lock") != null)' "$root/config/config.json"
 check jq -e '.build_policy.final_gate_runs == 1 and .build_policy.release_build_phase == "final-candidate" and .build_policy.share_target_directories == false' "$root/config/config.json"

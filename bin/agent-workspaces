@@ -13,7 +13,9 @@ case "$cmd" in
   version|--version) printf '%s\n' "$AW_VERSION" ;;
   doctor)
     failed=0
-    for dep in bash git jq flock tmux fzf gum hyprctl gh python3; do
+    dependencies=(bash git jq tmux fzf gum gh python3)
+    [[ $(aw_platform) == linux ]] && dependencies+=(flock)
+    for dep in "${dependencies[@]}"; do
       if command -v "$dep" >/dev/null; then printf 'ok       %s\n' "$dep"; else printf 'missing  %s\n' "$dep"; failed=1; fi
     done
     for provider in "$AW_PROVIDER_HOME"/*.json; do
@@ -210,9 +212,11 @@ case "$cmd" in
     interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
     [[ $interval =~ ^[0-9]+$ && $interval -ge 5 ]] || interval=15
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    instance_lock="$workspace_root/.orchestrator/.monitor-instance"
+    mkdir "$instance_lock" 2>/dev/null || exit 0
+    trap 'rmdir "$instance_lock" 2>/dev/null || true' EXIT
     signature_file="$workspace_root/.orchestrator/.state-signature"
     while :; do
-      "$0" reconcile-agents "$workspace_id" >/dev/null 2>&1 || true
       snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
       if [[ -s $snapshot_file ]]; then
         signature=$(sed '/^Updated:/d' "$snapshot_file" | sha256sum | awk '{print $1}')
@@ -292,7 +296,7 @@ case "$cmd" in
     if [[ $new_signature != "$old_signature" ]] && rg -q '^## ' "$attention_file"; then
       headline=$(awk '/^## / {sub(/^## /, ""); print; exit}' "$attention_file")
       recommendation=$(awk 'found && NF {print; exit} /^## / {found=1}' "$attention_file")
-      notify-send -a 'Agent Workspaces' 'Workflow decision required' "$headline · $recommendation" 2>/dev/null || true
+      aw_notify 'Workflow decision required' "$headline · $recommendation"
     fi
     printf '%s\n' "$attention_file"
     ;;
@@ -300,15 +304,39 @@ case "$cmd" in
     workspace_id=${1:?workspace id}
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
     unit_slug=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$workspace_id" | cut -c1-80)
-    unit="agent-workspaces-monitor-$unit_slug.service"
-    if systemctl --user is-active --quiet "$unit"; then exit 0; fi
-    systemd-run --user --quiet --unit="${unit%.service}" --collect \
-      /usr/bin/flock -n "$workspace_root/.orchestrator/.monitor.lock" "$0" monitor "$workspace_id"
+    if [[ $(aw_platform) == macos ]]; then
+      label="dev.agent-workspaces.monitor.$unit_slug"
+      plist="$HOME/Library/LaunchAgents/$label.plist"
+      mkdir -p "$(dirname "$plist")"
+      executable=$(realpath "$0")
+      cat >"$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$label</string>
+<key>ProgramArguments</key><array><string>$executable</string><string>monitor</string><string>$workspace_id</string></array>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>$workspace_root/.orchestrator/monitor.log</string>
+<key>StandardErrorPath</key><string>$workspace_root/.orchestrator/monitor.error.log</string>
+</dict></plist>
+PLIST
+      launchctl bootout "gui/$UID/$label" >/dev/null 2>&1 || true
+      launchctl bootstrap "gui/$UID" "$plist"
+    else
+      unit="agent-workspaces-monitor-$unit_slug.service"
+      if systemctl --user is-active --quiet "$unit"; then exit 0; fi
+      systemd-run --user --quiet --unit="${unit%.service}" --collect "$0" monitor "$workspace_id"
+    fi
     ;;
   monitor-stop)
     workspace_id=${1:?workspace id}
     unit_slug=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$workspace_id" | cut -c1-80)
-    systemctl --user stop "agent-workspaces-monitor-$unit_slug.service" 2>/dev/null || true
+    if [[ $(aw_platform) == macos ]]; then
+      label="dev.agent-workspaces.monitor.$unit_slug"
+      launchctl bootout "gui/$UID/$label" >/dev/null 2>&1 || true
+    else
+      systemctl --user stop "agent-workspaces-monitor-$unit_slug.service" 2>/dev/null || true
+    fi
     ;;
   event-review)
     workspace_id=${1:?workspace id}
@@ -643,7 +671,7 @@ case "$cmd" in
       [[ -z $requested_role || $role == "$requested_role" ]] || continue
       [[ $role != integration ]] || continue
       provider=$(tmux show-option -qv -t "$session" @aw_provider); provider=${provider:-$role}
-      omarchy-agent-pane-active "$role" "$session" 2>/dev/null && continue
+      agent-workspaces-pane-active "$role" "$session" 2>/dev/null && continue
       directory=$(tmux display-message -p -t "$session" '#{pane_current_path}')
       workspace_root=$(aw_workspace_root "$workspace_id" 2>/dev/null || true)
       if [[ $role == orchestrator ]]; then
