@@ -17,34 +17,43 @@ root="${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces/$repo_name-$repo_has
 mkdir -p "$root/.coordination" "$root/.orchestrator"
 cp "$HOME/.config/agent-workspaces/instructions/ORCHESTRATOR.md" "$root/.orchestrator/AGENTS.md"
 base=$(git -C "$repository" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'HEAD')
-providers=(claude codex grok)
-for role in "${providers[@]}"; do
+declare -A role_providers=()
+roles=()
+while IFS=$'\t' read -r role provider; do roles+=("$role"); role_providers["$role"]=$provider; done < <(agent-workspaces provider-slots)
+((${#roles[@]})) || { printf 'No enabled provider is installed.\n' >&2; exit 1; }
+for role in "${roles[@]}"; do
   path="$root/$role"; branch="agents/$set_slug/$role"
   if [[ ! -d $path ]]; then
     git -C "$repository" show-ref --verify --quiet "refs/heads/$branch" && git -C "$repository" worktree add "$path" "$branch" || git -C "$repository" worktree add -b "$branch" "$path" "$base"
   fi
 done
-jq -n --arg id "$workspace_id" --arg repository "$repository" --arg set "$set_slug" --arg at "$(date --iso-8601=seconds)" --argjson providers ' ["claude","codex","grok"] ' \
-  '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:"trusted",layout:"tmux",providers:$providers,created_at:$at,updated_at:$at}' >"$root/workspace.json"
-for role in "${providers[@]}"; do
+providers_json=$(printf '%s\n' "${roles[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')
+agents_json='[]'; for role in "${roles[@]}"; do agents_json=$(jq --arg role "$role" --arg provider "${role_providers[$role]}" '.+[{role:$role,provider:$provider}]' <<<"$agents_json"); done
+jq -n --arg id "$workspace_id" --arg repository "$repository" --arg set "$set_slug" --arg at "$(date --iso-8601=seconds)" --argjson providers "$providers_json" --argjson agents "$agents_json" \
+  '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:"trusted",layout:"tmux",providers:$providers,agents:$agents,created_at:$at,updated_at:$at}' >"$root/workspace.json"
+for role in "${roles[@]}"; do
   session="aw-$repo_hash-$repo_name-$set_slug-$role"; path="$root/$role"
   if ! tmux has-session -t "$session" 2>/dev/null; then
-    command=$(agent-workspaces provider-command "$role" resume trusted '' '')
+    provider=${role_providers[$role]}
+    command=$(agent-workspaces provider-command "$provider" resume trusted '' '')
     tmux new-session -d -s "$session" -c "$path" bash -lc "$command; exec bash"
     tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
     tmux set-option -q -t "$session" @aw_role "$role"
-    tmux set-option -q -t "$session" @aw_provider "$role"
+    tmux set-option -q -t "$session" @aw_provider "$provider"
     tmux set-option -q -t "$session" @aw_repository "$repository"
     tmux set-option -q -t "$session" @aw_set "$set_slug"
   fi
 done
+orchestrator_provider=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config/agent-workspaces/config.json")
+agent-workspaces available-providers | grep -qx "$orchestrator_provider" || orchestrator_provider=${role_providers[${roles[0]}]}
 session="aw-$repo_hash-$repo_name-$set_slug-orchestrator"
 if ! tmux has-session -t "$session" 2>/dev/null; then
-  command=$(agent-workspaces provider-command codex fresh trusted '' "$(jq -r '.orchestrator_model' "$HOME/.config/agent-workspaces/config.json")")
+  orchestrator_model=''; [[ $orchestrator_provider == codex ]] && orchestrator_model=$(jq -r '.orchestrator_model' "$HOME/.config/agent-workspaces/config.json")
+  command=$(agent-workspaces provider-command "$orchestrator_provider" fresh trusted '' "$orchestrator_model")
   tmux new-session -d -s "$session" -c "$root/.orchestrator" bash -lc "AW_WORKSPACE_ID=$(printf %q "$workspace_id") $command; exec bash"
   tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
   tmux set-option -q -t "$session" @aw_role orchestrator
-  tmux set-option -q -t "$session" @aw_provider codex
+  tmux set-option -q -t "$session" @aw_provider "$orchestrator_provider"
   tmux set-option -q -t "$session" @aw_repository "$repository"
   tmux set-option -q -t "$session" @aw_set "$set_slug"
 fi

@@ -2,6 +2,8 @@
 
 Workspaces is a portable control plane for persistent coding-agent worktrees. It coordinates independent providers, tmux sessions, evidence-backed tasks, integration gates, and approval-gated publication. Omarchy provides the richest desktop adapter; macOS uses the same coordination core through a terminal-native interface.
 
+Provider participation is capability-based, not triad-dependent. A workspace opens with every enabled provider currently installed: one provider gives a useful solo workflow, two add independent review, and three enable the full lead/reviewer/verifier pattern. Disable an unavailable subscription without uninstalling its CLI using `agent-workspaces provider-disable PROVIDER`; restore it with `provider-enable PROVIDER`.
+
 ## Install
 
 ### Omarchy
@@ -78,3 +80,7 @@ Agent Workspaces extends Omarchy's native **Agents** bar panel rather than insta
 - Workspace delivery health: only the newest workflow per workspace is considered current; historical records feed seven-day completions without inflating blocked or active counts. The panel also shows current delivery-budget pressure.
 
 Run `agent-workspaces-usage-update` to refresh the added records immediately. A user-level timer keeps them current every two minutes; Omarchy continues refreshing its built-in provider records normally. The figures are local operational telemetry, not a provider invoice: account limits come from each provider's authenticated CLI where available, while local session totals measure work recorded on this machine.
+
+Additional panel collectors use an `id=executable` registry and publish through the shared runtime in `lib/usage.sh`. The runtime validates Omarchy's record contract, writes atomically, logs per-collector outcomes under the Omarchy agents state directory, and retains the last good record when a collector fails. Run `agent-workspaces-usage-check` for collector, record, freshness, and recent-event diagnostics. For development or downstream packaging, override the registry with colon-separated `AW_USAGE_COLLECTORS` entries.
+
+Active workflows use quota-aware delivery rather than a wall-clock deadline. The Workspaces record averages the most constrained live usage limit from each participating provider into a Pooled model quota, so the indicator tracks actual provider consumption and does not become permanently full merely because a workflow has been running for 90 minutes.

@@ -69,17 +69,29 @@ for workspace_file in data_root.rglob("workspace.json") if data_root.is_dir() el
 blocked = sum(task.get("status") == "blocked" for task in current_tasks)
 review = sum(task.get("status") in REVIEW for task in current_tasks)
 running = len(current_tasks)
-overdue = 0
-budget_ratios = []
+usage_root = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "omarchy/agents/usage"
+participating_providers = set()
 for task in current_tasks:
-    delivery = task.get("delivery") or {}
-    start = task.get("_created")
-    deadline = timestamp(delivery.get("deadline_at"))
-    if start and deadline and deadline > start:
-        ratio = max(0.0, (now - start).total_seconds() / (deadline - start).total_seconds())
-        budget_ratios.append(min(1.0, ratio))
-        if now > deadline:
-            overdue += 1
+    participating_providers.update((task.get("roles") or {}).keys())
+
+provider_usage = []
+provider_resets = []
+for provider in sorted(participating_providers):
+    try:
+        provider_record = json.loads((usage_root / f"{provider}.json").read_text())
+    except (OSError, ValueError, AttributeError):
+        continue
+    percentages = []
+    for limit in provider_record.get("limits") or []:
+        try:
+            percentages.append(max(0.0, min(1.0, float(limit.get("percent")))))
+            if limit.get("resetsAt"):
+                provider_resets.append(limit["resetsAt"])
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if percentages:
+        # A provider is only as available as its most constrained active limit.
+        provider_usage.append(max(percentages))
 
 status_parts = [f"{running} running"]
 if review:
@@ -88,8 +100,14 @@ if blocked:
     status_parts.append(f"{blocked} blocked")
 status_parts.append(f"{completed_week} done/7d")
 limits = []
-if budget_ratios:
-    limits.append({"label": "Current delivery budget", "title": "Delivery budget", "percent": max(budget_ratios), "resetsAt": ""})
+if provider_usage:
+    pooled_usage = sum(provider_usage) / len(provider_usage)
+    limits.append({
+        "label": f"Pooled usage across {len(provider_usage)} providers",
+        "title": "Pooled model quota",
+        "percent": pooled_usage,
+        "resetsAt": min(provider_resets) if provider_resets else "",
+    })
 
 record = {
     "schemaVersion": 1,
@@ -97,8 +115,8 @@ record = {
     "name": "Workspaces",
     "ready": True,
     "tierLabel": " · ".join(status_parts),
-    "usageStatusText": "Attention required" if blocked or overdue else "",
-    "authHelpText": f"{blocked} blocked · {overdue} over budget" if blocked or overdue else "",
+    "usageStatusText": "Attention required" if blocked else "",
+    "authHelpText": f"{blocked} blocked" if blocked else "",
     "limits": limits,
     "todayPrompts": completed_today,
     "todaySessions": running,

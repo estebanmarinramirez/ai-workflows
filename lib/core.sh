@@ -28,6 +28,15 @@ APPLESCRIPT
 aw_valid_state() { [[ $1 =~ ^(deferred|dispatched|in_progress|blocked|completed)$ ]]; }
 aw_valid_profile() { [[ $1 =~ ^(safe|trusted|yolo)$ ]]; }
 
+aw_provider_available() {
+  local provider=$1 manifest="$AW_PROVIDER_HOME/$1.json" executable enabled
+  [[ -f $manifest ]] || return 1
+  enabled=$(jq -r --arg provider "$provider" 'if .provider_overrides[$provider].enabled == false then false else true end' "$AW_CONFIG_FILE" 2>/dev/null)
+  [[ $enabled == true ]] || return 1
+  executable=$(jq -r '.executable // .id' "$manifest")
+  command -v "$executable" >/dev/null 2>&1
+}
+
 aw_origin_base() {
   local repository=$1 base
   base=$(git -C "$repository" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)

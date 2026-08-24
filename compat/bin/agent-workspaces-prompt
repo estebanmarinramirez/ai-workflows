@@ -42,22 +42,29 @@ fi
 declare -A role_sessions=()
 declare -A role_panes=()
 declare -A role_paths=()
+declare -A role_providers=()
 active_roles=()
 active_count=0
-expected_count=$(jq -r '.providers | length' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null || printf 3)
+expected_count=0
 
 while IFS= read -r session; do
   [[ -n $session ]] || continue
   role=$(tmux show-option -qv -t "$session" @aw_role)
+  provider=$(tmux show-option -qv -t "$session" @aw_provider); provider=${provider:-$role}
+  agent-workspaces available-providers | grep -qx "$provider" || continue
+  ((expected_count++))
   pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
   if omarchy-agent-pane-active "$role" "$session"; then
     role_sessions["$role"]=$session
     role_panes["$role"]=$pane
     role_paths["$role"]=$(tmux display-message -p -t "$pane" '#{pane_current_path}')
+    role_providers["$role"]=$provider
     active_roles+=("$role")
     ((active_count++))
   fi
 done <<<"${workspace_sessions[$workspace_id]}"
+
+((expected_count > 0)) || { notify-send 'Agent Dispatcher' 'No enabled provider is available for this workspace.'; exit 1; }
 
 if ((active_count < expected_count)); then
   readiness=$(omarchy menu select "$active_count/$expected_count agents ready" \
@@ -119,11 +126,6 @@ task_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash/$set_slug/.
 workspace_root=${task_root%/.coordination/*}
 profile=$(jq -r '.profile // "trusted"' "$workspace_root/workspace.json" 2>/dev/null || printf trusted)
 lead_first=$(jq -r '.delivery_policy.lead_first // true' "$HOME/.config/agent-workspaces/config.json")
-budget_minutes=$(jq -r '.delivery_policy.run_budget_minutes // 90' "$HOME/.config/agent-workspaces/config.json")
-max_repair_rounds=$(jq -r '.delivery_policy.max_repair_rounds // 2' "$HOME/.config/agent-workspaces/config.json")
-[[ $budget_minutes =~ ^[0-9]+$ ]] || budget_minutes=90
-[[ $max_repair_rounds =~ ^[0-9]+$ ]] || max_repair_rounds=2
-deadline_at=$(date -d "+$budget_minutes minutes" --iso-8601=seconds)
 repair_round=0
 if [[ -n ${AW_PARENT_TASK_ID:-} ]]; then
   parent_delivery_state="$workspace_root/.coordination/$AW_PARENT_TASK_ID/state.json"
@@ -131,10 +133,6 @@ if [[ -n ${AW_PARENT_TASK_ID:-} ]]; then
     repair_round=$(jq -r '.delivery.repair_round // 0' "$parent_delivery_state")
     [[ $stage == execute ]] && ((repair_round+=1))
   fi
-fi
-if ((repair_round > max_repair_rounds)); then
-  notify-send 'Agent Dispatcher' "Repair-round limit reached ($max_repair_rounds). Integrate the coherent slice or escalate one genuine blocker."
-  exit 1
 fi
 seam=${AW_SEAM:-general}
 allowed_paths=$(jq -c --arg seam "$seam" '.seams[$seam].paths // empty' "$HOME/.config/agent-workspaces/config.json")
@@ -196,9 +194,12 @@ cp "$template_file" "$task_root/template.json"
   printf -- '- Work only inside your assigned worktree; never edit the integration checkout or another agent worktree.\n'
   printf -- '- Record progress, findings, commits, and blockers only in your own status file.\n'
   printf -- '- Integration is the merge gate. Do not merge branches yourself.\n\n'
+  if ((active_count == 1)); then
+    printf -- '- Solo-provider mode: implementation and self-review use one provider. Report this reduced assurance explicitly; do not claim independent cross-provider verification.\n\n'
+  fi
   if [[ $stage != review && $lead_first == true ]]; then
     printf -- '- Lead-first delivery: reviewers remain deferred until the lead publishes an immutable commit.\n'
-    printf -- '- Run budget: %s minutes. Consolidate findings; do not spawn one workflow per finding.\n\n' "$budget_minutes"
+    printf -- '- Delivery capacity follows the participating providers’ available quota. Continue making useful progress while capacity remains; consolidate findings rather than spawning one workflow per finding.\n\n'
     printf -- '- Build economy: use focused debug-profile checks while implementing. Do not run release/LTO or full-workspace gates until the final candidate unless the defect is release-specific.\n'
     printf -- '- Final validation: after consolidated review repairs, run the complete repository gate once and reuse that exact-commit evidence across roles. Never share writable build directories between worktrees.\n\n'
   fi
@@ -248,15 +249,13 @@ jq -n \
   --arg parent_id "${AW_PARENT_TASK_ID:-}" \
   --arg issue "${AW_ISSUE:-}" \
   --arg created_at "$(date --iso-8601=seconds)" \
-  --arg deadline_at "$deadline_at" \
   --arg lead "$lead" \
-  --argjson budget_minutes "$budget_minutes" \
   --argjson repair_round "$repair_round" \
   --argjson roles "$roles_json" \
   '{schema_version: 2, id: $id, workspace_id: $workspace_id, repository: $repository, set: $set,
     objective: $objective, seam: $seam, allowed_paths: $allowed_paths, stage: $stage, template_id: $template_id, template_version: $template_version,
     profile: $profile, status: "active", parent_id: $parent_id, issue: $issue, pr: {}, lead: $lead,
-    delivery: {mode:"bounded",run_budget_minutes:$budget_minutes,deadline_at:$deadline_at,repair_round:$repair_round},
+    delivery: {mode:"quota-aware",continue_while_capacity_remains:true,repair_round:$repair_round},
     created_at: $created_at, updated_at: $created_at, roles: $roles,
     gates: {triage_approved: false, execution_approved: false, integration_approved: false, pr_prepared: false, pr_approved: false},
     transitions: [{from: null, to: "active", at: $created_at, actor: "dispatcher"}]}' >"$task_root/state.json"
@@ -286,7 +285,7 @@ for role in "${active_roles[@]}"; do
   if [[ $(jq -r '.state' "$task_root/$role.status.json") == deferred ]]; then
     continue
   fi
-  case "$role" in
+  case "${role_providers[$role]}" in
     claude) agent_instructions="$task_root/instructions/CLAUDE.md" ;;
     codex) agent_instructions="$task_root/instructions/AGENTS.md" ;;
     grok) agent_instructions="$task_root/instructions/GROK.md" ;;

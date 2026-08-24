@@ -28,6 +28,34 @@ case "$cmd" in
     provider=${1:?provider}; mode=${2:?fresh or resume}; profile=${3:?profile}; session_id=${4:-}; model_override=${5:-}
     aw_provider_command "$provider" "$mode" "$profile" "$session_id" "$model_override"
     ;;
+  available-providers)
+    while IFS= read -r provider; do
+      aw_provider_available "$provider" && printf '%s\n' "$provider"
+    done < <(jq -r '.providers[]' "$AW_CONFIG_FILE")
+    ;;
+  provider-slots)
+    mapfile -t providers < <("$0" available-providers)
+    ((${#providers[@]})) || exit 1
+    if ((${#providers[@]} == 1)); then
+      slots=$(jq -r '.solo_agent_slots // 3' "$AW_CONFIG_FILE"); [[ $slots =~ ^[1-9][0-9]*$ ]] || slots=3
+      names=(lead reviewer verifier)
+      for ((index=0; index<slots; index++)); do
+        name=${names[$index]:-"agent-$((index+1))"}
+        printf '%s-%s\t%s\n' "${providers[0]}" "$name" "${providers[0]}"
+      done
+    else
+      for provider in "${providers[@]}"; do printf '%s\t%s\n' "$provider" "$provider"; done
+    fi
+    ;;
+  provider-enable|provider-disable)
+    provider=${1:?provider}; [[ -f $AW_PROVIDER_HOME/$provider.json ]] || aw_die "unknown provider: $provider"
+    enabled=false; [[ $cmd == provider-enable ]] && enabled=true
+    temporary=$(mktemp "$AW_CONFIG_HOME/.config.json.XXXXXX")
+    jq --arg provider "$provider" --argjson enabled "$enabled" \
+      '.provider_overrides[$provider].enabled=$enabled' "$AW_CONFIG_FILE" >"$temporary"
+    mv "$temporary" "$AW_CONFIG_FILE"
+    printf '%s: %s\n' "$provider" "$([[ $enabled == true ]] && printf enabled || printf disabled)"
+    ;;
   discover-session)
     provider=${1:?provider}; directory=${2:?directory}; found=''
     case "$provider" in

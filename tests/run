@@ -19,6 +19,7 @@ for file in "$root/config/config.json" "$root/config/providers"/*.json "$root/sc
 check jq -e '.seams.general.paths == ["**"] and (.seams.shared.paths | index("Cargo.lock") != null)' "$root/config/config.json"
 check jq -e '.build_policy.final_gate_runs == 1 and .build_policy.release_build_phase == "final-candidate" and .build_policy.share_target_directories == false' "$root/config/config.json"
 check jq -e '.idle_status_grace_seconds >= 15' "$root/config/config.json"
+check jq -e '.delivery_policy.mode == "quota-aware" and .delivery_policy.continue_while_capacity_remains == true and (.delivery_policy | has("run_budget_minutes") | not)' "$root/config/config.json"
 if rg -n 'omarchy-agent-prompt' "$root/bin/agent-workspaces" "$root/compat/bin/omarchy-agent-dispatcher" >/dev/null; then
   printf 'not ok - reserved Omarchy prompt command collision\n'; failures=$((failures+1))
 else
@@ -32,7 +33,20 @@ mkdir -p "$fixture/config/agent-workspaces/providers" "$fixture/data/agent-works
 cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
 cp "$root/config/config.json" "$fixture/config/agent-workspaces/config.json"
 export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
+mkdir -p "$fixture/bin"
+for provider in claude codex grok; do
+  printf '#!/bin/bash\nexit 0\n' >"$fixture/bin/$provider"
+  chmod +x "$fixture/bin/$provider"
+done
+export PATH="$fixture/bin:$PATH"
 source "$root/lib/core.sh"
+
+[[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" available-providers | paste -sd ',') == claude,codex,grok ]] || { printf 'not ok - available provider discovery\n'; failures=$((failures+1)); }
+jq '.provider_overrides.grok.enabled=false' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
+[[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" available-providers | paste -sd ',') == claude,codex ]] || { printf 'not ok - disabled provider fallback\n'; failures=$((failures+1)); }
+jq '.provider_overrides.claude.enabled=false' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
+[[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" provider-slots) == $'codex-lead\tcodex\ncodex-reviewer\tcodex\ncodex-verifier\tcodex' ]] || { printf 'not ok - solo provider creates three logical agents\n'; failures=$((failures+1)); }
+jq 'del(.provider_overrides)' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
 
 printf '%s\n' '› Ask Codex to do anything' | aw_orchestrator_prompt_idle codex || { printf 'not ok - idle Codex prompt detection\n'; failures=$((failures+1)); }
 if printf '%s\n' '› user draft must survive' | aw_orchestrator_prompt_idle codex; then
@@ -156,9 +170,27 @@ jq --arg created "$old_iso" '.created_at=$created' "$task/state.json" >"$task/st
 jq --arg created "$now_iso" --arg deadline "$deadline_iso" \
   '.created_at=$created | .delivery={mode:"bounded",run_budget_minutes:90,deadline_at:$deadline}' \
   "$deferred_task/state.json" >"$deferred_task/state.tmp" && mv "$deferred_task/state.tmp" "$deferred_task/state.json"
-workspace_usage=$(python3 "$root/compat/bin/omarchy-agent-usage-workspaces")
+mkdir -p "$fixture/data-state/omarchy/agents/usage"
+printf '%s\n' '{"schemaVersion":1,"id":"claude","limits":[{"percent":0.2},{"percent":0.4}]}' >"$fixture/data-state/omarchy/agents/usage/claude.json"
+printf '%s\n' '{"schemaVersion":1,"id":"codex","limits":[{"percent":0.6}]}' >"$fixture/data-state/omarchy/agents/usage/codex.json"
+workspace_usage=$(XDG_STATE_HOME="$fixture/data-state" python3 "$root/compat/bin/omarchy-agent-usage-workspaces")
 [[ $(jq -r '.tierLabel' <<<"$workspace_usage") == '1 running · 1 review · 1 done/7d' ]] || { printf 'not ok - current workspace lifecycle metrics\n'; failures=$((failures+1)); }
-[[ $(jq -r '.limits[0].title' <<<"$workspace_usage") == 'Delivery budget' ]] || { printf 'not ok - current delivery budget metric\n'; failures=$((failures+1)); }
+[[ $(jq -r '.limits[0] | [.title, .percent] | @tsv' <<<"$workspace_usage") == $'Pooled model quota\t0.5' ]] || { printf 'not ok - pooled provider capacity metric\n'; failures=$((failures+1)); }
+
+usage_bin="$fixture/bin/usage-fixture"
+printf '%s\n' '#!/bin/bash' 'printf '\''%s\n'\'' '\''{"schemaVersion":1,"id":"fixture","name":"Fixture","ready":true,"limits":[],"updatedAt":"now"}'\''' >"$usage_bin"
+chmod +x "$usage_bin"
+XDG_STATE_HOME="$fixture/data-state" AW_USAGE_LIB="$root/lib/usage.sh" AW_USAGE_COLLECTORS="fixture=$usage_bin" "$root/compat/bin/agent-workspaces-usage-update"
+usage_record="$fixture/data-state/omarchy/agents/usage/fixture.json"
+[[ $(jq -r '.name' "$usage_record") == Fixture ]] || { printf 'not ok - declarative usage collector registry\n'; failures=$((failures+1)); }
+printf '%s\n' '#!/bin/bash' 'printf '\''%s\n'\'' '\''{"schemaVersion":1,"id":"wrong","name":"Bad","ready":true,"limits":[],"updatedAt":"now"}'\''' >"$usage_bin"
+if XDG_STATE_HOME="$fixture/data-state" AW_USAGE_LIB="$root/lib/usage.sh" AW_USAGE_COLLECTORS="fixture=$usage_bin" "$root/compat/bin/agent-workspaces-usage-update"; then
+  printf 'not ok - invalid usage record rejected\n'; failures=$((failures+1))
+else
+  printf 'ok - invalid usage record rejected\n'
+fi
+[[ $(jq -r '.name' "$usage_record") == Fixture ]] || { printf 'not ok - last good usage record retained\n'; failures=$((failures+1)); }
+XDG_STATE_HOME="$fixture/data-state" AW_USAGE_COLLECTORS="fixture=$usage_bin" "$root/compat/bin/agent-workspaces-usage-check" >/dev/null || { printf 'not ok - usage diagnostics\n'; failures=$((failures+1)); }
 
 # Historical and gated workflows are records, not live write leases. The
 # dispatcher itself covers active seam conflicts; keep this status contract

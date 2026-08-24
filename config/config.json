@@ -22,8 +22,8 @@
   "monitor_interval_seconds": 15,
   "idle_status_grace_seconds": 45,
   "delivery_policy": {
-    "run_budget_minutes": 90,
-    "max_repair_rounds": 2,
+    "mode": "quota-aware",
+    "continue_while_capacity_remains": true,
     "lead_first": true,
     "full_gate_phase": "final",
     "review_requires_lead_commit": true
@@ -43,5 +43,6 @@
     "tui": {"label": "Terminal UI and information architecture", "paths": ["tui/**", "ui/**"]},
     "shared": {"label": "Explicitly shared surfaces", "paths": ["Cargo.lock", "**/palette/**", "**/*command*"]}
   },
-  "providers": ["claude", "codex", "grok"]
+  "providers": ["claude", "codex", "grok"],
+  "solo_agent_slots": 3
 }

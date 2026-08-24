@@ -24,12 +24,13 @@ for dependency in git gum fzf jq hyprctl tmux flock pstree xdg-terminal-exec age
   fi
 done
 
-mapfile -t agent_roles < <(jq -r '.providers[]' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null)
-((${#agent_roles[@]} > 0)) || { gum style --foreground=196 'No providers configured in Agent Workspaces.'; exit 1; }
-for agent in "${agent_roles[@]}"; do
-  command -v "$agent" >/dev/null 2>&1 || { gum style --foreground=196 "Configured provider is not installed: $agent"; exit 1; }
-  [[ -f $HOME/.config/agent-workspaces/providers/$agent.json ]] || { gum style --foreground=196 "Provider manifest is missing: $agent"; exit 1; }
-done
+declare -A role_providers=()
+agent_roles=()
+while IFS=$'\t' read -r role provider; do
+  [[ -n $role && -n $provider ]] || continue
+  agent_roles+=("$role"); role_providers["$role"]=$provider
+done < <(agent-workspaces provider-slots)
+((${#agent_roles[@]} > 0)) || { gum style --foreground=196 'No enabled provider is installed. Install one or run agent-workspaces provider-enable PROVIDER.'; exit 1; }
 
 if [[ -n ${OMARCHY_AGENT_ROOTS:-} ]]; then
   IFS=: read -r -a roots <<<"$OMARCHY_AGENT_ROOTS"
@@ -129,7 +130,7 @@ if [[ -d $repo_worktree_root ]]; then
       fi
       details+=("${agent^}: $agent_state")
     done
-    set_label="▾ $existing_set    ${details[0]}  ·  ${details[1]}  ·  ${details[2]}"
+    set_label="▾ $existing_set    $(IFS=' · '; printf '%s' "${details[*]}")"
     set_rows+=("$existing_set"$'\t'"$set_label")
   done < <(find "$repo_worktree_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort)
 fi
@@ -169,7 +170,14 @@ machine_id=$(hostnamectl --static 2>/dev/null || hostname)
 machine_slug=$(sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+|-+$//g' <<<"$machine_id")
 if [[ -f $workspace_manifest ]]; then
   permission_profile=$(jq -r '.profile // "trusted"' "$workspace_manifest")
-  mapfile -t agent_roles < <(jq -r '.providers[]' "$workspace_manifest")
+  agent_roles=(); role_providers=()
+  while IFS=$'\t' read -r role provider; do
+    agent-workspaces available-providers | grep -qx "$provider" || continue
+    agent_roles+=("$role"); role_providers["$role"]=$provider
+  done < <(jq -r 'if (.agents|type)=="array" then .agents[]|[.role,.provider]|@tsv else .providers[]|[.,.]|@tsv end' "$workspace_manifest")
+  if ((${#agent_roles[@]} == 0)); then
+    while IFS=$'\t' read -r role provider; do agent_roles+=("$role"); role_providers["$role"]=$provider; done < <(agent-workspaces provider-slots)
+  fi
 else
   permission_profile=$(jq -r '.default_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null || printf trusted)
 fi
@@ -180,7 +188,8 @@ legacy_session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"agents-$repo_name-$set_
 if [[ $is_new == true ]]; then
   gum style --bold "Worktrees: $worktree_root"
   gum style "Integration shell: $repository"
-  gum confirm "Create the Claude, Grok, and Codex worktrees for '$set_slug'?" || exit 130
+  provider_labels=$(printf '%s\n' "${agent_roles[@]}" | sed 's/.*/\u&/' | paste -sd ', ' -)
+  gum confirm "Create ${#agent_roles[@]} provider worktree(s) for '$set_slug': $provider_labels?" || exit 130
 fi
 
 mkdir -p "$worktree_root"
@@ -225,17 +234,20 @@ done
 declare -A paths=() titles=()
 for agent in "${agent_roles[@]}"; do
   paths[$agent]="$worktree_root/$agent"
-  titles[$agent]="$(jq -r '.label' "$HOME/.config/agent-workspaces/providers/$agent.json") · $set_slug"
+  provider=${role_providers[$agent]}
+  titles[$agent]="$(jq -r '.label' "$HOME/.config/agent-workspaces/providers/$provider.json") · ${agent##*-} · $set_slug"
 done
 orchestrator_root="$worktree_root/.orchestrator"
 mkdir -p "$orchestrator_root" "$worktree_root/.coordination"
 cp "$HOME/.config/agent-workspaces/instructions/ORCHESTRATOR.md" "$orchestrator_root/AGENTS.md"
 if [[ ! -f $workspace_manifest ]]; then
   providers_json=$(printf '%s\n' "${agent_roles[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  agents_json='[]'
+  for role in "${agent_roles[@]}"; do agents_json=$(jq --arg role "$role" --arg provider "${role_providers[$role]}" '. + [{role:$role,provider:$provider}]' <<<"$agents_json"); done
   jq -n --arg id "$repo_hash:$set_slug" --arg repository "$repository" --arg set "$set_slug" \
-    --arg profile "$permission_profile" --arg machine_id "$machine_id" --arg at "$(date --iso-8601=seconds)" --argjson providers "$providers_json" \
+    --arg profile "$permission_profile" --arg machine_id "$machine_id" --arg at "$(date --iso-8601=seconds)" --argjson providers "$providers_json" --argjson agents "$agents_json" \
     '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,
-      machine_id:$machine_id,layout:"three-plus-orchestrator",providers:$providers,created_at:$at,updated_at:$at}' >"$workspace_manifest"
+      machine_id:$machine_id,layout:"adaptive-grid",providers:$providers,agents:$agents,created_at:$at,updated_at:$at}' >"$workspace_manifest"
 fi
 paths[orchestrator]="$orchestrator_root"
 titles[orchestrator]="Orchestrator · $set_slug"
@@ -245,16 +257,16 @@ roles=("${agent_roles[@]}" orchestrator)
 # persistent tmux pane. Opening a workspace means restoring its agents too,
 # even when no terminal window needs to be spawned.
 ensure_agent_running() {
-  local role=$1 pane_session pane relaunch state_file
+  local role=$1 provider=${role_providers[$1]} pane_session pane relaunch state_file
   pane_session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$session_name-$role" | cut -c1-100)
   tmux has-session -t "$pane_session" 2>/dev/null || return 0
   pane=$(tmux list-panes -t "$pane_session" -F '#{pane_id}' | head -1)
   omarchy-agent-pane-active "$role" "$pane_session" && return 0
   case "$role" in
     *)
-      [[ -f $HOME/.config/agent-workspaces/providers/$role.json ]] || return 0
+      [[ -f $HOME/.config/agent-workspaces/providers/$provider.json ]] || return 0
       provider_session_id=$(tmux show-option -qv -t "$pane_session" @aw_provider_session_id)
-      relaunch="$(agent-workspaces provider-command "$role" resume "$permission_profile" "$provider_session_id") || $(agent-workspaces provider-command "$role" fresh "$permission_profile")"
+      relaunch="$(agent-workspaces provider-command "$provider" resume "$permission_profile" "$provider_session_id") || $(agent-workspaces provider-command "$provider" fresh "$permission_profile")"
       ;;
   esac
   state_file="$worktree_root/.state/$role.started"
@@ -328,7 +340,7 @@ for role in "${roles[@]}"; do
           --class="$app_class" \
           --title="${titles[$role]}" \
           --working-directory="${paths[$role]}" \
-          -e env AW_PERMISSION_PROFILE="$permission_profile" omarchy-agent-pane "$role" "$pane_session" "${paths[$role]}" "${titles[$role]} · $repo_name" "$state_file" "$repository" "$set_slug" "$class_prefix" "$repo_hash:$set_slug" >/dev/null 2>&1
+          -e env AW_PERMISSION_PROFILE="$permission_profile" AW_AGENT_PROVIDER="${role_providers[$role]:-$role}" omarchy-agent-pane "$role" "$pane_session" "${paths[$role]}" "${titles[$role]} · $repo_name" "$state_file" "$repository" "$set_slug" "$class_prefix" "$repo_hash:$set_slug" >/dev/null 2>&1
       )
     else
       (
@@ -337,7 +349,7 @@ for role in "${roles[@]}"; do
           --app-id="$app_class" \
           --title="${titles[$role]}" \
           --dir="${paths[$role]}" \
-          -e env AW_PERMISSION_PROFILE="$permission_profile" omarchy-agent-pane "$role" "$pane_session" "${paths[$role]}" "${titles[$role]} · $repo_name" "$state_file" "$repository" "$set_slug" "$class_prefix" "$repo_hash:$set_slug" >/dev/null 2>&1
+          -e env AW_PERMISSION_PROFILE="$permission_profile" AW_AGENT_PROVIDER="${role_providers[$role]:-$role}" omarchy-agent-pane "$role" "$pane_session" "${paths[$role]}" "${titles[$role]} · $repo_name" "$state_file" "$repository" "$set_slug" "$class_prefix" "$repo_hash:$set_slug" >/dev/null 2>&1
       )
     fi
   fi

@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# Diagnose the collector pipeline feeding Omarchy's native Agents panel.
+set -uo pipefail
+
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents"
+usage_dir="$state_root/usage"
+collectors=${AW_USAGE_COLLECTORS:-grok=$HOME/.local/bin/omarchy-agent-usage-grok:agent-workspaces=$HOME/.local/bin/omarchy-agent-usage-workspaces}
+now=$(date +%s)
+status=0
+
+printf 'Agents usage state: %s\n' "$usage_dir"
+IFS=: read -r -a entries <<<"$collectors"
+for entry in "${entries[@]}"; do
+  id=${entry%%=*}
+  collector=${entry#*=}
+  record="$usage_dir/$id.json"
+  collector_state=ready
+  record_state=missing
+  age=-1
+  [[ -x $collector ]] || { collector_state=missing; status=1; }
+  if [[ -f $record ]]; then
+    age=$((now - $(stat -c %Y "$record")))
+    if jq -e --arg id "$id" '.schemaVersion == 1 and .id == $id and (.limits | type == "array")' "$record" >/dev/null 2>&1; then
+      record_state=valid
+    else
+      record_state=invalid
+      status=1
+    fi
+  else
+    status=1
+  fi
+  printf '%-18s collector=%-7s record=%-7s age=%ss\n' "$id" "$collector_state" "$record_state" "$age"
+done
+
+if [[ -f $state_root/usage-update.log ]]; then
+  printf '\nRecent collector events:\n'
+  tail -n 10 "$state_root/usage-update.log"
+fi
+exit "$status"
