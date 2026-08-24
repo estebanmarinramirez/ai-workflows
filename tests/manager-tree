@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+mkdir -p "$fixture/bin"
+
+cat >"$fixture/bin/agent-workspaces" <<'SCRIPT'
+#!/bin/bash
+if [[ ${2:-} == refresh ]]; then exit 0; fi
+cat <<'JSON'
+{"github_stale":false,"repositories":[
+  {"id":"forge:github.com/example/both","name":"both","local":true,"remote":"git@github.com:example/both.git","workspace_sets":["dev"],"active_workspace_count":1},
+  {"id":"local:one","name":"only-here","local":true,"remote":""},
+  {"id":"forge:github.com/example/there","name":"only-there","local":false,"remote":"git@github.com:example/there.git"}
+]}
+JSON
+SCRIPT
+cat >"$fixture/bin/fzf" <<'SCRIPT'
+#!/bin/bash
+tee "$CAPTURE" >/dev/null
+exit 1
+SCRIPT
+printf '#!/bin/bash\n' >"$fixture/bin/omarchy-restart-gum"
+chmod +x "$fixture/bin/agent-workspaces" "$fixture/bin/fzf" "$fixture/bin/omarchy-restart-gum"
+
+CAPTURE="$fixture/tree" PATH="$fixture/bin:$PATH" "$root/compat/bin/workspaces-manager"
+rg -q '^__group_local_remote__\t▾  Local \+ Remote  · 1$' "$fixture/tree"
+rg -q $'^forge:github.com/example/both\t   └─ 󰉋  both  · active  · 1 workspace\(s\)$' "$fixture/tree"
+rg -q '^__group_local_only__\t▾  Local only  · 1$' "$fixture/tree"
+rg -q '^__group_remote_only__\t▾  Remote only  · 1$' "$fixture/tree"
+printf 'ok - manager renders canonical local and remote availability tree\n'

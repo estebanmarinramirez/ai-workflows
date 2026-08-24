@@ -9,37 +9,52 @@ while :; do
   refresh_label='󰑓  Refresh local + GitHub catalog'
   [[ $(jq -r '.github_stale // true' <<<"$catalog") == true ]] && refresh_label+='  · remote cache stale'
   rows=(
-    "__refresh__"$'\t'"$refresh_label"$'\tAction'
-    $'__add__\t  Register a local repository path\tAction'
+    $'__group_actions__\t▾  Actions'
+    "__refresh__"$'\t'"   ├─ $refresh_label"
+    $'__add__\t   └─   Register a local repository path'
   )
-  while IFS=$'\t' read -r id label group; do rows+=("$id"$'\t'"$label"$'\t'"$group"); done < <(
-    jq -r '.repositories[] |
+
+  append_repository_branch() {
+    local availability=$1 heading=$2 heading_id=$3
+    local entries=()
+    mapfile -t entries < <(jq -r --arg availability "$availability" '.repositories[] |
       (.workspace_sets // []) as $sets |
-      (if (.active_workspace_count // 0)>0 then "Active"
-       elif (.recently_used // false) then "Recent"
-       elif ($sets|length)>0 then "Managed"
-       elif .local then "Local"
-       else "GitHub only" end) as $group |
+      (if .local and ((.remote // "") != "") then "local-remote"
+       elif .local then "local-only"
+       else "remote-only" end) as $kind |
+      select($kind == $availability) |
       [
         .id,
         ((if .local then "󰉋" else "" end) + "  " + .name +
           (if (.dirty // false) then "  · changed" else "" end) +
           (if (.active_workspace_count // 0)>0 then "  · active" else "" end) +
           (if ($sets|length)>0 then "  · " + (($sets|length)|tostring) + " workspace(s)" else "" end) +
-          (if (.private // false) then "  · private" else "" end)),
-        $group
-      ] | @tsv' <<<"$catalog"
-  )
+          (if (.private // false) then "  · private" else "" end))
+      ] | @tsv' <<<"$catalog")
+    ((${#entries[@]})) || return 0
+    rows+=("__group_${heading_id}__"$'\t'"▾  $heading  · ${#entries[@]}")
+    local index id label branch
+    for index in "${!entries[@]}"; do
+      IFS=$'\t' read -r id label <<<"${entries[$index]}"
+      branch='├─'; ((index == ${#entries[@]} - 1)) && branch='└─'
+      rows+=("$id"$'\t'"   $branch $label")
+    done
+  }
+
+  append_repository_branch local-remote 'Local + Remote' local_remote
+  append_repository_branch local-only 'Local only' local_only
+  append_repository_branch remote-only 'Remote only' remote_only
 
   selected=$(printf '%s\n' "${rows[@]}" | fzf \
-    --delimiter=$'\t' --with-nth=2,3 --nth=2,3 --accept-nth=1 \
+    --delimiter=$'\t' --with-nth=2 --nth=2 --accept-nth=1 \
     --layout=reverse --no-border --info=inline-right --highlight-line \
     --pointer='›' --prompt='Workspaces  ' --separator='─' --scrollbar='│' \
-    --header='Repositories · local, managed, and GitHub · Esc closes' \
+    --header='Repository availability · one identity, local and/or remote · Esc closes' \
     --preview='workspaces-manager-preview {1}' --preview-window='down,55%,border-top,wrap' \
     --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55}") || exit 0
 
   case "$selected" in
+    __group_*) continue ;;
     __refresh__)
       if agent-workspaces catalog refresh --github >/dev/null; then
         notify-send 'Workspaces' 'Local and GitHub repository catalog refreshed.'
