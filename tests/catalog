@@ -1,0 +1,48 @@
+#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+config="$fixture/config/agent-workspaces"
+data="$fixture/data"
+projects="$fixture/projects"
+mkdir -p "$config" "$projects/local" "$fixture/bin"
+
+git init --initial-branch=main "$projects/local" >/dev/null
+git -C "$projects/local" config user.name fixture
+git -C "$projects/local" config user.email fixture@example.invalid
+git -C "$projects/local" commit --allow-empty -m initial >/dev/null
+git -C "$projects/local" remote add origin git@github.com:example/local.git
+
+jq -n --arg root "$projects" '{
+  project_roots:[$root],
+  repository_catalog:{github_owners:["example"],clone_root:$root,max_depth:8,exclude_names:["node_modules"]}
+}' >"$config/config.json"
+cat >"$fixture/bin/gh" <<'SCRIPT'
+#!/bin/bash
+printf '%s\n' '[
+ {"name":"local","nameWithOwner":"example/local","url":"https://github.com/example/local","sshUrl":"git@github.com:example/local.git","isPrivate":true,"isFork":false,"isArchived":false,"pushedAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","defaultBranchRef":{"name":"main"},"description":"local repo"},
+ {"name":"remote","nameWithOwner":"example/remote","url":"https://github.com/example/remote","sshUrl":"git@github.com:example/remote.git","isPrivate":false,"isFork":false,"isArchived":false,"pushedAt":"2026-01-02T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z","defaultBranchRef":{"name":"main"},"description":"remote only"}
+]'
+SCRIPT
+chmod +x "$fixture/bin/gh"
+
+HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$data" PATH="$fixture/bin:$PATH" \
+  python3 "$root/lib/catalog.py" refresh --github >/dev/null
+catalog="$data/agent-workspaces/catalog.json"
+jq -e '.repositories|length==2' "$catalog" >/dev/null
+jq -e '.repositories[]|select(.id=="forge:github.com/example/local")|.local==true and .private==true' "$catalog" >/dev/null
+jq -e '.repositories[]|select(.id=="forge:github.com/example/remote")|.local==false' "$catalog" >/dev/null
+jq -e '.github_stale==false and (.github_refreshed_at|length)>0' "$catalog" >/dev/null
+
+mv "$projects/local" "$fixture/local-away"
+HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$data" PATH="$fixture/bin:$PATH" \
+  python3 "$root/lib/catalog.py" refresh >/dev/null
+jq -e '.repositories[]|select(.id=="forge:github.com/example/local")|.local==false and (.local_path|not)' "$catalog" >/dev/null
+
+mkdir -p "$projects/manual"
+git init --initial-branch=main "$projects/manual" >/dev/null
+HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$data" PATH="$fixture/bin:$PATH" \
+  python3 "$root/lib/catalog.py" add "$projects/manual"
+jq -e '.repositories|length==3' "$catalog" >/dev/null
+printf 'ok - repository catalog local, GitHub, deduplication, and manual registration\n'

@@ -9,9 +9,10 @@ install-macos:
 
 test:
 	./tests/run
+	./tests/catalog
 
 check:
-	bash -n bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run
+	bash -n bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run tests/catalog
 	./tests/run
 
 portability-check:

@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+identity=${1:?identity}
+[[ $identity != __* ]] || exit 0
+agent-workspaces catalog show | jq -r --arg id "$identity" '
+  .repositories[] | select(.id==$id) |
+  "\u001b[1m" + .name + "\u001b[0m\n\n" +
+  (if .local then "Local      " + .local_path else "GitHub     " + (.github // .web_url) end) + "\n" +
+  (if (.description // "") != "" then "\n" + .description + "\n" else "" end) +
+  "\nBranch     " + (.branch // .default_branch // "—") +
+  "\nVisibility " + (if .private then "private" else "public" end) +
+  "\nWorktrees  " + ((.worktree_count // 0)|tostring) +
+  "\nWorkspaces " + ((.workspace_sets // [])|join(", ")|if .=="" then "—" else . end) +
+  "\nActive     " + ((.active_workspace_count // 0)|tostring) +
+  "\nDirty      " + ((.dirty // false)|tostring) +
+  "\nUpdated    " + (.last_agent_access // .remote_pushed_at // .last_commit_at // "—") +
+  "\nRemote     " + (.remote // "—")
+'

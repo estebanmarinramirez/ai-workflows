@@ -1,0 +1,86 @@
+#!/bin/bash
+set -euo pipefail
+source omarchy-restart-gum
+
+agent-workspaces catalog refresh >/dev/null
+
+while :; do
+  catalog=$(agent-workspaces catalog show)
+  refresh_label='󰑓  Refresh local + GitHub catalog'
+  [[ $(jq -r '.github_stale // true' <<<"$catalog") == true ]] && refresh_label+='  · remote cache stale'
+  rows=(
+    "__refresh__"$'\t'"$refresh_label"$'\tAction'
+    $'__add__\t  Register a local repository path\tAction'
+  )
+  while IFS=$'\t' read -r id label group; do rows+=("$id"$'\t'"$label"$'\t'"$group"); done < <(
+    jq -r '.repositories[] |
+      (.workspace_sets // []) as $sets |
+      (if (.active_workspace_count // 0)>0 then "Active"
+       elif (.recently_used // false) then "Recent"
+       elif ($sets|length)>0 then "Managed"
+       elif .local then "Local"
+       else "GitHub only" end) as $group |
+      [
+        .id,
+        ((if .local then "󰉋" else "" end) + "  " + .name +
+          (if (.dirty // false) then "  · changed" else "" end) +
+          (if (.active_workspace_count // 0)>0 then "  · active" else "" end) +
+          (if ($sets|length)>0 then "  · " + (($sets|length)|tostring) + " workspace(s)" else "" end) +
+          (if (.private // false) then "  · private" else "" end)),
+        $group
+      ] | @tsv' <<<"$catalog"
+  )
+
+  selected=$(printf '%s\n' "${rows[@]}" | fzf \
+    --delimiter=$'\t' --with-nth=2,3 --nth=2,3 --accept-nth=1 \
+    --layout=reverse --no-border --info=inline-right --highlight-line \
+    --pointer='›' --prompt='Workspaces  ' --separator='─' --scrollbar='│' \
+    --header='Repositories · local, managed, and GitHub · Esc closes' \
+    --preview='workspaces-manager-preview {1}' --preview-window='down,55%,border-top,wrap' \
+    --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55}") || exit 0
+
+  case "$selected" in
+    __refresh__)
+      if agent-workspaces catalog refresh --github >/dev/null; then
+        notify-send 'Workspaces' 'Local and GitHub repository catalog refreshed.'
+      else
+        gum style --foreground=196 'GitHub refresh failed; cached and local repositories remain available.'
+        sleep 2
+      fi
+      continue
+      ;;
+    __add__)
+      path=$(gum input --header='Repository path' --placeholder="$HOME/Developer/project") || continue
+      [[ -n $path ]] || continue
+      if agent-workspaces catalog add "$path"; then notify-send 'Workspaces' 'Repository registered.'; else sleep 2; fi
+      continue
+      ;;
+  esac
+
+  record=$(jq -c --arg id "$selected" '.repositories[] | select(.id==$id)' <<<"$catalog")
+  [[ -n $record ]] || continue
+  name=$(jq -r '.name' <<<"$record")
+  if [[ $(jq -r '.local' <<<"$record") == true ]]; then
+    path=$(jq -r '.local_path' <<<"$record")
+    action=$(printf '%s\n' \
+      'Open or create workspace' \
+      'Launch Omarchy default agent' \
+      'Open terminal here' \
+      'Back' | gum choose --header="$name · local") || continue
+    case "$action" in
+      'Open or create workspace') exec env OMARCHY_AGENT_REPOSITORY="$path" omarchy-agent-grid ;;
+      'Launch Omarchy default agent') cd "$path" && exec omarchy agent ;;
+      'Open terminal here') exec xdg-terminal-exec --dir="$path" ;;
+      *) continue ;;
+    esac
+  else
+    action=$(printf '%s\n' 'Clone and open workspace' 'Back' | gum choose --header="$name · GitHub only") || continue
+    [[ $action == 'Clone and open workspace' ]] || continue
+    clone_root=$(jq -r '.repository_catalog.clone_root' "$HOME/.config/agent-workspaces/config.json")
+    clone_root=${clone_root/#\~/$HOME}
+    destination=$(gum input --header='Clone destination' --value="$clone_root/$name") || continue
+    gum confirm "Clone $name into $destination?" || continue
+    path=$(agent-workspaces catalog clone "$selected" "$destination" --confirmed-by-user) || { sleep 2; continue; }
+    exec env OMARCHY_AGENT_REPOSITORY="$path" omarchy-agent-grid
+  fi
+done

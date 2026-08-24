@@ -2,6 +2,7 @@
 
 set -euo pipefail
 source "${AW_LIB:-$(dirname "$(realpath "$0")")/../lib/core.sh}"
+catalog_script="$(dirname "${AW_LIB:-$(dirname "$(realpath "$0")")/../lib/core.sh}")/catalog.py"
 
 usage() {
   sed -n '/^## Commands/,/^Run /p' "$(dirname "$(realpath "$0")")/../README.md"
@@ -55,6 +56,9 @@ case "$cmd" in
       '.provider_overrides[$provider].enabled=$enabled' "$AW_CONFIG_FILE" >"$temporary"
     mv "$temporary" "$AW_CONFIG_FILE"
     printf '%s: %s\n' "$provider" "$([[ $enabled == true ]] && printf enabled || printf disabled)"
+    ;;
+  catalog)
+    exec python3 "$catalog_script" "$@"
     ;;
   discover-session)
     provider=${1:?provider}; directory=${2:?directory}; found=''

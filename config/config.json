@@ -36,6 +36,16 @@
   "archive_after_days": 30,
   "delete_archives_automatically": false,
   "project_roots": ["~/Work", "~/Projects", "~/Code", "~/Developer"],
+  "repository_catalog": {
+    "github_owners": ["estebanmarinramirez"],
+    "github_ttl_seconds": 900,
+    "clone_root": "~/Developer",
+    "max_depth": 12,
+    "exclude_names": [
+      ".cache", ".local", ".Trash", "Trash", "node_modules", "target",
+      ".venv", "venv", "vendor", "Library"
+    ]
+  },
   "seams": {
     "general": {"label": "General repository work", "paths": ["**"]},
     "desktop": {"label": "Desktop and platform integration", "paths": ["desktop/**", "platform/**", "**/omarchy/**", "**/*omarchy*"]},

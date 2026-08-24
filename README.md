@@ -4,6 +4,8 @@ Workspaces is a portable control plane for persistent coding-agent worktrees. It
 
 Provider participation is capability-based, not triad-dependent. A workspace opens with every enabled provider currently installed: one provider gives a useful solo workflow, two add independent review, and three enable the full lead/reviewer/verifier pattern. Disable an unavailable subscription without uninstalling its CLI using `agent-workspaces provider-disable PROVIDER`; restore it with `provider-enable PROVIDER`.
 
+On Omarchy, open **Workspaces → Workspaces Manager** for the primary flow. It presents one catalog of local checkouts, managed workspaces, and repositories from configured GitHub owners. Select a local repository to open a multi-agent workspace, launch Omarchy's default agent, or open a terminal; select a GitHub-only repository to confirm a clone and open it.
+
 ## Install
 
 ### Omarchy
@@ -36,6 +38,10 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 ```text
 agent-workspaces doctor
 agent-workspaces dashboard
+agent-workspaces catalog refresh [--github]
+agent-workspaces catalog show
+agent-workspaces catalog add PATH
+agent-workspaces catalog clone REPOSITORY_ID [DESTINATION] --confirmed-by-user
 agent-workspaces health [workspace-id]
 agent-workspaces snapshot WORKSPACE_ID [--write]
 agent-workspaces monitor WORKSPACE_ID

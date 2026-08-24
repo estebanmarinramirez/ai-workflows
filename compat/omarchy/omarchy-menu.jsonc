@@ -27,7 +27,8 @@
   // Example: replace the default About action by reusing the same id. Existing
   // fields are kept unless overridden.
   // "about": {"icon":"","label":"About","action":"omarchy-launch-or-focus-tui \"zsh -c 'fastfetch; read -k 1'\""},
-  "agent-launch": {"icon":"󰚩","label":"Agent Workspaces","aliases":["agent","agents","workspace-agent"],"description":"Coding agents, isolated worktrees, and coordinated workflows"},
+  "agent-launch": {"icon":"󰚩","label":"Workspaces","aliases":["agent","agents","workspace-agent"],"description":"Repositories, isolated worktrees, and coordinated agents"},
+  "agent-launch.manager": {"icon":"󰆍","label":"Workspaces Manager","action":"omarchy-launch-floating-terminal-with-presentation workspaces-manager","aliases":["workspaces","repositories","projects"],"description":"Local and GitHub repositories, workspaces, agents, and recent activity"},
   "agent-launch.grid": {"icon":"󱃉","label":"Open Workspace","action":"omarchy-launch-floating-terminal-with-presentation omarchy-agent-grid","description":"Open Claude, Codex, Grok, and a conversational orchestrator"},
   "agent-launch.manage": {"icon":"󰆍","label":"Manage Workspaces","action":"omarchy-launch-floating-terminal-with-presentation omarchy-agent-grid-manage","description":"Open, hide, or end all four windows together"},
   "agent-launch.health": {"icon":"󰓅","label":"Workspace Health","action":"omarchy-launch-floating-terminal-with-presentation agent-workspaces dashboard","description":"Agents, tasks, branches, worktree risk, and recent activity"},
