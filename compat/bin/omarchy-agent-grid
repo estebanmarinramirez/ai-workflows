@@ -175,6 +175,12 @@ if [[ -f $workspace_manifest ]]; then
     agent-workspaces available-providers | grep -qx "$provider" || continue
     agent_roles+=("$role"); role_providers["$role"]=$provider
   done < <(jq -r 'if (.agents|type)=="array" then .agents[]|[.role,.provider]|@tsv else .providers[]|[.,.]|@tsv end' "$workspace_manifest")
+  available_provider_count=$(agent-workspaces available-providers | wc -l)
+  solo_slot_count=$(jq -r '.solo_agent_slots // 3' "$HOME/.config/agent-workspaces/config.json")
+  if ((available_provider_count == 1 && ${#agent_roles[@]} < solo_slot_count)); then
+    agent_roles=(); role_providers=()
+    while IFS=$'\t' read -r role provider; do agent_roles+=("$role"); role_providers["$role"]=$provider; done < <(agent-workspaces provider-slots)
+  fi
   if ((${#agent_roles[@]} == 0)); then
     while IFS=$'\t' read -r role provider; do agent_roles+=("$role"); role_providers["$role"]=$provider; done < <(agent-workspaces provider-slots)
   fi
@@ -240,14 +246,19 @@ done
 orchestrator_root="$worktree_root/.orchestrator"
 mkdir -p "$orchestrator_root" "$worktree_root/.coordination"
 cp "$HOME/.config/agent-workspaces/instructions/ORCHESTRATOR.md" "$orchestrator_root/AGENTS.md"
+providers_json=$(printf '%s\n' "${agent_roles[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+agents_json='[]'
+for role in "${agent_roles[@]}"; do agents_json=$(jq --arg role "$role" --arg provider "${role_providers[$role]}" '. + [{role:$role,provider:$provider}]' <<<"$agents_json"); done
 if [[ ! -f $workspace_manifest ]]; then
-  providers_json=$(printf '%s\n' "${agent_roles[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
-  agents_json='[]'
-  for role in "${agent_roles[@]}"; do agents_json=$(jq --arg role "$role" --arg provider "${role_providers[$role]}" '. + [{role:$role,provider:$provider}]' <<<"$agents_json"); done
   jq -n --arg id "$repo_hash:$set_slug" --arg repository "$repository" --arg set "$set_slug" \
     --arg profile "$permission_profile" --arg machine_id "$machine_id" --arg at "$(date --iso-8601=seconds)" --argjson providers "$providers_json" --argjson agents "$agents_json" \
     '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,
       machine_id:$machine_id,layout:"adaptive-grid",providers:$providers,agents:$agents,created_at:$at,updated_at:$at}' >"$workspace_manifest"
+else
+  temporary=$(mktemp "$worktree_root/.workspace.json.XXXXXX")
+  jq --argjson providers "$providers_json" --argjson agents "$agents_json" --arg at "$(date --iso-8601=seconds)" \
+    '.providers=$providers | .agents=$agents | .layout="adaptive-grid" | .updated_at=$at' "$workspace_manifest" >"$temporary"
+  mv "$temporary" "$workspace_manifest"
 fi
 paths[orchestrator]="$orchestrator_root"
 titles[orchestrator]="Orchestrator · $set_slug"
