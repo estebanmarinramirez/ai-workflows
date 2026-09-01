@@ -422,28 +422,34 @@ place_cell() {
 }
 
 # Workspace moves can asynchronously retile a window. Complete those first,
-# then float the entire set before applying any exact geometry.
+# then confirm the entire set is floating before applying exact geometry.
 for role in "${roles[@]}"; do
   selector="address:${addresses[$role]}"
   hyprctl dispatch "hl.dsp.window.move({ workspace = '$workspace_id', follow = false, window = '$selector' })" >/dev/null
 done
 sleep 0.1
-for role in "${roles[@]}"; do
-  selector="address:${addresses[$role]}"
-  hyprctl dispatch "hl.dsp.window.float({ action = 'set', window = '$selector' })" >/dev/null
-done
-sleep 0.1
 
-# Retry a missed transition (notably the final tiled window in Dwindle) before
-# sizing; this is idempotent for windows that are already floating.
-for role in "${roles[@]}"; do
-  selector="address:${addresses[$role]}"
-  is_floating=$(hyprctl clients -j | jq -r --arg address "${addresses[$role]}" '.[] | select(.address == $address) | .floating')
-  if [[ $is_floating != true ]]; then
-    hyprctl dispatch "hl.dsp.window.float({ action = 'set', window = '$selector' })" >/dev/null
-  fi
+# Dwindle may retile the final moved window after the first float dispatch.
+# Reconcile compositor state instead of assuming one retry was enough.
+layout_ready=false
+for _ in $(seq 1 20); do
+  layout_ready=true
+  clients=$(hyprctl clients -j)
+  for role in "${roles[@]}"; do
+    selector="address:${addresses[$role]}"
+    is_floating=$(jq -r --arg address "${addresses[$role]}" '.[] | select(.address == $address) | .floating' <<<"$clients")
+    if [[ $is_floating != true ]]; then
+      layout_ready=false
+      hyprctl dispatch "hl.dsp.window.float({ action = 'set', window = '$selector' })" >/dev/null
+    fi
+  done
+  [[ $layout_ready == true ]] && break
+  sleep 0.1
 done
-sleep 0.1
+if [[ $layout_ready != true ]]; then
+  gum style --foreground=196 "Could not float every workspace panel; layout was left unchanged."
+  exit 1
+fi
 
 for index in "${!roles[@]}"; do
   role=${roles[$index]}
@@ -454,5 +460,17 @@ for index in "${!roles[@]}"; do
   ((column == columns - 1)) && width=$((logical_x + logical_width - outer_gap - x))
   ((row == rows - 1)) && height=$((logical_y + logical_height - outer_gap - y))
   place_cell "$role" "$x" "$y" "$width" "$height"
+done
+
+# Moving and resizing are asynchronous too. Confirm every panel stayed
+# floating; a later open can then safely act as an explicit reflow operation.
+sleep 0.1
+clients=$(hyprctl clients -j)
+for role in "${roles[@]}"; do
+  is_floating=$(jq -r --arg address "${addresses[$role]}" '.[] | select(.address == $address) | .floating' <<<"$clients")
+  if [[ $is_floating != true ]]; then
+    gum style --foreground=196 "Panel reconciliation failed for $role. Reopen the workspace to retry."
+    exit 1
+  fi
 done
 hyprctl dispatch "hl.dsp.focus({ window = 'address:${addresses[orchestrator]}' })" >/dev/null

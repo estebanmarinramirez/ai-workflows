@@ -41,6 +41,12 @@ done
 export PATH="$fixture/bin:$PATH"
 source "$root/lib/core.sh"
 
+# Migration repairs retired layout labels while preserving unrelated policy.
+jq '.default_layout="three-plus-integration" | .custom_setting="kept"' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp"
+mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
+AW_LIB="$root/lib/core.sh" "$root/packaging/migrate" >/dev/null
+[[ $(jq -r '.default_layout + ":" + .custom_setting' "$fixture/config/agent-workspaces/config.json") == three-plus-orchestrator:kept ]] || { printf 'not ok - retired layout config migration\n'; failures=$((failures+1)); }
+
 [[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" available-providers | paste -sd ',') == claude,codex,grok ]] || { printf 'not ok - available provider discovery\n'; failures=$((failures+1)); }
 jq '.provider_overrides.grok.enabled=false' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
 [[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" available-providers | paste -sd ',') == claude,codex ]] || { printf 'not ok - disabled provider fallback\n'; failures=$((failures+1)); }

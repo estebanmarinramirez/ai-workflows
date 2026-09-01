@@ -4,6 +4,15 @@ set -euo pipefail
 source "$(dirname "$(realpath "$0")")/../lib/core.sh"
 
 mkdir -p "$AW_DATA_HOME"
+
+# Normalize retired layout labels without replacing any user-owned policy.
+if [[ -f $AW_CONFIG_FILE ]]; then
+  temporary=$(mktemp "$AW_CONFIG_HOME/.config.json.XXXXXX")
+  jq 'if .default_layout == "three-plus-integration" then .default_layout = "three-plus-orchestrator" else . end' \
+    "$AW_CONFIG_FILE" >"$temporary"
+  mv "$temporary" "$AW_CONFIG_FILE"
+fi
+
 while IFS= read -r state_file; do
   task_dir=$(dirname "$state_file")
   workspace_root=${task_dir%/.coordination/*}
@@ -51,7 +60,12 @@ while IFS= read -r state_file; do
   if [[ ! -f $workspace_file ]]; then
     provider_roles=$(jq -c '[.roles|keys[]]' "$state_file")
     jq -n --arg id "$workspace_id" --arg repository "$repository" --arg set "$set_slug" --arg profile "$profile" --argjson providers "$provider_roles" --arg at "$(aw_now)" \
-      '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,layout:"three-plus-integration",providers:$providers,created_at:$at,updated_at:$at}' >"$workspace_file"
+      '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,layout:"adaptive-grid",providers:$providers,created_at:$at,updated_at:$at}' >"$workspace_file"
+  fi
+  if [[ -f $workspace_file && $(jq -r '.layout // empty' "$workspace_file") == three-plus-integration ]]; then
+    temporary=$(mktemp "$workspace_root/.workspace.json.XXXXXX")
+    jq '.layout="adaptive-grid"' "$workspace_file" >"$temporary"
+    mv "$temporary" "$workspace_file"
   fi
   if [[ $current_schema != 2 ]]; then aw_audit "$workspace_root" migration.completed "$(jq -cn --arg from "$current_schema" '{from_schema:($from|tonumber),to_schema:2}')"; fi
 done < <(find "$AW_DATA_HOME" -path '*/.coordination/*/state.json' -type f -print 2>/dev/null)
