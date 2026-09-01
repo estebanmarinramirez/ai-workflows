@@ -8,7 +8,7 @@ repo_name=$(basename "$repository")
 repo_common_dir=$(cd "$repository" && realpath "$(git rev-parse --git-common-dir 2>/dev/null)") || exit 0
 repo_hash=$(printf '%s' "$repo_common_dir" | sha256sum | cut -c1-10)
 managed_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash"
-mapfile -t configured_agents < <(jq -r '.providers[]' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null)
+mapfile -t configured_agents < <(agent-workspaces provider-slots 2>/dev/null | cut -f1)
 
 status_text() {
   local path=$1 changes
@@ -103,4 +103,3 @@ case "$mode" in
     fi
     ;;
 esac
-

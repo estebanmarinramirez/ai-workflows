@@ -45,7 +45,9 @@ source "$root/lib/core.sh"
 jq '.provider_overrides.grok.enabled=false' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
 [[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" available-providers | paste -sd ',') == claude,codex ]] || { printf 'not ok - disabled provider fallback\n'; failures=$((failures+1)); }
 jq '.provider_overrides.claude.enabled=false' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
-[[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" provider-slots) == $'codex-lead\tcodex\ncodex-reviewer\tcodex\ncodex-verifier\tcodex' ]] || { printf 'not ok - solo provider creates three logical agents\n'; failures=$((failures+1)); }
+[[ $(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" provider-slots) == $'codex\tcodex' ]] || { printf 'not ok - solo provider uses one canonical slot\n'; failures=$((failures+1)); }
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" orchestrator-set codex test-model worker-model >/dev/null
+[[ $(jq -r '.orchestrator_provider + ":" + .orchestrator_model + ":" + .model_policy.codex.model' "$fixture/config/agent-workspaces/config.json") == codex:test-model:worker-model ]] || { printf 'not ok - explicit orchestrator selection\n'; failures=$((failures+1)); }
 jq 'del(.provider_overrides)' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
 
 printf '%s\n' '› Ask Codex to do anything' | aw_orchestrator_prompt_idle codex || { printf 'not ok - idle Codex prompt detection\n'; failures=$((failures+1)); }
@@ -82,12 +84,14 @@ trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $trusted_codex == *"--approve-for-me"* && $trusted_codex != *"--sandbox"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) != *bypassPermissions* ]] || { printf 'not ok - trusted claude is not bypass\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh yolo) == *bypassPermissions* ]] || { printf 'not ok - explicit yolo profile\n'; failures=$((failures+1)); }
-[[ $(aw_provider_command claude fresh trusted) == *"'--model' 'fable' '--effort' 'high'"* ]] || { printf 'not ok - frontier claude policy\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command claude fresh trusted) == *"'--model' 'opus' '--effort' 'high'"* ]] || { printf 'not ok - claude worker policy\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh trusted) == *"'--model' 'grok-4.6' '--reasoning-effort' 'high'"* ]] || { printf 'not ok - frontier grok policy\n'; failures=$((failures+1)); }
 orchestrator_codex=$(aw_provider_command codex resume yolo session-123 gpt-5.6-sol)
 [[ $(grep -o -- "'--model'" <<<"$orchestrator_codex" | wc -l) == 1 ]] || { printf 'not ok - orchestrator model deduplication\n'; failures=$((failures+1)); }
 [[ $orchestrator_codex == *"'resume' 'session-123'"* && $orchestrator_codex == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - orchestrator resume command\n'; failures=$((failures+1)); }
+orchestrator_claude=$(aw_provider_command claude resume yolo session-123 fable)
+[[ $orchestrator_claude == *"'--resume' 'session-123'"* && $orchestrator_claude == *"'--model' 'fable'"* ]] || { printf 'not ok - claude fable orchestrator override\n'; failures=$((failures+1)); }
 
 mkdir -p "$fixture/grok/sessions/example"
 mkdir -p "$fixture/grok/logs"
@@ -128,6 +132,10 @@ signature_one=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 signature_two=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
 [[ $signature_one == "$signature_two" ]] || { printf 'not ok - timestamp-free event signature\n'; failures=$((failures+1)); }
+
+jq '.status="awaiting_integration" | .lead="codex"' "$task/state.json" >"$task/state.tmp" && mv "$task/state.tmp" "$task/state.json"
+verification_dispatch=$(AW_PROMPT_DISPATCHER="$prompt_probe" AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" advance "$task" dispatch-verification --confirmed-by-user)
+[[ $(jq -r '.template + ":" + .lead + ":" + .seam' <<<"$verification_dispatch" | head -1) == review:grok:general ]] || { printf 'not ok - advertised verification action dispatches independent provider\n'; failures=$((failures+1)); }
 
 jq '.status="awaiting_pr" | .gates.integration_approved=true' "$task/state.json" >"$task/state.tmp" && mv "$task/state.tmp" "$task/state.json"
 printf '# Integration result\n\nvalidated\n' >"$task/integration-result.md"

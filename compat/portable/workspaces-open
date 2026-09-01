@@ -48,8 +48,9 @@ orchestrator_provider=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config
 agent-workspaces available-providers | grep -qx "$orchestrator_provider" || orchestrator_provider=${role_providers[${roles[0]}]}
 session="aw-$repo_hash-$repo_name-$set_slug-orchestrator"
 if ! tmux has-session -t "$session" 2>/dev/null; then
-  orchestrator_model=''; [[ $orchestrator_provider == codex ]] && orchestrator_model=$(jq -r '.orchestrator_model' "$HOME/.config/agent-workspaces/config.json")
+  orchestrator_model=$(jq -r '.orchestrator_model // empty' "$HOME/.config/agent-workspaces/config.json")
   command=$(agent-workspaces provider-command "$orchestrator_provider" fresh trusted '' "$orchestrator_model")
+  [[ $orchestrator_provider == claude ]] && command+=" --remote-control $(printf %q "Workspaces · $set_slug")"
   tmux new-session -d -s "$session" -c "$root/.orchestrator" bash -lc "AW_WORKSPACE_ID=$(printf %q "$workspace_id") $command; exec bash"
   tmux set-option -q -t "$session" @aw_workspace_id "$workspace_id"
   tmux set-option -q -t "$session" @aw_role orchestrator

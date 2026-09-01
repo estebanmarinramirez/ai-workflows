@@ -52,10 +52,12 @@ case "$role" in
     coordination_dir=${directory%/.orchestrator}/.coordination
     welcome="Read snapshot.md, introduce yourself as this workspace's Orchestrator, summarize the active workflow in a few lines, and ask what the user wants to coordinate."
     directory_access=''
+    remote_control=''
     [[ $provider == codex || $provider == claude ]] && directory_access="--add-dir $(printf %q "$coordination_dir")"
-    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile" '' "$orchestrator_model") $directory_access $(printf %q "$welcome")"
+    [[ $provider == claude ]] && remote_control="--remote-control $(printf %q "Workspaces · $set_slug")"
+    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile" '' "$orchestrator_model") $remote_control $directory_access $(printf %q "$welcome")"
     provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
-    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id" "$orchestrator_model") $directory_access"
+    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id" "$orchestrator_model") $remote_control $directory_access"
     ;;
   integration) launch='' ;;
   *)

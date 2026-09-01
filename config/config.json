@@ -2,12 +2,12 @@
   "schema_version": 1,
   "default_profile": "yolo",
   "default_layout": "three-plus-orchestrator",
-  "orchestrator_provider": "codex",
-  "orchestrator_model": "gpt-5.6-sol",
+  "orchestrator_provider": "claude",
+  "orchestrator_model": "fable",
   "orchestrator_profile": "yolo",
   "model_policy": {
     "quality_tier": "frontier",
-    "claude": {"model": "fable", "effort": "high"},
+    "claude": {"model": "opus", "effort": "high"},
     "codex": {"model": "gpt-5.6-sol", "effort": "high"},
     "grok": {"model": "grok-4.6", "effort": "high", "plan": "Ultra"},
     "event_reviewer": {"model": "gpt-5.6-luna", "effort": "low"}

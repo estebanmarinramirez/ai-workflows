@@ -170,20 +170,13 @@ machine_id=$(hostnamectl --static 2>/dev/null || hostname)
 machine_slug=$(sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+|-+$//g' <<<"$machine_id")
 if [[ -f $workspace_manifest ]]; then
   permission_profile=$(jq -r '.profile // "trusted"' "$workspace_manifest")
+  # Reconcile old manifests on every open. This adds newly available paid
+  # providers and removes unavailable ones instead of preserving a stale
+  # one-agent layout forever.
   agent_roles=(); role_providers=()
   while IFS=$'\t' read -r role provider; do
-    agent-workspaces available-providers | grep -qx "$provider" || continue
     agent_roles+=("$role"); role_providers["$role"]=$provider
-  done < <(jq -r 'if (.agents|type)=="array" then .agents[]|[.role,.provider]|@tsv else .providers[]|[.,.]|@tsv end' "$workspace_manifest")
-  available_provider_count=$(agent-workspaces available-providers | wc -l)
-  solo_slot_count=$(jq -r '.solo_agent_slots // 3' "$HOME/.config/agent-workspaces/config.json")
-  if ((available_provider_count == 1 && ${#agent_roles[@]} < solo_slot_count)); then
-    agent_roles=(); role_providers=()
-    while IFS=$'\t' read -r role provider; do agent_roles+=("$role"); role_providers["$role"]=$provider; done < <(agent-workspaces provider-slots)
-  fi
-  if ((${#agent_roles[@]} == 0)); then
-    while IFS=$'\t' read -r role provider; do agent_roles+=("$role"); role_providers["$role"]=$provider; done < <(agent-workspaces provider-slots)
-  fi
+  done < <(agent-workspaces provider-slots)
 else
   permission_profile=$(jq -r '.default_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null || printf trusted)
 fi
@@ -263,6 +256,10 @@ fi
 paths[orchestrator]="$orchestrator_root"
 titles[orchestrator]="Orchestrator · $set_slug"
 roles=("${agent_roles[@]}" orchestrator)
+if ((${#roles[@]} < 2 || ${#roles[@]} > 4)); then
+  gum style --foreground=196 "Invalid workspace layout: expected 2–4 panes, got ${#roles[@]}."
+  exit 1
+fi
 
 # Existing windows can outlive an agent process and leave an idle shell in the
 # persistent tmux pane. Opening a workspace means restoring its agents too,

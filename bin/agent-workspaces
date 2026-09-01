@@ -37,16 +37,10 @@ case "$cmd" in
   provider-slots)
     mapfile -t providers < <("$0" available-providers)
     ((${#providers[@]})) || exit 1
-    if ((${#providers[@]} == 1)); then
-      slots=$(jq -r '.solo_agent_slots // 3' "$AW_CONFIG_FILE"); [[ $slots =~ ^[1-9][0-9]*$ ]] || slots=3
-      names=(lead reviewer verifier)
-      for ((index=0; index<slots; index++)); do
-        name=${names[$index]:-"agent-$((index+1))"}
-        printf '%s-%s\t%s\n' "${providers[0]}" "$name" "${providers[0]}"
-      done
-    else
-      for provider in "${providers[@]}"; do printf '%s\t%s\n' "$provider" "$provider"; done
-    fi
+    # The fourth desktop slot belongs to the orchestrator. Give each enabled,
+    # installed provider one independent role and never duplicate a provider
+    # merely to fill the grid.
+    for provider in "${providers[@]:0:3}"; do printf '%s\t%s\n' "$provider" "$provider"; done
     ;;
   provider-enable|provider-disable)
     provider=${1:?provider}; [[ -f $AW_PROVIDER_HOME/$provider.json ]] || aw_die "unknown provider: $provider"
@@ -56,6 +50,19 @@ case "$cmd" in
       '.provider_overrides[$provider].enabled=$enabled' "$AW_CONFIG_FILE" >"$temporary"
     mv "$temporary" "$AW_CONFIG_FILE"
     printf '%s: %s\n' "$provider" "$([[ $enabled == true ]] && printf enabled || printf disabled)"
+    ;;
+  orchestrator-set)
+    provider=${1:?provider}; model=${2:?model}; worker_model=${3:-}
+    [[ -f $AW_PROVIDER_HOME/$provider.json ]] || aw_die "unknown provider: $provider"
+    aw_provider_available "$provider" || aw_die "provider is disabled or not installed: $provider"
+    temporary=$(mktemp "$AW_CONFIG_HOME/.config.json.XXXXXX")
+    jq --arg provider "$provider" --arg model "$model" --arg worker_model "$worker_model" '
+      .orchestrator_provider=$provider | .orchestrator_model=$model |
+      if $worker_model != "" then .model_policy[$provider].model=$worker_model else . end
+    ' "$AW_CONFIG_FILE" >"$temporary"
+    mv "$temporary" "$AW_CONFIG_FILE"
+    printf 'orchestrator: %s · %s\n' "$provider" "$model"
+    [[ -z $worker_model ]] || printf 'worker: %s · %s\n' "$provider" "$worker_model"
     ;;
   catalog)
     exec python3 "$catalog_script" "$@"
@@ -531,12 +538,14 @@ PLIST
     ;;
   advance)
     task=${1:?task directory}; action=${2:?action}; shift 2
-    confirmed=false; title=''; evidence=''
+    confirmed=false; title=''; evidence=''; objective=''; lead=''
     while (($#)); do
       case "$1" in
         --confirmed-by-user) confirmed=true; shift ;;
         --title) title=$2; shift 2 ;;
         --evidence) evidence=$2; shift 2 ;;
+        --objective) objective=$2; shift 2 ;;
+        --lead) lead=$2; shift 2 ;;
         *) aw_die "unknown advance option: $1" ;;
       esac
     done
@@ -554,6 +563,25 @@ PLIST
         temporary=$(mktemp "$task/.state.json.XXXXXX")
         jq --arg at "$now" '.gates.integration_approved=true | .status="integration_ready" | .updated_at=$at | .transitions += [{from:"awaiting_integration",to:"integration_ready",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
         aw_audit "$workspace_root" integration.approved '{"collision_check":"passed"}' user:confirmed-via-orchestrator
+        ;;
+      dispatch-verification)
+        [[ $status == awaiting_integration ]] || aw_die "dispatch-verification requires awaiting_integration, found $status"
+        original_lead=$(jq -r '.lead // empty' "$state")
+        if [[ -z $lead ]]; then
+          lead=$(jq -r --arg original "$original_lead" '
+            [.roles | to_entries[] | select(.key != $original)] |
+            (map(select((.value.provider // .key) == "grok")) + .) | first | .key // empty
+          ' "$state")
+        fi
+        [[ -n $lead ]] || lead=$original_lead
+        [[ -n $lead ]] || aw_die 'verification requires an available lead'
+        template=$(jq -r '.template_id // "review"' "$state")
+        seam=$(jq -r '.seam // "general"' "$state")
+        [[ -n $objective ]] || objective="Independently verify the accepted implementation for task $(basename "$task"). Focus on regressions, missing evidence, and integration readiness."
+        aw_audit "$workspace_root" verification.approved \
+          "$(jq -cn --arg task "$(basename "$task")" --arg lead "$lead" '{task_id:$task,lead:$lead}')" user:confirmed-via-orchestrator
+        AW_PARENT_TASK_ID=$(basename "$task") AW_STAGE=verify "$0" dispatch \
+          --workspace "$(jq -r '.workspace_id' "$state")" --template "$template" --lead "$lead" --seam "$seam" --objective "$objective"
         ;;
       record-integration)
         [[ $status == integration_ready ]] || aw_die "record-integration requires integration_ready, found $status"

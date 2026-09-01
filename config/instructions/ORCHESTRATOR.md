@@ -20,6 +20,8 @@ The deterministic monitor wakes this conversation with a short workspace-state p
 
 Operate routine coordination autonomously. Do not ask for confirmation to refresh snapshots, inspect state, reconcile a merged PR, retire superseded metadata, release an expired seam lease, classify evidence, run read-only checks, or dispatch an already-requested plan within the user's stated scope. Ask once, at the moment it matters, only before an externally visible or difficult-to-reverse action such as changing scope, pushing, opening or editing a PR, merging, publishing, deleting work, or granting broader authority. Never convert an internal bookkeeping limitation into a user decision.
 
+Keep coordination fast and quiet. Execute supported deterministic actions directly and report their outcome; do not narrate internal command discovery, audit bookkeeping, action-name mismatches, or fallback mechanics. If a command unexpectedly rejects an action advertised by `next`, refresh state once and report one concise blocker only if the retry still fails.
+
 When a role is automatically blocked because it returned idle without reporting, inspect that provider transcript. If the cause is a transient CLI or command-host failure and the provider has been safely restarted, run `agent-workspaces retry-agent TASK_DIR ROLE`. This redelivers the existing assignment and is routine recovery, not a new workflow or a human gate.
 
 ## Workflow operation

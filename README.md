@@ -60,6 +60,7 @@ agent-workspaces refresh TASK_DIR
 agent-workspaces collision TASK_DIR
 agent-workspaces reconcile-pr TASK_DIR --pr NUMBER
 agent-workspaces recover WORKSPACE_ID [ROLE]
+agent-workspaces orchestrator-set PROVIDER MODEL [WORKER_MODEL]
 agent-workspaces end WORKSPACE_ID
 agent-workspaces archive
 agent-workspaces publish TASK_DIR [--confirmed-by-user]
@@ -67,6 +68,8 @@ agent-workspaces migrate
 ```
 
 The Omarchy installer creates a timestamped rollback bundle before replacing managed files.
+
+The desktop grid has one pane per available configured provider plus one conversational orchestrator, capped at four panes total. Three providers produce the full 2×2 layout; two providers produce three panes; one provider still produces two panes. Opening an older workspace reconciles its saved roster so newly available providers are no longer omitted.
 
 The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. A deduplicated pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval.
 
@@ -78,7 +81,7 @@ Provider manifests declare their CLI update manager. Use **Agent Workspaces → 
 
 ## Models and usage
 
-The default worker policy favors frontier quality: Claude uses `fable` at high effort, Codex uses `gpt-5.6-sol`, and Grok uses `grok-4.6` at high reasoning effort. The event reviewer stays on `gpt-5.6-luna` at low effort because it summarizes deterministic state changes rather than writing production code. Provider commands and the documented policy live in `config/providers/` and `config/config.json`.
+The conversational Orchestrator uses Claude `fable` with Remote Control enabled. The independent Claude worker uses `opus` at high effort, while Codex uses `gpt-5.6-sol` and Grok uses `grok-4.6` at high reasoning effort. The event reviewer stays on `gpt-5.6-luna` at low effort because it summarizes deterministic state changes rather than writing production code. Provider commands and the documented policy live in `config/providers/` and `config/config.json`.
 
 Agent Workspaces extends Omarchy's native **Agents** bar panel rather than installing a separate widget. Its user-local updater preserves Omarchy's Claude and Codex collectors and adds:
 
