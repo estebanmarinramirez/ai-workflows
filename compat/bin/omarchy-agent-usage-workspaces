@@ -3,9 +3,21 @@
 
 import json
 import os
+import shutil
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+
+# Installed collectors are copied into ~/.local/bin; find their shared runtime
+# through the main executable. Repository runs prefer their adjacent lib.
+local_lib = Path(__file__).resolve().parents[2] / 'lib'
+if not (local_lib / 'capacity.py').exists():
+    cli = shutil.which('agent-workspaces')
+    local_lib = Path(cli).resolve().parents[1] / 'lib' if cli else local_lib
+if os.environ.get('AW_LIB'): local_lib = Path(os.environ['AW_LIB']).parent
+sys.path.insert(0, str(local_lib))
+from capacity import capacities, pool_id, provider_for_slot, read_object
 
 TERMINAL = {"completed", "draft_pr", "ready_for_pr", "cancelled", "archived", "superseded"}
 REVIEW = {"awaiting_review", "awaiting_triage", "awaiting_integration", "awaiting_pr", "awaiting_pr_review"}
@@ -50,6 +62,7 @@ for workspace_file in data_root.rglob("workspace.json") if data_root.is_dir() el
         except (OSError, ValueError):
             continue
         task["_created"] = timestamp(task.get("created_at"))
+        task["_root"] = workspace_file.parent
         tasks.append(task)
         all_tasks.append(task)
         if task["_created"]:
@@ -70,28 +83,22 @@ blocked = sum(task.get("status") == "blocked" for task in current_tasks)
 review = sum(task.get("status") in REVIEW for task in current_tasks)
 running = len(current_tasks)
 usage_root = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "omarchy/agents/usage"
+config = read_object(Path(os.environ.get('XDG_CONFIG_HOME', home / '.config')) / 'agent-workspaces/config.json')
+config.setdefault('providers', ['claude', 'codex', 'grok'])
 participating_providers = set()
 for task in current_tasks:
-    participating_providers.update((task.get("roles") or {}).keys())
-
-provider_usage = []
-provider_resets = []
-for provider in sorted(participating_providers):
-    try:
-        provider_record = json.loads((usage_root / f"{provider}.json").read_text())
-    except (OSError, ValueError, AttributeError):
-        continue
-    percentages = []
-    for limit in provider_record.get("limits") or []:
-        try:
-            percentages.append(max(0.0, min(1.0, float(limit.get("percent")))))
-            if limit.get("resetsAt"):
-                provider_resets.append(limit["resetsAt"])
-        except (TypeError, ValueError, AttributeError):
-            continue
-    if percentages:
-        # A provider is only as available as its most constrained active limit.
-        provider_usage.append(max(percentages))
+    for slot in task.get('roles', {}):
+        provider = provider_for_slot(task['_root'], slot, task, config)
+        if provider: participating_providers.add(provider)
+    # The orchestrator consumes the same account quota as its workers.
+    provider = provider_for_slot(task['_root'], 'orchestrator', config=config)
+    if provider: participating_providers.add(provider)
+_, pools = capacities(config, usage_root, now)
+participating_pools = {pool_id(p, config.get('routing', {})) for p in participating_providers}
+known_pools = [pools[p] for p in participating_pools if p in pools and pools[p]['state'] != 'unknown']
+provider_usage = [pool['used'] for pool in known_pools]
+provider_resets = [pool['resets_at'] for pool in known_pools if pool['resets_at']]
+unknown_pools = len(participating_pools) - len(known_pools)
 
 status_parts = [f"{running} running"]
 if review:
@@ -103,7 +110,7 @@ limits = []
 if provider_usage:
     pooled_usage = sum(provider_usage) / len(provider_usage)
     limits.append({
-        "label": f"Pooled usage across {len(provider_usage)} providers",
+        "label": f"Observed usage across {len(provider_usage)} account pools; {unknown_pools} unknown",
         "title": "Pooled model quota",
         "percent": pooled_usage,
         "resetsAt": min(provider_resets) if provider_resets else "",
@@ -115,7 +122,7 @@ record = {
     "name": "Workspaces",
     "ready": True,
     "tierLabel": " · ".join(status_parts),
-    "usageStatusText": "Attention required" if blocked else "",
+    "usageStatusText": "Attention required" if blocked else (f"{unknown_pools} account quota(s) unknown" if unknown_pools else ""),
     "authHelpText": f"{blocked} blocked" if blocked else "",
     "limits": limits,
     "todayPrompts": completed_today,

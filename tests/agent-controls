@@ -18,9 +18,9 @@ with tempfile.TemporaryDirectory() as directory:
     (config / 'config.json').write_text(json.dumps({'model_policy': {'codex': {'model': 'default-model', 'effort': 'high'}}}))
     gum = binaries / 'gum'
     gum.write_text('''#!/usr/bin/env python3
-import os, pathlib, sys
+import json, os, pathlib, sys
 if sys.argv[1] == 'choose':
-    choices = ['Change lead worker', 'Next workflow (default lead)', 'codex', 'Custom model…', 'high', 'Back']
+    choices = json.loads(os.environ.get('CHOICES', 'null')) or ['Change lead worker', 'Next workflow (default lead)', 'codex', 'Custom model…', 'high', 'Back']
     path = pathlib.Path(os.environ['COUNTER'])
     index = int(path.read_text()) if path.exists() else 0
     path.write_text(str(index + 1))
@@ -47,4 +47,12 @@ elif sys.argv[1] == 'agents': print('Selection saved')
     select = next(call for call in calls if 'select' in call)
     assert select == ['agents', 'w:set', 'select', '--role', 'lead', '--provider', 'codex', '--model', 'chosen-model', '--effort', 'high', '--when', 'next-task'], select
     assert not any('apply' in call or 'checkpoint' in call for call in calls), calls
+    for label, mode in [('Keep current model and effort settings','fixed'), ('Auto · balance model and effort','auto')]:
+        (fixture/'counter').unlink()
+        (fixture/'capture').unlink()
+        env['CHOICES'] = json.dumps(['Effort mode and quota routing', label, 'Back'])
+        subprocess.run([str(ROOT/'compat/bin/agent-workspaces-agents'),'w:set'],env=env,check=True,capture_output=True,text=True)
+        calls=[json.loads(line) for line in (fixture/'capture').read_text().splitlines()]
+        assert ['routing','w:set','effort-mode','--mode',mode] in calls, calls
+        assert not any('apply' in call or 'checkpoint' in call for call in calls), calls
 print('ok - chooser persists next-workflow lead selection without switching a live session')

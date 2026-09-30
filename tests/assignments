@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -265,6 +266,53 @@ class Handover(unittest.TestCase):
         command = self.launches[-1][-1]
         self.assertIn('--add-dir ' + str(self.root / '.coordination'), command)
         self.assertIn('--remote-control ', command)
+
+    def automatic_ready(self):
+        record = self.ready()
+        state = self.store.load()
+        state['requests'][record['id']].update(source='routing', routing={'effort_mode':'fixed','intent_revision':0})
+        self.store.save(state)
+        self.command = 'bash'
+        self.usage = self.root.parent.parent.parent.parent/'state/omarchy/agents/usage'
+        self.usage.mkdir(parents=True, exist_ok=True)
+        current = datetime.now(timezone.utc)
+        a.atomic(self.usage/'claude.json', {'id':'claude','ready':True,'updatedAt':current.isoformat(),
+                    'limits':[{'percent':.2,'resetsAt':(current+timedelta(hours=1)).isoformat()}]})
+        return record
+
+    def test_automatic_launch_rechecks_capacity_and_preferences(self):
+        record = self.automatic_ready()
+        with patch.dict(os.environ, XDG_STATE_HOME=str(self.usage.parents[2])):
+            quota = a.read(self.usage/'claude.json')
+            quota['limits'][0]['percent'] = .99
+            a.atomic(self.usage/'claude.json',quota)
+            with self.assertRaises(a.ChangeError): self.store.apply(record['id'])
+            self.assertEqual(self.launches,[])
+            quota['limits'][0]['percent'] = .2
+            a.atomic(self.usage/'claude.json',quota)
+            a.atomic(self.root/'workspace.json',{'workspace_id':'w:set','routing':{'effort_mode':'auto'}})
+            with self.assertRaises(a.ChangeError): self.store.apply(record['id'])
+            self.assertEqual(self.launches,[])
+            a.atomic(self.root/'workspace.json',{'workspace_id':'w:set'})
+            self.store.apply(record['id'])
+            self.assertEqual(len(self.launches),1)
+            with patch.dict(os.environ, AW_HANDOVER_ID=record['id']): self.store.accept(record['id'])
+            self.assertEqual(self.store.load()['active']['codex']['source'],'routing')
+
+    def test_reviewer_handover_preserves_lead_and_requires_clean_worktree(self):
+        state = a.read(self.task/'state.json')
+        state['lead']='claude'
+        state['roles']['claude']={'worktree':str(self.root/'claude'),'state':'completed'}
+        a.atomic(self.task/'state.json',state)
+        record=self.request(role='worker',slot='codex')
+        (self.worktree/'dirty').write_text('unsaved')
+        with self.assertRaises(a.ChangeError): self.store.checkpoint(record['id'],self.note)
+        (self.worktree/'dirty').unlink()
+        self.store.checkpoint(record['id'],self.note)
+        self.command='bash'; self.store.apply(record['id'])
+        with patch.dict(os.environ, AW_HANDOVER_ID=record['id']): self.store.accept(record['id'])
+        self.assertIsNone(self.store.load()['default_lead'])
+        self.assertEqual(a.read(self.task/'state.json')['lead'],'claude')
 
 
 unittest.main()

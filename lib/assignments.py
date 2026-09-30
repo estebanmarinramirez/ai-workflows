@@ -15,8 +15,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from models import validate
+from capacity import TERMINAL
 
-TERMINAL = {'completed', 'draft_pr'}
 PENDING = {'requested', 'ready', 'launching', 'awaiting_ack'}
 
 
@@ -132,6 +132,10 @@ class Assignments:
             raise ChangeError('Choose the current task for a lead handover')
         state = self.load()
         slot = 'orchestrator' if args.role == 'orchestrator' else (task['lead'] if task else state.get('default_lead') or args.provider)
+        if args.role == 'worker':
+            slot = getattr(args, 'slot', None)
+            if not task or not slot or slot not in task.get('roles', {}) or slot == task.get('lead'):
+                raise ChangeError('Worker handover requires a non-lead --slot in the selected task')
         if any(r['slot'] == slot and r['phase'] in PENDING for r in state['requests'].values()):
             raise ChangeError('This role already has a pending change; cancel it first')
         session, outgoing = self.sessions(slot)
@@ -160,14 +164,14 @@ class Assignments:
         tasks = self.active_tasks(record['slot'])
         if record['when'] == 'next-task' and tasks:
             raise ChangeError('Next-task change waits until existing tasks finish')
-        if record['role'] == 'lead' and any(str(task) != record['task'] for task in tasks):
+        if record['role'] != 'orchestrator' and any(str(task) != record['task'] for task in tasks):
             raise ChangeError('Other unfinished tasks use this role; checkpoint those tasks first')
         session, provider = self.sessions(record['slot'])
         if (session, provider) != (record['session'], record['outgoing_provider']):
             raise ChangeError('Outgoing session changed; cancel and select again')
         directory = run(['tmux', 'display-message', '-p', '-t', session, '#{pane_current_path}'])
         commit = None
-        if record['role'] == 'lead':
+        if record['role'] != 'orchestrator':
             if record['task']:
                 _, task = self.task(record['task'])
                 expected = Path(task['roles'][record['slot']]['worktree']).resolve()
@@ -212,7 +216,7 @@ class Assignments:
                 raise ChangeError('Cannot retry a different handover generation')
         pane = self.stopped(session)
         checkpoint = record['checkpoint']
-        if record['role'] == 'lead':
+        if record['role'] != 'orchestrator':
             if run(['git', '-C', checkpoint['directory'], 'status', '--porcelain']) or run(['git', '-C', checkpoint['directory'], 'rev-parse', 'HEAD']) != checkpoint['commit']:
                 raise ChangeError('Worktree changed after checkpoint; cancel and checkpoint again')
         profile = run(['tmux', 'show-option', '-qv', '-t', session, '@aw_profile'])
@@ -231,6 +235,19 @@ class Assignments:
             validate(target['provider'], target['model'], target['effort'], self.config_root)
         except ValueError as error:
             raise ChangeError(str(error)) from error
+        if record.get('source') == 'routing':
+            from capacity import capacities, pool_id, read_object
+            routing = policy.get('routing', {})
+            workspace_policy = read_object(self.root / 'workspace.json').get('routing', {})
+            effort_mode = workspace_policy.get('effort_mode', routing.get('effort_mode', 'fixed'))
+            if (routing.get('mode') != 'automatic' or effort_mode != record['routing'].get('effort_mode') or
+                    workspace_policy.get('revision', 0) != record['routing'].get('intent_revision', 0)):
+                raise ChangeError('Routing preferences changed; cancel and replan this handover')
+            _, pools = capacities(policy)
+            pool = pools.get(pool_id(target['provider'], routing), {})
+            reserve = 0 if record['routing'].get('review_reserve') else routing.get('reserve_fraction', 0.15)
+            if pool.get('state') != 'available' or pool['remaining'] <= reserve:
+                raise ChangeError('Target account no longer has fresh available capacity; cancel and replan')
         # Resolve explicitly against the selected settings without publishing
         # them as active ownership before the successor acknowledges.
         env = dict(os.environ, AW_HANDOVER_TARGET=json.dumps(target))
@@ -250,7 +267,8 @@ class Assignments:
                        f'You replace the {record["role"]} in role slot {record["slot"]}. '
                        'Keep its worktree, reports, commits and task scope. Before doing any work, acknowledge with '
                        f'agent-workspaces agents {self.workspace} accept {change_id}. '
-                       'The acknowledgement authorizes continuation of the recorded assignment only.')
+                       'The acknowledgement authorizes continuation of the recorded assignment only. '
+                       'If your task role is deferred or completed, remain idle until the dispatcher activates it.')
         command += ' ' + shlex.quote(instruction)
         launch = f'export AW_WORKSPACE_ID={shlex.quote(self.workspace)} AW_HANDOVER_ID={shlex.quote(change_id)}; {command}; {shlex.quote(self.cli)} remember-session {shlex.quote(session)} {shlex.quote(target["provider"])} {shlex.quote(checkpoint["directory"])} >/dev/null 2>&1 || true; exec bash'
         record['phase'] = 'launching'
@@ -276,7 +294,7 @@ class Assignments:
             raise ChangeError('Successor session generation does not match')
         record['phase'] = 'active'
         record['accepted_at'] = now()
-        state['active'][record['slot']] = dict(record['target'], change_id=change_id)
+        state['active'][record['slot']] = dict(record['target'], change_id=change_id, source=record.get('source', 'manual'))
         if record['role'] == 'lead':
             state['default_lead'] = record['slot']
         self.save(state)
@@ -332,7 +350,8 @@ def main():
     sub.add_parser('show')
     sub.add_parser('reconcile')
     select = sub.add_parser('select')
-    select.add_argument('--role', choices=['orchestrator', 'lead'], required=True)
+    select.add_argument('--role', choices=['orchestrator', 'lead', 'worker'], required=True)
+    select.add_argument('--slot')
     select.add_argument('--provider', choices=['codex', 'claude', 'grok'], required=True)
     select.add_argument('--model', required=True)
     select.add_argument('--effort', choices=['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'], required=True)

@@ -32,7 +32,7 @@ trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/config/agent-workspaces/providers" "$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
 cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
 cp "$root/config/config.json" "$fixture/config/agent-workspaces/config.json"
-export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" XDG_STATE_HOME="$fixture/data-state"
 mkdir -p "$fixture/bin"
 for provider in claude codex grok; do
   printf '#!/bin/bash\nexit 0\n' >"$fixture/bin/$provider"
@@ -188,8 +188,8 @@ jq --arg created "$now_iso" --arg deadline "$deadline_iso" \
   '.created_at=$created | .delivery={mode:"bounded",run_budget_minutes:90,deadline_at:$deadline}' \
   "$deferred_task/state.json" >"$deferred_task/state.tmp" && mv "$deferred_task/state.tmp" "$deferred_task/state.json"
 mkdir -p "$fixture/data-state/omarchy/agents/usage"
-printf '%s\n' '{"schemaVersion":1,"id":"claude","limits":[{"percent":0.2},{"percent":0.4}]}' >"$fixture/data-state/omarchy/agents/usage/claude.json"
-printf '%s\n' '{"schemaVersion":1,"id":"codex","limits":[{"percent":0.6}]}' >"$fixture/data-state/omarchy/agents/usage/codex.json"
+jq -cn --arg at "$now_iso" '{schemaVersion:1,id:"claude",ready:true,updatedAt:$at,limits:[{percent:0.2},{percent:0.4}]}' >"$fixture/data-state/omarchy/agents/usage/claude.json"
+jq -cn --arg at "$now_iso" '{schemaVersion:1,id:"codex",ready:true,updatedAt:$at,limits:[{percent:0.6}]}' >"$fixture/data-state/omarchy/agents/usage/codex.json"
 workspace_usage=$(XDG_STATE_HOME="$fixture/data-state" python3 "$root/compat/bin/omarchy-agent-usage-workspaces")
 [[ $(jq -r '.tierLabel' <<<"$workspace_usage") == '1 running · 1 review · 1 done/7d' ]] || { printf 'not ok - current workspace lifecycle metrics\n'; failures=$((failures+1)); }
 [[ $(jq -r '.limits[0] | [.title, .percent] | @tsv' <<<"$workspace_usage") == $'Pooled model quota\t0.5' ]] || { printf 'not ok - pooled provider capacity metric\n'; failures=$((failures+1)); }

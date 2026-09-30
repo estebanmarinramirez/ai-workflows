@@ -63,6 +63,39 @@ After dispatch, report the task id and what each agent was asked to do.
 
 ## Agent selection and handover
 
+Read **Capacity and routing** in the snapshot before dispatch and reviewer
+activation. The monitor runs `routing WORKSPACE reconcile` to request model,
+effort or provider changes; it never kills an agent or fabricates a checkpoint.
+For each pending routing request, coordinate the outgoing note and clean
+worktree checkpoint, ask the outgoing CLI to exit at that boundary, and let the
+successor acknowledge. This applies to reviewer/verifier slots as well as lead
+and orchestrator. Deferred reviewers must remain idle after acknowledging until
+`activate-reviewers` dispatches their assignment. If the snapshot reports a wait,
+do not start work on exhausted quota or spend the implementation review reserve.
+
+The user's effort mode is workspace-specific. **fixed** preserves current
+per-provider model/effort settings while allowing quota-driven provider routing;
+**auto** permits task profiles and pressure-based effort adjustments. Keep fixed
+unless the user chooses Auto. Choosing Auto releases existing manual settings to
+the router; a later explicit agent choice pins that slot again. Never change the
+user's effort mode yourself. Unknown telemetry is not spare capacity. Quota
+percentages across separate subscriptions are not interchangeable token budgets.
+
+Classify authorized work with `dispatch ... --difficulty simple|standard|complex`.
+Use simple for narrow, low-risk edits; standard for ordinary implementation;
+complex for substantial architecture, difficult debugging or sensitive changes.
+When scope changes, record the revised classification with
+`routing WORKSPACE difficulty --task TASK_DIR --difficulty LEVEL`. Default is
+standard. Auto retains the complex-task model tier under quota pressure and
+lowers only its configured effort floor. Configured model allowlists and explicit
+assignments take precedence. Do not circumvent a disabled/unknown account.
+
+Capacity can change during handover. If applying a pending automatic request
+fails its capacity or preference check, inspect `routing WORKSPACE`, cancel the
+unlaunched request, and reconsider at the next safe boundary. Never repeatedly
+restart to force a quota-limited target. A user-cancelled routing choice remains
+suppressed until the routing intent changes.
+
 The user can choose the workspace orchestrator or a workflow's lead worker at any
 stage through Change agents or `agent-workspaces agents "$AW_WORKSPACE_ID" select`.
 Read the Agent assignments section of the snapshot. A requested selection is

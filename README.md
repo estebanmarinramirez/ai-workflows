@@ -62,6 +62,9 @@ agent-workspaces reconcile-pr TASK_DIR --pr NUMBER
 agent-workspaces recover WORKSPACE_ID [ROLE]
 agent-workspaces orchestrator-set PROVIDER MODEL [WORKER_MODEL]
 agent-workspaces models PROVIDER [--json | --efforts MODEL]
+agent-workspaces routing WORKSPACE_ID [show|reconcile] [--json]
+agent-workspaces routing WORKSPACE_ID effort-mode --mode auto|fixed
+agent-workspaces routing WORKSPACE_ID difficulty --task TASK_DIR --difficulty simple|standard|complex
 agent-workspaces layout-set adaptive-grid|four-windows
 agent-workspaces live-config WORKSPACE_ID [--json]
 agent-workspaces-agents [WORKSPACE_ID]
@@ -130,6 +133,25 @@ assignments override global policy.
 
 See the [dated upstream compatibility and optimization review](docs/provider-review-2026-09-30.md)
 for sources, version differences, implemented optimizations, and validation limits.
+
+### Automatic routing and user-selected effort
+
+**Change Agents → Effort mode and quota routing** offers **Keep current model and
+effort settings** (the default) and **Auto · balance model and effort**. Fixed
+keeps your existing per-provider settings; Auto chooses from configurable task
+profiles and lowers effort under quota pressure. This is a workspace-specific
+choice. Choosing Auto releases previous manual choices to routing control;
+subsequent explicit agent selections pin their slots again.
+
+The monitor requests safe handovers based on fresh account capacity, difficulty,
+shared slot load, and a review reserve. It never interrupts an agent or treats
+missing quota data as available capacity. Stable slot names survive provider
+switches, and repeated providers share one quota pool. Snapshot decisions include
+reasons; application waits for clean checkpoints, process exit and acknowledgement.
+Use `dispatch ... --difficulty simple|standard|complex` to classify the work.
+
+See [quota routing](docs/quota-routing.md) for controls, reserve policy, automatic
+versus advisory mode, audit records, tests, and runtime limits.
 
 ### Live configuration evidence
 

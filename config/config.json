@@ -119,5 +119,64 @@
     "codex",
     "grok"
   ],
-  "solo_agent_slots": 3
+  "solo_agent_slots": 3,
+  "routing": {
+    "mode": "automatic",
+    "effort_mode": "fixed",
+    "manage_orchestrator": true,
+    "telemetry_ttl_seconds": 300,
+    "reserve_fraction": 0.15,
+    "pressure_fraction": 0.7,
+    "switch_improvement": 0.15,
+    "cooldown_seconds": 900,
+    "account_pools": {},
+    "allowed_models": {},
+    "profiles": {
+      "simple": {
+        "claude": {
+          "model": "sonnet",
+          "effort": "medium",
+          "pressure_effort": "low"
+        },
+        "codex": {
+          "model": "gpt-6-luna",
+          "effort": "medium",
+          "pressure_effort": "low"
+        },
+        "grok": {
+          "model": "grok-4.7-build-fast",
+          "effort": "medium",
+          "pressure_effort": "low"
+        }
+      },
+      "standard": {
+        "claude": {
+          "effort": "high",
+          "pressure_effort": "medium"
+        },
+        "codex": {
+          "effort": "high",
+          "pressure_effort": "medium"
+        },
+        "grok": {
+          "effort": "high",
+          "pressure_effort": "medium"
+        }
+      },
+      "complex": {
+        "claude": {
+          "effort": "xhigh",
+          "pressure_effort": "high"
+        },
+        "codex": {
+          "effort": "xhigh",
+          "pressure_effort": "high"
+        },
+        "grok": {
+          "effort": "xhigh",
+          "pressure_effort": "high"
+        }
+      }
+    }
+  }
 }
