@@ -271,7 +271,9 @@ def main():
     parser.add_argument('--roles', nargs='+')
     parser.add_argument('--review', action='store_true')
     parser.add_argument('--json', action='store_true')
-    args = parser.parse_args()
+    # The shell wrapper inserts --cli between workspace and action. Python
+    # versions before 3.14 require explicit intermixing for optional positionals.
+    args = parser.parse_intermixed_args()
     try:
         router = Router(root_for(args.workspace), args.cli)
         if args.action == 'effort-mode':
