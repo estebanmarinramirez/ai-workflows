@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+import importlib.util
+from pathlib import Path
+import sys
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('live_config', ROOT / 'lib/live_config.py')
+live = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(live)
+
+CODEX = '\n› Ask Codex to do anything\n\n  gpt-5.6-sol medium · ~/project\n'
+GROK = '  │ ❯       │\n  ╰──────── Grok 4.6 (xhigh) · always-approve ─╯\n\n  Shift+Tab:mode  │  Ctrl+.:shortcuts\n\n'
+
+
+class LiveConfiguration(unittest.TestCase):
+    def test_known_footers(self):
+        self.assertEqual(live.footer('codex', CODEX), {'model': 'gpt-5.6-sol', 'effort': 'medium'})
+        self.assertEqual(live.footer('grok', GROK), {'model': 'grok-4.6', 'effort': 'xhigh'})
+        self.assertIsNone(live.footer('claude', CODEX))
+        for effort in ('max', 'ultra'):
+            self.assertEqual(live.footer('codex', f'  gpt-6.1-sol {effort} · ~/project'),
+                             {'model': 'gpt-6.1-sol', 'effort': effort})
+
+    def test_prose_scrollback_and_ambiguous_evidence_are_unknown(self):
+        for screen in ('We should use gpt-5.6-sol medium.', CODEX + '\n' * 8,
+                       'gpt-5.6-sol medium', CODEX + CODEX, ''):
+            self.assertIsNone(live.footer('codex', screen))
+
+    def test_template_fallback_argument_forms(self):
+        self.assertEqual(live.settings(['codex', '--model=test', '--config=model_reasoning_effort="high"']),
+                         {'model': 'test', 'effort': 'high'})
+        self.assertEqual(live.settings(['grok', '-m', 'grok-4.6', '--reasoning-effort=xhigh']),
+                         {'model': 'grok-4.6', 'effort': 'xhigh'})
+
+    def probe(self, screen=CODEX, desired_effort='xhigh', active=True):
+        calls = []
+        def run(args):
+            calls.append(args)
+            if args[0] == 'cli':
+                return f"codex --model gpt-5.6-sol -c 'model_reasoning_effort=\"{desired_effort}\"'"
+            if args[0] == 'agent-workspaces-pane-active':
+                if not active:
+                    raise live.ProbeError
+                return ''
+            if args[:2] == ['tmux', 'capture-pane']:
+                self.assertNotIn('-S', args)  # Never use scrollback.
+                return screen
+            self.fail(f'Unexpected or mutating command: {args}')
+        with patch.object(live, 'run', side_effect=run):
+            result = live.inspect_pane('cli', 'session', '%1', 'codex', 'codex')
+        return result, calls
+
+    def test_effort_drift(self):
+        row, calls = self.probe()
+        self.assertEqual(row['state'], 'drift')
+        self.assertEqual(row['drift'], ['effort'])
+        self.assertEqual(row['source'], 'live_screen_footer')
+        self.assertEqual(calls[0][-2], 'codex')
+
+    def test_match(self):
+        row, _ = self.probe(desired_effort='medium')
+        self.assertEqual(row['state'], 'match')
+
+    def test_model_drift(self):
+        row, _ = self.probe(screen=CODEX.replace('gpt-5.6-sol medium', 'gpt-6-astra xhigh'))
+        self.assertEqual(row['drift'], ['model'])
+
+    def test_dead_agent_and_missing_footer_are_unknown(self):
+        for kwargs in ({'active': False}, {'screen': 'shell prompt $'}):
+            row, _ = self.probe(**kwargs)
+            self.assertEqual(row['state'], 'unknown')
+            self.assertIsNone(row['observed'])
+
+    def test_unsupported_provider_never_guesses(self):
+        with patch.object(live, 'run', return_value='claude --model opus --effort high') as run:
+            row = live.inspect_pane('cli', 'session', '%1', 'orchestrator', 'claude')
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(row['reason'], 'unsupported_live_observation')
+        self.assertEqual(row['desired'], {'model': 'opus', 'effort': 'high'})
+
+    def test_tmux_failure_is_explicit(self):
+        with patch.object(live, 'run', side_effect=live.ProbeError):
+            report = live.collect('workspace', 'cli')
+        self.assertEqual(report['error'], 'tmux_unavailable')
+        self.assertIn('unknown', live.display(report))
+
+    def test_workspace_filter_and_role_forwarding(self):
+        panes = 'a\t%1\torchestrator\tcodex\twanted\nb\t%2\tcodex\tcodex\tother\nc\t%3\tintegration\t\twanted\n'
+        with patch.object(live, 'run', return_value=panes), patch.object(live, 'inspect_pane', return_value={}) as inspect:
+            report = live.collect('wanted', 'cli')
+        inspect.assert_called_once_with('cli', 'a', '%1', 'orchestrator', 'codex', 'wanted')
+        self.assertEqual(len(report['sessions']), 1)
+
+    def test_display_is_stable_and_omits_pane_content(self):
+        row, _ = self.probe()
+        first = {'sessions': [row], 'error': None, 'checked_at': 'first'}
+        second = dict(first, checked_at='second')
+        self.assertEqual(live.display(first), live.display(second))
+        self.assertNotIn('~/project', live.display(first))
+
+
+unittest.main()

@@ -86,12 +86,14 @@ git -C "$repository" fetch origin >/dev/null
 jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex","grok"]}' \
   >"$fixture/data/agent-workspaces/repo-hash/set/workspace.json"
 
+# Restore defaults after testing orchestrator-set above.
+cp "$root/config/config.json" "$AW_CONFIG_FILE"
 trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $trusted_codex == *"--approve-for-me"* && $trusted_codex != *"--sandbox"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) != *bypassPermissions* ]] || { printf 'not ok - trusted claude is not bypass\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh yolo) == *bypassPermissions* ]] || { printf 'not ok - explicit yolo profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) == *"'--model' 'opus' '--effort' 'high'"* ]] || { printf 'not ok - claude worker policy\n'; failures=$((failures+1)); }
-[[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-6.1-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh trusted) == *"'--model' 'grok-4.6' '--reasoning-effort' 'high'"* ]] || { printf 'not ok - frontier grok policy\n'; failures=$((failures+1)); }
 orchestrator_codex=$(aw_provider_command codex resume yolo session-123 gpt-5.6-sol)
 [[ $(grep -o -- "'--model'" <<<"$orchestrator_codex" | wc -l) == 1 ]] || { printf 'not ok - orchestrator model deduplication\n'; failures=$((failures+1)); }
@@ -134,6 +136,7 @@ audit_after=$(jq -s '[.[] | select(.event=="role.status" and .details.role=="gro
 [[ $audit_before == "$audit_after" ]] || { printf 'not ok - duplicate status audit suppression\n'; failures=$((failures+1)); }
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 [[ -s $fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md ]] || { printf 'not ok - orchestrator snapshot\n'; failures=$((failures+1)); }
+rg -q '^## Model configuration$' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" || { printf 'not ok - snapshot includes live configuration\n'; failures=$((failures+1)); }
 signature_one=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 signature_two=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')

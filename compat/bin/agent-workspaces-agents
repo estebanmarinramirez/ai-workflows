@@ -1,0 +1,71 @@
+#!/bin/bash
+# Workspace-scoped agent selection; mutations go through the handover state machine.
+set -euo pipefail
+workspace=${1:-${AW_WORKSPACE_ID:-}}
+if [[ -z $workspace ]]; then
+  workspace=$(tmux list-sessions -F '#{@aw_workspace_id}' | sort -u | sed '/^$/d' | gum choose --header='Choose workspace') || exit 0
+fi
+root=$(agent-workspaces workspace-root "$workspace")
+config="${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces/config.json"
+
+while :; do
+  agent-workspaces agents "$workspace"
+  action=$(printf '%s\n' 'Change orchestrator' 'Change lead worker' 'Manage pending handover' 'Show live configuration' 'Back' | gum choose --header='Change agents') || exit 0
+  case "$action" in
+    'Back') exit 0 ;;
+    'Show live configuration') agent-workspaces live-config "$workspace"; gum input --placeholder='Enter to continue' >/dev/null || true; continue ;;
+    'Manage pending handover')
+      rows=$(agent-workspaces agents "$workspace" --json | jq -r '.requests[] | select(.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack") | [.id,.role,.target.provider,.phase] | @tsv')
+      [[ -n $rows ]] || { gum style 'No pending handovers.'; continue; }
+      selected=$(printf '%s\n' "$rows" | gum choose --header='Pending handover') || continue
+      change=${selected%%$'\t'*}
+      step=$(printf '%s\n' 'Record outgoing checkpoint' 'Launch successor after outgoing agent exits' 'Cancel handover (successor must be stopped)' 'Back' | gum choose --header="$selected") || continue
+      case "$step" in
+        'Record outgoing checkpoint')
+          note=$(gum input --header='Path to outgoing handover note (objective, progress, remaining work, validation)' --placeholder='/path/to/handover.md') || continue
+          agent-workspaces agents "$workspace" checkpoint "$change" --note "$note" || gum input --placeholder='Enter to continue' >/dev/null
+          ;;
+        'Launch successor after outgoing agent exits')
+          agent-workspaces agents "$workspace" apply "$change" || gum input --placeholder='Enter to continue' >/dev/null
+          ;;
+        'Cancel handover (successor must be stopped)') agent-workspaces agents "$workspace" cancel "$change" || gum input --placeholder='Enter to continue' >/dev/null ;;
+      esac
+      continue
+      ;;
+  esac
+  role=orchestrator
+  task_args=()
+  if [[ $action == 'Change lead worker' ]]; then
+    role=lead
+    rows=('Next workflow (default lead)')
+    while IFS= read -r state; do
+      rows+=("$(jq -r '[.id,.status,.objective] | @tsv' "$state")")
+    done < <(find "$root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f | sort)
+    selected=$(printf '%s\n' "${rows[@]}" | gum choose --header='Choose workflow') || continue
+    if [[ $selected != 'Next workflow (default lead)' ]]; then task_args=(--task "$root/.coordination/${selected%%$'\t'*}"); fi
+  fi
+  provider=$(agent-workspaces available-providers | gum choose --header="Provider for $role") || continue
+  model_default=$(jq -r --arg provider "$provider" --arg role "$role" 'if $role=="orchestrator" and $provider==.orchestrator_provider then .orchestrator_model else .model_policy[$provider].model end // empty' "$config")
+  models=$(agent-workspaces models "$provider") || continue
+  model=$(printf '%s\n' "$model_default" "$models" 'Custom model…' | awk 'NF && !seen[$0]++' | gum choose --header='Model (account access may vary)' --selected="$model_default") || continue
+  if [[ $model == 'Custom model…' ]]; then
+    model=$(gum input --header='Model' --value="$model_default") || continue
+  fi
+  mapfile -t efforts < <(agent-workspaces models "$provider" --efforts "$model")
+  ((${#efforts[@]})) || continue
+  effort=$(printf '%s\n' "${efforts[@]}" | gum choose --header='Reasoning effort' --selected="$(jq -r --arg provider "$provider" '.model_policy[$provider].effort // "high"' "$config")") || continue
+  if [[ $role == lead && ${#task_args[@]} == 0 ]]; then
+    when=next-task
+  else
+    timing=$(printf '%s\n' 'At the next safe checkpoint' 'Request handover now' 'After current tasks finish' | gum choose --header='When should this take effect?') || continue
+    case "$timing" in
+      'At the next safe checkpoint') when=checkpoint ;;
+      'Request handover now') when=now ;;
+      *) when=next-task ;;
+    esac
+  fi
+  if agent-workspaces agents "$workspace" select --role "$role" --provider "$provider" --model "$model" --effort "$effort" --when "$when" "${task_args[@]}"; then
+    gum style 'Selection saved. Record a checkpoint, exit the outgoing agent, then launch the successor. It must acknowledge before taking ownership.'
+  fi
+  gum input --placeholder='Enter to continue' >/dev/null || true
+done

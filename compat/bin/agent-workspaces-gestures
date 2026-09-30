@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+app=$(dirname "$(dirname "$(readlink -f "$(command -v agent-workspaces)")")")
+runtime="${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces-gestures"
+action=${1:-status}; shift || true
+case "$action" in
+  start)
+    [[ -x $runtime/venv/bin/python && -s $runtime/gesture_recognizer.task ]] || { printf 'Gesture recognition is not set up. Run agent-workspaces-gestures setup.\n' >&2; exit 1; }
+    if systemctl --user is-active --quiet agent-workspaces-gestures.service; then printf 'Hand controls are already on.\n'; exit 0; fi
+    systemd-run --user --quiet --collect --unit=agent-workspaces-gestures --property=RuntimeMaxSec=30min --property=TimeoutStopSec=5s "$runtime/venv/bin/python" "$app/lib/gesture_camera.py" --model "$runtime/gesture_recognizer.task" "$@"
+    ;;
+  stop)
+    if systemctl --user is-active --quiet agent-workspaces-gestures.service; then
+      systemctl --user stop agent-workspaces-gestures.service
+    fi
+    ;;
+  doctor)
+    exec python3 "$app/lib/gesture_doctor.py" "$@"
+    ;;
+  status)
+    if systemctl --user is-active --quiet agent-workspaces-gestures.service; then
+      cat "${XDG_RUNTIME_DIR:-/run/user/$UID}/agent-workspaces-gestures.json" 2>/dev/null || printf 'Hand controls are starting.\n'
+    else printf 'Hand controls are off.\n'; fi
+    ;;
+  preview)
+    exec "$runtime/venv/bin/python" "$app/lib/gesture_camera.py" --model "$runtime/gesture_recognizer.task" --dry-run --preview "$@"
+    ;;
+  setup)
+    mkdir -p "$runtime"
+    UV_PYTHON_INSTALL_DIR="$runtime/python" uv venv --python 3.12 "$runtime/venv"
+    uv pip install --python "$runtime/venv/bin/python" -r "$app/lib/gesture-requirements.txt"
+    curl --fail --location --output "$runtime/gesture_recognizer.task.tmp" 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
+    mv "$runtime/gesture_recognizer.task.tmp" "$runtime/gesture_recognizer.task"
+    ;;
+  *) printf 'Usage: agent-workspaces-gestures {setup|start|stop|status|preview|doctor}\n' >&2; exit 1 ;;
+esac

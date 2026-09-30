@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Camera lifecycle failure injection; no physical device or desktop actions."""
+import contextlib
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+import gesture_camera as camera
+
+
+class Lifecycle(unittest.TestCase):
+    def run_camera(self, opened=True, model_error=None, failed_frames=False, live=False):
+        cv2, mp = MagicMock(), MagicMock()
+        device = cv2.VideoCapture.return_value
+        device.isOpened.return_value = opened
+        device.read.return_value = (False, None)
+        if model_error:
+            mp.tasks.vision.GestureRecognizer.create_from_options.side_effect = model_error
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, XDG_RUNTIME_DIR=directory))
+            stack.enter_context(patch.dict(sys.modules, cv2=cv2, mediapipe=mp))
+            args = ['camera', '--model', 'fixture', '--seconds', '0' if failed_frames else '1']
+            if not live:
+                args.append('--dry-run')
+            stack.enter_context(patch.object(sys, 'argv', args))
+            stack.enter_context(patch.object(camera.signal, 'signal'))
+            stack.enter_context(patch.object(camera.time, 'sleep'))
+            stack.enter_context(patch.object(camera.time, 'monotonic', side_effect=None if failed_frames else [0, 2]))
+            stack.enter_context(patch.object(camera.subprocess, 'run', side_effect=subprocess.TimeoutExpired('notify-send', 2)))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            try:
+                camera.main()
+            finally:
+                device.release.assert_called_once()
+                self.assertFalse((Path(directory) / 'agent-workspaces-gestures.json').exists())
+        return device
+
+    def test_unavailable_camera_releases_handle(self):
+        with self.assertRaises(SystemExit): self.run_camera(opened=False)
+
+    def test_model_failure_releases_camera(self):
+        with self.assertRaises(RuntimeError): self.run_camera(model_error=RuntimeError('model failed'))
+
+    def test_capture_failure_releases_camera(self):
+        with self.assertRaises(camera.GestureError): self.run_camera(failed_frames=True)
+
+    def test_deadline_closes_camera_without_reading_or_acting(self):
+        device = self.run_camera()
+        device.read.assert_not_called()
+
+    def test_notification_timeout_cannot_prevent_shutdown(self):
+        self.run_camera(live=True)
+
+
+unittest.main()

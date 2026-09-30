@@ -7,10 +7,23 @@
   "orchestrator_profile": "yolo",
   "model_policy": {
     "quality_tier": "frontier",
-    "claude": {"model": "opus", "effort": "high"},
-    "codex": {"model": "gpt-5.6-sol", "effort": "high"},
-    "grok": {"model": "grok-4.6", "effort": "high", "plan": "Ultra"},
-    "event_reviewer": {"model": "gpt-5.6-luna", "effort": "low"}
+    "claude": {
+      "model": "opus",
+      "effort": "high"
+    },
+    "codex": {
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "grok": {
+      "model": "grok-4.6",
+      "effort": "high",
+      "plan": "Ultra"
+    },
+    "event_reviewer": {
+      "model": "gpt-6-luna",
+      "effort": "low"
+    }
   },
   "build_policy": {
     "iteration": "focused-debug-checks",
@@ -31,28 +44,80 @@
   "event_reviewer": {
     "enabled": true,
     "provider": "codex",
-    "model": "gpt-5.6-luna"
+    "model": "gpt-6-luna"
   },
   "archive_after_days": 30,
   "delete_archives_automatically": false,
-  "project_roots": ["~/Work", "~/Projects", "~/Code", "~/Developer"],
+  "project_roots": [
+    "~/Work",
+    "~/Projects",
+    "~/Code",
+    "~/Developer"
+  ],
   "repository_catalog": {
-    "github_owners": ["estebanmarinramirez"],
+    "github_owners": [
+      "estebanmarinramirez"
+    ],
     "github_ttl_seconds": 900,
     "clone_root": "~/Developer",
     "max_depth": 12,
     "exclude_names": [
-      ".cache", ".local", ".Trash", "Trash", "node_modules", "target",
-      ".venv", "venv", "vendor", "Library"
+      ".cache",
+      ".local",
+      ".Trash",
+      "Trash",
+      "node_modules",
+      "target",
+      ".venv",
+      "venv",
+      "vendor",
+      "Library"
     ]
   },
   "seams": {
-    "general": {"label": "General repository work", "paths": ["**"]},
-    "desktop": {"label": "Desktop and platform integration", "paths": ["desktop/**", "platform/**", "**/omarchy/**", "**/*omarchy*"]},
-    "execution": {"label": "Execution core and exchange integrations", "paths": ["execution/**", "exchanges/**", "connectors/**"]},
-    "tui": {"label": "Terminal UI and information architecture", "paths": ["tui/**", "ui/**"]},
-    "shared": {"label": "Explicitly shared surfaces", "paths": ["Cargo.lock", "**/palette/**", "**/*command*"]}
+    "general": {
+      "label": "General repository work",
+      "paths": [
+        "**"
+      ]
+    },
+    "desktop": {
+      "label": "Desktop and platform integration",
+      "paths": [
+        "desktop/**",
+        "platform/**",
+        "**/omarchy/**",
+        "**/*omarchy*"
+      ]
+    },
+    "execution": {
+      "label": "Execution core and exchange integrations",
+      "paths": [
+        "execution/**",
+        "exchanges/**",
+        "connectors/**"
+      ]
+    },
+    "tui": {
+      "label": "Terminal UI and information architecture",
+      "paths": [
+        "tui/**",
+        "ui/**"
+      ]
+    },
+    "shared": {
+      "label": "Explicitly shared surfaces",
+      "paths": [
+        "Cargo.lock",
+        "**/palette/**",
+        "**/*command*"
+      ]
+    }
   },
-  "providers": ["claude", "codex", "grok"],
+  "providers": [
+    "claude",
+    "codex",
+    "grok"
+  ],
   "solo_agent_slots": 3
 }

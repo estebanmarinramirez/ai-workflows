@@ -39,6 +39,11 @@ else
   workspace_id=${workspace_selection##*$'\t'}
 fi
 
+if [[ -z ${AW_TEMPLATE:-} ]]; then
+  operation=$(printf '%s\n' 'Start workflow' 'Change agents' | gum choose --header="${workspace_labels[$workspace_id]}") || exit 0
+  [[ $operation != 'Change agents' ]] || exec agent-workspaces-agents "$workspace_id"
+fi
+
 declare -A role_sessions=()
 declare -A role_panes=()
 declare -A role_paths=()
@@ -105,9 +110,14 @@ fi
 stage=${AW_STAGE:-$(jq -r '.stage' "$template_file")}
 case "$stage" in review|execute|verify|integrate) ;; *) notify-send 'Agent Dispatcher' "Unsupported workflow stage: $stage"; exit 1 ;; esac
 
+assignment_root=$(agent-workspaces workspace-root "$workspace_id")
+saved_lead=$(jq -r '.default_lead // empty' "$assignment_root/.coordination/agents.json" 2>/dev/null || true)
 if [[ -n ${AW_LEAD:-} ]]; then
   lead=$AW_LEAD
   [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' "Requested lead is not active: $lead"; exit 1; }
+elif [[ -n $saved_lead ]]; then
+  lead=$saved_lead
+  [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' 'Selected lead is not running; open Change agents to complete the handover.'; exit 1; }
 elif ((active_count > 1)); then
   lead_options=()
   for role in "${active_roles[@]}"; do lead_options+=("󰒓"$'\t'"${role^}"$'\t'"$role"); done
@@ -115,6 +125,11 @@ elif ((active_count > 1)); then
   lead=${lead_selection#*$'\t'}
 else
   lead=${active_roles[0]}
+fi
+
+if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e 'any(.requests[]; .role=="lead" and (.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  notify-send 'Agent Dispatcher' 'A lead change is pending. Complete or cancel it in Change agents before dispatching another task.'
+  exit 1
 fi
 
 repository=${workspace_repositories[$workspace_id]}

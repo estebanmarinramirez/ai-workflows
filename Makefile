@@ -1,6 +1,11 @@
 PREFIX ?= $(HOME)/.local
 
-.PHONY: install install-macos test check portability-check
+.PHONY: install install-macos test check portability-check gesture-transport-check
+gesture-transport-check:
+	./tests/models
+	./tests/layouts
+	./tests/desktop-layout
+	python3 tests/gesture-transport
 install:
 	./packaging/install
 
@@ -8,11 +13,30 @@ install-macos:
 	./packaging/install-macos
 
 test:
+	./tests/menu
+	./tests/models
+	./tests/layouts
+	./tests/desktop-layout
+	./tests/model-policy
+	./tests/live-config
+	./tests/assignments
+	./tests/agent-controls
+	./tests/empty-repository
+	./tests/gestures
+	python3 tests/gesture-camera
 	./tests/run
 	./tests/catalog
 	./tests/manager-tree
 
 check:
+	./tests/menu
+	./tests/model-policy
+	./tests/live-config
+	./tests/assignments
+	./tests/agent-controls
+	./tests/empty-repository
+	./tests/gestures
+	python3 tests/gesture-camera
 	bash -n bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run tests/catalog tests/manager-tree
 	./tests/run
 

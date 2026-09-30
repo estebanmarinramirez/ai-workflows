@@ -19,4 +19,4 @@ jobs:
       - name: ShellCheck
         run: shellcheck -x -S error bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run
       - name: Tests
-        run: ./tests/run
+        run: make test

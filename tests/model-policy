@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Exercise policy resolution and the actual recover CLI without live agents."""
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory(prefix='aw-policy-') as temporary:
+    fixture = Path(temporary)
+    config = fixture / 'config/agent-workspaces'
+    providers = config / 'providers'
+    providers.mkdir(parents=True)
+    for source in (ROOT / 'config/providers').glob('*.json'):
+        (providers / source.name).write_text(source.read_text())
+    policy = {
+        'orchestrator_profile': 'safe', 'orchestrator_provider': 'codex', 'orchestrator_model': 'orchestrator-model',
+        'model_policy': {p: {'model': f'{p}-policy', 'effort': 'high'}
+                         for p in ('codex', 'claude', 'grok')},
+    }
+    policy['model_policy']['codex']['effort'] = 'xhigh'
+    policy_path = config / 'config.json'
+    policy_path.write_text(json.dumps(policy))
+    env = dict(os.environ, XDG_CONFIG_HOME=str(fixture / 'config'),
+               XDG_DATA_HOME=str(fixture / 'data'), AW_LIB=str(ROOT / 'lib/core.sh'))
+
+    def command(provider, mode='fresh', session='', override='', role=''):
+        output = subprocess.check_output(
+            [str(ROOT / 'bin/agent-workspaces'), 'provider-command', provider,
+             mode, 'safe', session, override, role], env=env, text=True)
+        return shlex.split(output)
+
+    # Conflicting flags, alternate spellings, unrelated settings, shell metacharacters.
+    path = providers / 'codex.json'
+    manifest = json.loads(path.read_text())
+    extra = ['--model=stale', '-m', 'also-stale', '-c', 'model_reasoning_effort="low"',
+             '--config=model_reasoning_effort="medium"', '-cmodel_reasoning_effort="low"',
+             '--config', 'model_reasoning_effort = "low"', '-c', 'unrelated="keep"']
+    for mode in ('fresh', 'resume', 'continue'):
+        manifest[mode] += extra
+    path.write_text(json.dumps(manifest))
+    for mode, session in [('fresh', ''), ('resume', 'session-123'), ('resume', '')]:
+        for provider, effort_flag in [('codex', '-c'), ('claude', '--effort'), ('grok', '--reasoning-effort')]:
+            args = command(provider, mode, session)
+            assert args.count('--model') == 1, args
+            assert args[args.index('--model') + 1] == f'{provider}-policy', args
+            if provider == 'codex':
+                assert [a for a in args if a.startswith('model_reasoning_effort')] == ['model_reasoning_effort="xhigh"'], args
+                assert 'unrelated="keep"' in args and '-m' not in args, args
+            else:
+                assert args.count(effort_flag) == 1 and args[args.index(effort_flag) + 1] == 'high', args
+            if session:
+                assert session in args, args
+        args = command('codex', mode, session, role='orchestrator')
+        assert args[args.index('--model') + 1] == 'orchestrator-model', args
+        args = command('claude', mode, session, role='orchestrator')
+        assert args[args.index('--model') + 1] == 'claude-policy', args
+    explicit = 'literal model $(touch /not-executed)'
+    args = command('codex', override=explicit, role='orchestrator')
+    assert args[args.index('--model') + 1] == explicit
+
+    # No policy keeps legacy templates usable.
+    policy_path.write_text('{}')
+    args = command('claude')
+    assert args[args.index('--model') + 1] == 'opus' and '--effort' in args
+    policy_path.write_text(json.dumps(policy))
+
+    # Exercise recover, including its role forwarding and session reuse.
+    workspace = fixture / 'data/agent-workspaces/repo/set'
+    workspace.mkdir(parents=True)
+    (workspace / 'workspace.json').write_text(json.dumps({'workspace_id': 'x:set'}))
+    binaries = fixture / 'bin'
+    binaries.mkdir()
+    tmux = binaries / 'tmux'
+    tmux.write_text('''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[0] == 'list-sessions': print('fixture\\torchestrator\\tx:set')
+elif args[0] == 'show-option':
+    print({'@aw_provider': os.environ['TEST_PROVIDER'], '@aw_provider_session_id': 'saved-session'}.get(args[-1], ''))
+elif args[0] == 'display-message': print('/tmp')
+elif args[0] == 'list-panes': print('%1')
+elif args[0] == 'send-keys' and '-l' in args:
+    with open(os.environ['TEST_CAPTURE'], 'w') as stream: json.dump(args[-1], stream)
+''')
+    active = binaries / 'agent-workspaces-pane-active'
+    active.write_text('#!/bin/bash\nexit 1\n')
+    tmux.chmod(0o755)
+    active.chmod(0o755)
+    capture = fixture / 'capture.json'
+    for provider in ('codex', 'claude'):
+        recovery_env = dict(env, PATH=f'{binaries}:{env["PATH"]}', TEST_PROVIDER=provider,
+                            TEST_CAPTURE=str(capture))
+        subprocess.run([str(ROOT / 'bin/agent-workspaces'), 'recover', 'x:set'],
+                       env=recovery_env, check=True, capture_output=True, text=True)
+        recovered = shlex.split(json.loads(capture.read_text()))
+        assert recovered == ['AW_WORKSPACE_ID=x:set'] + command(provider, 'resume', 'saved-session', role='orchestrator'), recovered
+print('ok - model policy, argument preservation, precedence, fallback, and recovery')
