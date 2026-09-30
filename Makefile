@@ -29,6 +29,7 @@ check: test
 	bash -n bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run tests/catalog tests/manager-tree
 
 portability-check:
+	command -v rg >/dev/null
 	bash -n bin/agent-workspaces lib/core.sh packaging/install-macos compat/portable/*
 	jq -e . config/config.json config/providers/*.json >/dev/null
 	! rg -n '/home/[^/]+|colombus|trading-system' README.md LICENSE config bin lib packaging/install-macos compat/portable
