@@ -139,6 +139,34 @@ class Routing(unittest.TestCase):
         self.assertEqual(self.router().pools['shared']['remaining'], .2)
         self.assertEqual(self.router().load_counts()['shared'], 3)
 
+    def test_incomplete_shared_pool_retains_known_spending_constraints(self):
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'grok': 'shared'}
+        # Aggregation must not depend on whether the unknown member comes first.
+        for providers in (['codex', 'grok', 'claude'], ['grok', 'codex', 'claude']):
+            self.config['providers'] = providers
+            self.save_config()
+            self.quota('grok', .1, ready=False)
+            for used in (1, .9, .2):
+                with self.subTest(providers=providers, used=used):
+                    self.quota('codex', used)
+                    router = self.router()
+                    pool = router.pools['shared']
+                    self.assertEqual(pool['remaining'], round(1-used, 6))
+                    self.assertTrue(pool['incomplete'])
+                    self.assertEqual(pool['state'], 'exhausted' if used == 1 else 'unknown')
+                    self.assertEqual(bool(router.guard(['codex'], str(self.task))), used >= .9)
+                    self.assertEqual(bool(router.guard(['codex'], review=True)), used == 1)
+                    self.assertEqual(bool(router.guard(['grok'], review=True)), used == 1)
+                    self.assertEqual(bool(router.guard(['codex'])), used >= .9)
+                    # Partial headroom is never an eligible automatic destination.
+                    self.quota('claude', 1)
+                    row = next(r for r in self.router().plan()['decisions'] if r['slot'] == 'claude')
+                    self.assertNotEqual(row['action'], 'handover')
+                    self.quota('claude', .2)
+            self.quota('codex', .1, ready=False)
+            self.assertIsNone(self.router().pools['shared']['remaining'])
+            self.assertFalse(self.router().guard(['codex']))
+
     def test_identity_after_switch_overrides_task_and_historical_slot(self):
         atomic(self.root/'.coordination/agents.json', {'active':{'codex':{'provider':'grok'}},'requests':{}})
         self.assertEqual(provider_for_slot(self.root,'codex',self.state,self.config),'grok')
@@ -208,6 +236,50 @@ class Routing(unittest.TestCase):
         self.assertEqual(self.router().plan()['difficulty'],'complex')
         self.config['routing']['reserve_fraction']=1.2; self.save_config()
         with self.assertRaises(assignments.ChangeError): self.router()
+
+    def test_difficulty_change_cancels_only_its_unlaunched_automatic_requests(self):
+        self.config['routing']['manage_orchestrator'] = True
+        self.save_config()
+        self.reconcile()
+        store = self.router().store
+        state = store.load()
+        lead = next(r for r in state['requests'].values() if r['slot'] == 'codex')
+        lead['phase'] = 'ready'
+        unrelated = dict(lead, id='other-task', routing=dict(lead['routing'], task=str(self.task.parent/'other')))
+        manual = dict(lead, id='manual', source='manual')
+        state['requests'].update({'other-task': unrelated, 'manual': manual})
+        store.save(state)
+        result = self.cli('difficulty', '--task', str(self.task), '--difficulty', 'complex')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = store.load()
+        for key, row in after['requests'].items():
+            self.assertEqual(row['phase'], 'ready' if key in ('manual','other-task') else 'cancelled')
+        self.assertEqual(after['requests']['manual'], manual)
+        self.assertEqual(after['requests']['other-task'], unrelated)
+        # Remove unrelated fixture requests to inspect the new lead choice.
+        del after['requests']['manual'], after['requests']['other-task']
+        store.save(after)
+        self.reconcile()
+        new = next(r for r in store.load()['requests'].values() if r['slot']=='codex' and r['phase']=='requested')
+        self.assertNotEqual(new['target']['model'], 'gpt-6-luna')
+        self.assertEqual(new['target']['effort'], 'xhigh')
+        self.assertEqual(new['routing']['difficulty'], 'complex')
+        self.assertEqual(new['routing']['task_revision'], 1)
+
+    def test_difficulty_change_preserves_launched_handover_and_same_value_is_noop(self):
+        self.reconcile()
+        store = self.router().store
+        state = store.load()
+        next(iter(state['requests'].values()))['phase'] = 'awaiting_ack'
+        store.save(state)
+        before = (self.task/'state.json').read_bytes()
+        same = self.cli('difficulty', '--task', str(self.task), '--difficulty', 'simple')
+        self.assertEqual(same.returncode, 0, same.stderr)
+        result = self.cli('difficulty', '--task', str(self.task), '--difficulty', 'complex')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('launched handover', result.stderr)
+        self.assertEqual((self.task/'state.json').read_bytes(), before)
+        self.assertEqual(store.load(), state)
 
     def test_completed_tasks_do_not_trigger_handover(self):
         self.state['status']='completed'; self.save_task()

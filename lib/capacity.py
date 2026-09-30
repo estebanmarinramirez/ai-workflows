@@ -86,14 +86,17 @@ def capacities(config, usage_root=None, now=None):
     pools = {}
     for provider, row in providers.items():
         key = pool_id(provider, policy)
-        pool = pools.setdefault(key, dict(id=key, providers=[], state='available', remaining=1.0, used=0.0, resets_at=None, updated_at=None, reason='shared account pool'))
+        pool = pools.setdefault(key, dict(id=key, providers=[], state='unknown', remaining=None, used=None, incomplete=False, resets_at=None, updated_at=None, reason='shared account pool'))
         pool['providers'].append(provider)
         if row['state'] == 'unknown':
-            pool.update(state='unknown', remaining=None, used=None, reason=f'{provider}: {row["reason"]}')
-        elif pool['state'] != 'unknown':
-            pool['used'] = max(pool['used'], row['used'])
-            pool['remaining'] = min(pool['remaining'], row['remaining'])
-            pool['state'] = 'exhausted' if pool['remaining'] <= 0 else 'available'
+            pool.update(incomplete=True, reason=f'{provider}: {row["reason"]}')
+        else:
+            # Partial evidence cannot authorize spending, but it still supplies
+            # an upper bound on remaining quota that can forbid spending.
+            pool['used'] = max(pool['used'] or 0, row['used'])
+            pool['remaining'] = round(1 - pool['used'], 6)
+        pool['state'] = ('exhausted' if pool['remaining'] == 0 else
+                         'unknown' if pool['incomplete'] else 'available')
         if row['resets_at']:
             pool['resets_at'] = min(filter(None, [pool['resets_at'], row['resets_at']]))
         if row.get('updated_at'):

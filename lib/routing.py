@@ -98,6 +98,7 @@ class Router:
         if effort_mode not in ('auto', 'fixed'): raise ChangeError('Effort mode must be auto or fixed')
         report['effort_mode'] = effort_mode
         report['intent_revision'] = workspace_policy.get('revision', 0)
+        report['task_revision'] = (task or {}).get('routing', {}).get('revision', 0)
         if report['mode'] == 'off' or not task or task.get('status') in TERMINAL:
             return report
         if task.get('lead') not in task.get('roles', {}):
@@ -186,6 +187,7 @@ class Router:
                     r.get('source') == 'routing' and r['target'] == row['target'] and
                     r.get('routing', {}).get('task') == report['task'] and
                     r.get('routing', {}).get('difficulty') == difficulty and
+                    r.get('routing', {}).get('task_revision', 0) == report['task_revision'] and
                     r.get('routing', {}).get('intent_revision', 0) == report['intent_revision']
                     for r in state['requests'].values()):
                 row.update(action='cancelled', target=current, pool=current_pool, reason='user cancelled this routing choice; change routing preferences to reconsider')
@@ -212,13 +214,14 @@ class Router:
                     record = state['requests'][record['id']]
                     record.update(source='routing', routing=dict(reason=row['reason'], difficulty=report['difficulty'],
                                   pool=row['pool'], task=report['task'], review_reserve=row['review_reserve'],
+                                  task_revision=report['task_revision'],
                                   effort_mode=report['effort_mode'], intent_revision=report['intent_revision']))
                     self.store.save(state)
                     row.update(action='pending', change_id=record['id'])
                 except ChangeError as error:
                     row.update(action='unavailable', reason=str(error))
             # Stable signature prevents monitor ticks from producing unbounded logs.
-            evidence = {k: report[k] for k in ('mode', 'effort_mode', 'intent_revision', 'task', 'difficulty', 'decisions', 'warnings')}
+            evidence = {k: report[k] for k in ('mode', 'effort_mode', 'intent_revision', 'task', 'task_revision', 'difficulty', 'decisions', 'warnings')}
             signature = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
             previous = read_object(self.root / '.coordination/routing.json')
             if previous.get('signature') != signature:
@@ -240,7 +243,7 @@ class Router:
             pool = self.pools.get(pool_id(provider, self.policy), {})
             is_review = review or bool(task and (slot != task.get('lead') or task.get('stage') in ('review', 'verify')))
             reserve = 0 if is_review else self.policy['reserve_fraction']
-            if pool.get('state') == 'exhausted' or (pool.get('state') == 'available' and pool['remaining'] <= reserve):
+            if pool.get('remaining') is not None and pool['remaining'] <= reserve:
                 reasons.append(f'{slot}: account quota is exhausted or reserved for review; wait for fresh capacity or route to another account')
         return reasons
 
@@ -250,6 +253,8 @@ def display(report):
     for name, pool in sorted(report['pools'].items()):
         # Quantize display to avoid waking the orchestrator for tiny usage changes.
         remaining = 'unknown' if pool['remaining'] is None else f'{int(pool["remaining"]*100)//5*5}–{min(100, int(pool["remaining"]*100)//5*5+5)}%'
+        if pool.get('incomplete') and pool['remaining'] is not None:
+            remaining += ' upper bound (incomplete telemetry)'
         lines.append(f'- Account {name}: {pool["state"]}; remaining {remaining}; next reset {pool["resets_at"] or "unknown"}')
     for row in report['decisions']:
         target = row['target']
@@ -299,10 +304,23 @@ def main():
         if args.action == 'difficulty':
             if not args.task or not args.difficulty: raise ChangeError('Specify --task and --difficulty')
             path, _ = router.store.task(args.task)
-            with locked(path / '.state.lock'):
-                state = read_object(path / 'state.json')
-                state.setdefault('routing', {})['difficulty'] = args.difficulty
-                atomic(path / 'state.json', state)
+            # Serialize with selection/apply first, then task writers. Never
+            # invalidate a successor that has already started its handover.
+            with locked(router.store.file.parent / '.agents.lock'), locked(path / '.state.lock'):
+                task = read_object(path / 'state.json')
+                intent = task.setdefault('routing', {})
+                if intent.get('difficulty', 'standard') != args.difficulty:
+                    state = router.store.load()
+                    affected = [r for r in state['requests'].values()
+                                if r.get('source') == 'routing' and r.get('routing', {}).get('task') == str(path)]
+                    if any(r['phase'] in ('launching', 'awaiting_ack') for r in affected):
+                        raise ChangeError('Finish or cancel the launched handover before changing task difficulty')
+                    intent.update(difficulty=args.difficulty, revision=intent.get('revision', 0) + 1)
+                    atomic(path / 'state.json', task)
+                    for record in affected:
+                        if record['phase'] in ('requested', 'ready'):
+                            record.update(phase='cancelled', cancelled_at=router.now.isoformat())
+                    router.store.save(state)
         if args.action == 'guard':
             if not args.roles: raise ChangeError('Specify --roles')
             errors = router.guard(args.roles, args.task, args.review)

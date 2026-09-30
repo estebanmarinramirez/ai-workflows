@@ -238,6 +238,18 @@ class Assignments:
         if record.get('source') == 'routing':
             from capacity import capacities, pool_id, read_object
             routing = policy.get('routing', {})
+            allowed = routing.get('allowed_models', {}).get(target['provider'])
+            if allowed is not None and target['model'] not in allowed:
+                raise ChangeError('Target model is no longer allowed; cancel and replan this handover')
+            routing_task = record['routing'].get('task')
+            if not routing_task:
+                raise ChangeError('Routing task intent is missing; cancel and replan this handover')
+            _, task = self.task(routing_task)
+            intent = task.get('routing', {})
+            if (task.get('status') in TERMINAL or
+                    intent.get('difficulty', 'standard') != record['routing'].get('difficulty') or
+                    intent.get('revision', 0) != record['routing'].get('task_revision', 0)):
+                raise ChangeError('Task routing intent changed; cancel and replan this handover')
             workspace_policy = read_object(self.root / 'workspace.json').get('routing', {})
             effort_mode = workspace_policy.get('effort_mode', routing.get('effort_mode', 'fixed'))
             if (routing.get('mode') != 'automatic' or effort_mode != record['routing'].get('effort_mode') or

@@ -52,6 +52,10 @@ zero usage. A passed reset does not imply a replenished quota without a fresh
 observation. Model availability still depends on the provider/account; optionally
 restrict candidates through `routing.allowed_models.PROVIDER`.
 
+For shared pools, incomplete telemetry cannot erase a fresh exhaustion or
+review-reserve constraint reported by another member. Partial remaining capacity
+is an upper bound only; it never authorizes an automatic handover into that pool.
+
 All slots using one provider share one account pool, including the orchestrator.
 Acknowledged provider assignments override historical slot names and task
 metadata. Slot load across managed workspaces influences routing, without
@@ -77,6 +81,11 @@ agent must produce a clean checkpoint and exit, and the successor must
 acknowledge before taking ownership. Reviewers remain deferred until activated.
 Preferences, provider availability, model capabilities and target quota are
 checked again immediately before launch.
+The current model allowlist and task difficulty/revision are also rechecked.
+Changing task difficulty cancels its unlaunched automatic requests (including
+orchestrator requests), allowing the next routing tick to replan. A launched
+handover must finish or be cancelled before difficulty can change. Manual
+requests and requests for other tasks are preserved.
 
 The standard dispatcher and reviewer activation refuse known exhausted/reserved
 capacity or a pending handover. These checks do not enforce a hard token budget

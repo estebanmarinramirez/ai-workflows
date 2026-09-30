@@ -270,7 +270,8 @@ class Handover(unittest.TestCase):
     def automatic_ready(self):
         record = self.ready()
         state = self.store.load()
-        state['requests'][record['id']].update(source='routing', routing={'effort_mode':'fixed','intent_revision':0})
+        state['requests'][record['id']].update(source='routing', routing={
+            'effort_mode':'fixed','intent_revision':0,'task':str(self.task),'difficulty':'standard','task_revision':0})
         self.store.save(state)
         self.command = 'bash'
         self.usage = self.root.parent.parent.parent.parent/'state/omarchy/agents/usage'
@@ -298,6 +299,39 @@ class Handover(unittest.TestCase):
             self.assertEqual(len(self.launches),1)
             with patch.dict(os.environ, AW_HANDOVER_ID=record['id']): self.store.accept(record['id'])
             self.assertEqual(self.store.load()['active']['codex']['source'],'routing')
+
+    def test_automatic_launch_rechecks_current_model_allowlist(self):
+        record = self.automatic_ready()
+        path = self.store.config_root / 'config.json'
+        policy = a.read(path)
+        with patch.dict(os.environ, XDG_STATE_HOME=str(self.usage.parents[2])):
+            for allowed in ([], ['another-model']):
+                policy['routing']['allowed_models'] = {'claude': allowed}
+                a.atomic(path, policy)
+                with self.assertRaisesRegex(a.ChangeError, 'no longer allowed'):
+                    self.store.apply(record['id'])
+                self.assertEqual(self.launches, [])
+                self.assertEqual(self.store.load()['requests'][record['id']]['phase'], 'ready')
+            policy['routing']['allowed_models'] = {'claude': ['chosen-model']}
+            a.atomic(path, policy)
+            self.store.apply(record['id'])
+            self.assertEqual(len(self.launches), 1)
+
+    def test_automatic_launch_rechecks_task_intent_and_completion(self):
+        record = self.automatic_ready()
+        original = a.read(self.task / 'state.json')
+        with patch.dict(os.environ, XDG_STATE_HOME=str(self.usage.parents[2])):
+            for changes in ({'routing': {'difficulty': 'complex'}},
+                            {'routing': {'difficulty': 'standard', 'revision': 2}},
+                            {'status': 'completed'}):
+                a.atomic(self.task / 'state.json', dict(original, **changes))
+                with self.assertRaisesRegex(a.ChangeError, 'Task routing intent changed'):
+                    self.store.apply(record['id'])
+                self.assertEqual(self.launches, [])
+                self.assertEqual(self.store.load()['requests'][record['id']]['phase'], 'ready')
+            a.atomic(self.task / 'state.json', original)
+            self.store.apply(record['id'])
+            self.assertEqual(len(self.launches), 1)
 
     def test_reviewer_handover_preserves_lead_and_requires_clean_worktree(self):
         state = a.read(self.task/'state.json')
