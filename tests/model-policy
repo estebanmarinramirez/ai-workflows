@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='aw-policy-') as temporary:
     policy_path = config / 'config.json'
     policy_path.write_text(json.dumps(policy))
     env = dict(os.environ, XDG_CONFIG_HOME=str(fixture / 'config'),
-               XDG_DATA_HOME=str(fixture / 'data'), AW_LIB=str(ROOT / 'lib/core.sh'))
+               XDG_DATA_HOME=str(fixture / 'data'), CODEX_HOME=str(fixture / 'codex'), AW_LIB=str(ROOT / 'lib/core.sh'))
 
     def command(provider, mode='fresh', session='', override='', role=''):
         output = subprocess.check_output(
@@ -71,6 +71,9 @@ with tempfile.TemporaryDirectory(prefix='aw-policy-') as temporary:
     workspace = fixture / 'data/agent-workspaces/repo/set'
     workspace.mkdir(parents=True)
     (workspace / 'workspace.json').write_text(json.dumps({'workspace_id': 'x:set'}))
+    logs = fixture / 'codex/sessions'
+    logs.mkdir(parents=True)
+    (logs/'saved.jsonl').write_text(json.dumps({'type':'session_meta','payload':{'id':'saved-session','cwd':str(workspace/'.orchestrator'),'source':'cli'}})+'\n')
     binaries = fixture / 'bin'
     binaries.mkdir()
     tmux = binaries / 'tmux'
@@ -96,5 +99,10 @@ elif args[0] == 'send-keys' and '-l' in args:
         subprocess.run([str(ROOT / 'bin/agent-workspaces'), 'recover', 'x:set'],
                        env=recovery_env, check=True, capture_output=True, text=True)
         recovered = shlex.split(json.loads(capture.read_text()))
-        assert recovered == ['AW_WORKSPACE_ID=x:set'] + command(provider, 'resume', 'saved-session', role='orchestrator'), recovered
+        expected = command(provider, 'resume', 'saved-session', role='orchestrator')
+        if provider == 'codex':
+            position = recovered.index('--cd')
+            assert recovered[position+1] == str(workspace/'.orchestrator')
+            del recovered[position:position+2]
+        assert recovered == ['AW_WORKSPACE_ID=x:set'] + expected, recovered
 print('ok - model policy, argument preservation, precedence, fallback, and recovery')

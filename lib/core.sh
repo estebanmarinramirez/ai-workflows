@@ -2,12 +2,13 @@
 
 set -o pipefail
 
-AW_VERSION=1.2.1
+AW_VERSION=1.2.2
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
 AW_CONFIG_FILE=$AW_CONFIG_HOME/config.json
 AW_PROVIDER_HOME=$AW_CONFIG_HOME/providers
+AW_SESSION_HELPER=$(dirname "${BASH_SOURCE[0]}")/sessions.py
 
 aw_die() { printf 'agent-workspaces: %s\n' "$*" >&2; exit 1; }
 aw_now() { date --iso-8601=seconds; }
@@ -197,12 +198,25 @@ aw_provider_command() {
   [[ -f $manifest ]] || aw_die "unknown provider: $provider"
   aw_valid_profile "$profile" || aw_die "invalid permission profile: $profile"
   local command_json
+  # Codex --last can select a sibling worktree's conversation. Managed
+  # workspaces must verify even cached IDs and never use that fallback.
+  local resume_directory=''
+  if [[ $provider == codex && $mode == resume && -n $workspace_id ]]; then
+    [[ -n $workspace_root ]] || aw_die "cannot verify resume workspace: $workspace_id"
+    resume_directory="$workspace_root/$role"
+    [[ $role == orchestrator ]] && resume_directory="$workspace_root/.orchestrator"
+    session_id=$(python3 "$AW_SESSION_HELPER" "$resume_directory" "$session_id") || return 1
+    [[ -n $session_id ]] || mode=fresh
+  fi
   if [[ $mode == resume && -n $session_id ]]; then
     command_json=$(jq -c --arg id "$session_id" --arg profile "$profile" '[.resume[] | if . == "{session_id}" then $id else . end] + .profiles[$profile]' "$manifest")
   elif [[ $mode == resume ]]; then
     command_json=$(jq -c --arg profile "$profile" '.continue + .profiles[$profile]' "$manifest")
   else
     command_json=$(jq -c --arg profile "$profile" '.fresh + .profiles[$profile]' "$manifest")
+  fi
+  if [[ -n $resume_directory ]]; then
+    command_json=$(jq -c --arg cwd "$resume_directory" '. + ["--cd", $cwd]' <<<"$command_json")
   fi
   # Explicit override > acknowledged workspace assignment > orchestrator selection > provider policy > template.
   # Resolve here so fresh, resume, and recovery cannot drift apart.

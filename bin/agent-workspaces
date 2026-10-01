@@ -124,10 +124,7 @@ case "$cmd" in
         done < <(find "$HOME/.claude/projects" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
         ;;
       codex)
-        while IFS= read -r file; do
-          found=$(sed -n '1,20p' "$file" | jq -rs --arg cwd "$directory" '[.[]|select(.type=="session_meta" and .payload.cwd==$cwd)|(.payload.session_id//.payload.id)][0]//empty' 2>/dev/null)
-          [[ -n $found ]] && break
-        done < <(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+        found=$(python3 "$AW_SESSION_HELPER" "$directory")
         ;;
       grok)
         encoded=${directory//\//%2F}; session_root="$HOME/.grok/sessions/$encoded"

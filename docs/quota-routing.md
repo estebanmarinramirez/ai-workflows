@@ -112,3 +112,11 @@ manual pins, user cancellation, cooldowns, preference changes, handover
 idempotency, reviewer ownership, and launch-time capacity validation. The chooser
 is exercised with both user-selectable modes. Tests use isolated fixtures and
 never launch paid model turns or alter live agent sessions.
+
+## Workspace recovery
+
+Managed Codex launches verify saved session IDs against local interactive
+session metadata and the latest recorded working directory. A sibling Git
+worktree is not the same workspace. If no matching conversation is verified,
+the launcher starts fresh in the intended directory instead of using
+`resume --last`. Worker slots and the orchestrator are scoped independently.
