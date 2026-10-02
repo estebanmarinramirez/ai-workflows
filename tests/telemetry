@@ -109,6 +109,10 @@ class Telemetry(unittest.TestCase):
         status=json.loads(subprocess.check_output([sys.executable,str(ROOT/'lib/telemetry.py'),'status'],text=True))
         self.assertFalse(status['automatic_bayesian_training'])
         self.assertIsInstance(status['last_collection']['report'],dict)
+        ledger=t.Ledger(self.directory,readonly=True)
+        with self.assertRaises(sqlite3.OperationalError):
+            ledger.db.execute("INSERT INTO snapshots VALUES('forbidden','write')")
+        ledger.close()
     def test_targeted_scan_does_not_hide_full_scan_health(self):
         (self.task/'state.json').write_text('{')
         t.collect()

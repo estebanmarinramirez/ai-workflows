@@ -84,7 +84,12 @@ def quota_view(obj):
                 limits=[pick(v, 'percent resetsAt') for v in obj.get('limits', []) if isinstance(v, dict)])
 
 class Ledger:
-    def __init__(self, directory, timeout=30):
+    def __init__(self, directory, timeout=30, readonly=False):
+        self.path = directory / 'ledger.sqlite'
+        if readonly:
+            self.db = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=timeout)
+            self.db.row_factory = sqlite3.Row
+            return
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
         self.path = directory / 'ledger.sqlite'
@@ -278,12 +283,15 @@ def main():
     record = sub.add_parser('record'); record.add_argument('file', type=Path)
     args = parser.parse_args()
     data, directory, config = roots()
-    directory = args.directory or directory
+    directory = (args.directory or directory).resolve()
     if args.command == 'collect':
         result = collect(data, directory, config, args.workspace, args.fast)
         print(json.dumps(result, indent=2))
         return 1 if result.get('errors') else 0
-    ledger = Ledger(directory)
+    if args.command != 'record' and not (directory / 'ledger.sqlite').exists():
+        if args.command == 'status': print(json.dumps({'ledger': str(directory / 'ledger.sqlite'), 'initialized': False}))
+        return 0
+    ledger = Ledger(directory, readonly=args.command != 'record')
     try:
         if args.command == 'record':
             settings = read(config) if config.exists() else {}
