@@ -37,6 +37,10 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 
 ```text
 agent-workspaces doctor
+agent-workspaces benchmark demo DIRECTORY
+agent-workspaces benchmark init MANIFEST EXPERIMENT
+agent-workspaces benchmark run EXPERIMENT [--all] [--split development|heldout]
+agent-workspaces benchmark report EXPERIMENT [--split development|heldout]
 agent-workspaces dashboard
 agent-workspaces catalog refresh [--github]
 agent-workspaces catalog show
@@ -106,6 +110,15 @@ Visible provider prompts are not treated as completion signals because some CLIs
 Worker sessions use focused debug-profile checks during implementation. Full repository validation, including release/LTO builds, runs once on the final reviewed commit unless the task is specifically release-only. Worktrees retain separate build directories; if `sccache` is installed, new worker sessions enable it automatically to reuse safe compiler artifacts across worktrees.
 
 Provider manifests declare their CLI update manager. Use **Agent Workspaces → Provider Updates** to inspect and selectively update provider CLIs. Updates retain the prior provider installation so running sessions and their lazily spawned command hosts remain usable; restarted sessions pick up the new binary.
+
+## Configuration benchmarks
+
+Use `agent-workspaces benchmark` to compare fixed agent configurations in private
+repository clones. A frozen task matrix, independent verifier, outcome ledger,
+matched comparisons and explicit unknown costs keep experiments reviewable.
+The included deterministic demo makes no model calls; real provider adapters
+are supplied separately. Results never change live routing automatically.
+See [the benchmark guide](docs/benchmarking.md) for the runnable demo and adapter contract.
 
 ## Models and usage
 

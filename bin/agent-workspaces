@@ -10,6 +10,9 @@ usage() {
 
 cmd=${1:-help}; shift || true
 case "$cmd" in
+  benchmark)
+    exec python3 "$(dirname "${AW_LIB:-$(dirname "$(realpath "$0")")/../lib/core.sh}")/benchmark.py" "$@"
+    ;;
   help|-h|--help) usage ;;
   version|--version) printf '%s\n' "$AW_VERSION" ;;
   doctor)

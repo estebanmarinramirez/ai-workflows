@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Isolated benchmark trials: failures, budgets, immutable evidence and pairing."""
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'lib'))
+import benchmark as b
+
+
+class Benchmark(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.source = self.base/'input'
+        subprocess.run([sys.executable,str(ROOT/'examples/benchmark/create-demo.py'),str(self.source)],check=True,capture_output=True)
+        self.root = self.base/'experiment'
+        self.manifest = self.source/'manifest.json'
+
+    def init(self): return b.initialize(self.manifest,self.root)
+    def edit(self, **values):
+        data=json.loads(self.manifest.read_text()); data.update(values); b.write(self.manifest,data)
+    def trials(self):
+        db=b.database(self.root)
+        rows=[dict(r) for r in db.execute('SELECT * FROM trials ORDER BY ordinal')]
+        db.close(); return rows
+
+    def test_balanced_randomized_plan_pinned_baseline_and_seed_pairing(self):
+        self.assertEqual(self.init()['trials'],16)
+        rows=self.trials()
+        self.assertEqual(len({r['id'] for r in rows}),16)
+        for task in ('clamp','divide'):
+            for repeat in (0,1):
+                group=[r for r in rows if r['task']==task and r['repetition']==repeat]
+                self.assertEqual(len(group),4)
+                self.assertEqual(len({r['seed'] for r in group}),1)
+        other=self.base/'other'
+        b.initialize(self.manifest,other)
+        db=b.database(other)
+        self.assertEqual(rows,[dict(r) for r in db.execute('SELECT * FROM trials ORDER BY ordinal')]); db.close()
+        (self.source/'source/arithmetic.py').write_text('changed source')
+        self.assertTrue(b.run_trial(self.root)['accepted'])
+        self.assertEqual((self.source/'source/arithmetic.py').read_text(),'changed source')
+
+    def test_full_matrix_keeps_heldout_separate_and_pairs_results(self):
+        self.init()
+        for _ in range(8): self.assertTrue(b.run_trial(self.root)['accepted'])
+        self.assertIsNone(b.run_trial(self.root))
+        report=b.report(self.root,'development')
+        self.assertTrue(all(r['complete'] and r['accepted']==2 for r in report['configurations']))
+        self.assertTrue(all(r['matched_trials']==2 for r in report['paired_comparisons']))
+        self.assertTrue(all(r['finished']==0 for r in b.report(self.root,'heldout')['configurations']))
+        held=next(r for r in self.trials() if r['task']=='divide')
+        with self.assertRaises(ValueError): b.run_trial(self.root,held['id'])
+        self.assertTrue(b.run_trial(self.root,held['id'],'heldout')['accepted'])
+
+    def test_adapter_claim_does_not_override_independent_verifier(self):
+        (self.source/'adapter.py').write_text("import json,sys\nfrom pathlib import Path\nPath(sys.argv[2]).write_text(json.dumps({'accepted':True,'roles':{}}))\n")
+        self.init(); result=b.run_trial(self.root)
+        self.assertFalse(result['accepted'])
+        self.assertEqual(result['failure'],'verification_failed')
+        self.assertIsNone(result['cost_usd'])
+        self.assertIn('telemetry_error',result)
+
+    def test_adapter_failure_timeout_and_invalid_telemetry_are_recorded(self):
+        (self.source/'adapter.py').write_text('import time\ntime.sleep(30)\n')
+        self.edit(timeout_seconds=1); self.init()
+        result=b.run_trial(self.root)
+        self.assertEqual(result['failure'],'adapter_timeout')
+        self.assertLess(result['wall_seconds'],8)
+        self.assertEqual(self.trials()[next(i for i,r in enumerate(self.trials()) if r['id']==result['trial'])]['status'],'finished')
+        with self.assertRaises(ValueError): b.run_trial(self.root,result['trial'])
+
+    def test_unknown_usage_never_becomes_zero_and_negative_values_rejected(self):
+        adapter=self.source/'adapter.py'
+        adapter.write_text(adapter.read_text().replace("'cost_usd': 0", "'cost_usd': None"))
+        self.init(); result=b.run_trial(self.root)
+        self.assertTrue(result['accepted']); self.assertIsNone(result['cost_usd'])
+        summary=next(r for r in b.report(self.root,'development')['configurations'] if r['finished'])
+        self.assertIsNone(summary['total_cost_usd']); self.assertEqual(summary['unknown_cost_trials'],1)
+        config=b.load(self.root)['configurations'][0]
+        file=self.base/'usage.json'
+        for bad in (-1,float('nan'),True):
+            b.write(file,{'roles':{role:{**settings,'cost_usd':bad} for role,settings in config['roles'].items()}})
+            with self.assertRaises(ValueError): b.usage(file,config)
+
+    def test_wrong_model_is_not_credited_even_when_code_passes(self):
+        adapter=self.source/'adapter.py'
+        adapter.write_text(adapter.read_text().replace("'input_tokens': 0", "'model': 'wrong-model', 'input_tokens': 0"))
+        self.init(); result=b.run_trial(self.root)
+        self.assertTrue(result['verified'])
+        self.assertFalse(result['accepted'])
+        self.assertEqual(result['failure'],'invalid_adapter_telemetry')
+
+    def test_failed_attempt_costs_are_included_in_cost_per_accepted(self):
+        adapter=self.source/'adapter.py'
+        adapter.write_text(adapter.read_text().replace("'cost_usd': 0", "'cost_usd': 1")+
+                           "\nif request['repetition'] == 0: sys.exit(2)\n")
+        self.init()
+        while b.run_trial(self.root): pass
+        for row in b.report(self.root,'development')['configurations']:
+            self.assertEqual(row['accepted'],1)
+            roles=len(next(c for c in b.load(self.root)['configurations'] if c['id']==row['configuration'])['roles'])
+            self.assertEqual(row['cost_per_accepted_usd'],roles*2)
+
+    def test_concurrent_runners_claim_distinct_trials(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.init()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results=list(executor.map(lambda _: b.run_trial(self.root),range(2)))
+        self.assertNotEqual(results[0]['trial'],results[1]['trial'])
+        self.assertTrue(all(r['accepted'] for r in results))
+
+    def test_frozen_inputs_and_append_only_events(self):
+        self.init(); b.run_trial(self.root)
+        db=b.database(self.root)
+        self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0],2)
+        with self.assertRaises(sqlite3.IntegrityError): db.execute("DELETE FROM events")
+        db.close()
+        (self.root/'adapter.py').write_text('changed')
+        with self.assertRaises(ValueError): b.run_trial(self.root)
+
+    def test_interrupted_and_setup_failure_count_as_failed_trials(self):
+        self.init()
+        with patch.object(b,'execute',side_effect=KeyboardInterrupt):
+            result=b.run_trial(self.root)
+        self.assertEqual(result['failure'],'interrupted')
+        with patch.object(b,'git',side_effect=RuntimeError('clone failed')):
+            result=b.run_trial(self.root)
+        self.assertEqual(result['failure'],'harness_error')
+        self.assertFalse(result['accepted'])
+
+    def test_no_live_workspace_identity_is_passed_and_cli_works(self):
+        adapter=self.source/'adapter.py'
+        adapter.write_text('import os\nassert "AW_WORKSPACE_ID" not in os.environ\n'+adapter.read_text())
+        self.init()
+        env=dict(os.environ,AW_LIB=str(ROOT/'lib/core.sh'),AW_WORKSPACE_ID='live:workspace')
+        result=subprocess.run([str(ROOT/'bin/agent-workspaces'),'benchmark','run',str(self.root)],env=env,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)[0]['accepted'])
+
+    def test_invalid_manifest_rejected_before_creating_experiment(self):
+        for changes in ({'repeats':0},{'timeout_seconds':True},{'seed':'x'},{'tasks':[]}):
+            original=self.manifest.read_text(); self.edit(**changes)
+            with self.assertRaises(ValueError): self.init()
+            self.assertFalse(self.root.exists()); self.manifest.write_text(original)
+
+
+unittest.main()

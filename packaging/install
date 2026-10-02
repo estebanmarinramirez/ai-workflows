@@ -31,6 +31,7 @@ mkdir -p "$(dirname "$menu_file")"
 
 cp -a "$root/bin" "$root/lib" "$root/schemas" "$root/packaging" "$install_root/"
 cp -a "$root/compat" "$install_root/"
+cp -a "$root/examples" "$root/docs" "$install_root/"
 cp "$root/VERSION" "$root/README.md" "$install_root/"
 cp "$root/config/providers"/*.json "$config_root/providers/"
 mkdir -p "$config_root/instructions" "$config_root/templates"

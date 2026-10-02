@@ -10,6 +10,7 @@ install-macos:
 	./packaging/install-macos
 
 test:
+	./tests/benchmark
 	./tests/sessions
 	./tests/routing
 	./tests/menu
