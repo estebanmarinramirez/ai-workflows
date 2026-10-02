@@ -41,6 +41,7 @@ agent-workspaces benchmark demo DIRECTORY
 agent-workspaces benchmark init MANIFEST EXPERIMENT
 agent-workspaces benchmark run EXPERIMENT [--all] [--split development|heldout]
 agent-workspaces benchmark report EXPERIMENT [--split development|heldout]
+agent-workspaces benchmark shadow-report EXPERIMENT [--split development|heldout]
 agent-workspaces dashboard
 agent-workspaces catalog refresh [--github]
 agent-workspaces catalog show
@@ -119,6 +120,9 @@ matched comparisons and explicit unknown costs keep experiments reviewable.
 The included deterministic demo makes no model calls; real provider adapters
 are supplied separately. Results never change live routing automatically.
 See [the benchmark guide](docs/benchmarking.md) for the runnable demo and adapter contract.
+Optional [Bayesian shadow evaluation](docs/bayesian-shadow.md) records pre-outcome
+forecasts, separates capability from operational failure, and scores calibration.
+It excludes synthetic evidence and never changes live routing.
 
 ## Models and usage
 

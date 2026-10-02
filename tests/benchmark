@@ -122,7 +122,7 @@ class Benchmark(unittest.TestCase):
     def test_frozen_inputs_and_append_only_events(self):
         self.init(); b.run_trial(self.root)
         db=b.database(self.root)
-        self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0],2)
+        self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0],3)
         with self.assertRaises(sqlite3.IntegrityError): db.execute("DELETE FROM events")
         db.close()
         (self.root/'adapter.py').write_text('changed')

@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import shadow
 
 SCHEMA = 1
 TOPOLOGIES = {
@@ -81,6 +82,7 @@ def validate(manifest):
         for role, settings in roles.items():
             if not isinstance(settings, dict) or any(not isinstance(settings.get(k), str) or not settings[k] for k in ('provider', 'model', 'effort')):
                 raise ValueError(f'{role} needs explicit provider/model/effort')
+    shadow.policy(manifest)
     return manifest
 
 
@@ -110,6 +112,8 @@ def initialize(source, root):
             manifest[key] = key + '.py'
         shutil.copyfile(Path(__file__), root / 'harness.py')
         manifest['harness_sha256'] = digest(root / 'harness.py')
+        shutil.copyfile(Path(shadow.__file__), root / 'shadow.py')
+        manifest['shadow_sha256'] = digest(root / 'shadow.py')
         manifest.update(repository=str(repository), revision=revision, created_at=stamp())
         manifest['environment'] = {'python': sys.version, 'platform': platform.platform(), 'git': git('--version')}
         manifest['hashes'] = {key: digest(root / (key + '.py')) for key in scripts}
@@ -191,6 +195,8 @@ def usage(path, config):
             raise ValueError('Invalid role telemetry')
         if any(row.get(key) != config['roles'][role][key] for key in ('provider', 'model', 'effort')):
             raise ValueError(f'{role} did not report the configured provider/model/effort')
+        if config['roles'][role].get('model_version') and row.get('model_version') != config['roles'][role]['model_version']:
+            raise ValueError(f'{role} model version does not match the frozen configuration')
         for name in ('input_tokens', 'output_tokens', 'cost_usd'):
             value = row.get(name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or
@@ -217,6 +223,8 @@ def run_trial(root, trial_id=None, split='development'):
     manifest = load(root)
     if digest(Path(__file__)) != manifest.get('harness_sha256'):
         raise ValueError('Harness version changed; use the experiment harness.py or create a new experiment')
+    if digest(Path(shadow.__file__)) != manifest.get('shadow_sha256'):
+        raise ValueError('Shadow policy implementation changed; use the frozen experiment harness')
     db = database(root)
     db.execute('BEGIN IMMEDIATE')
     rows = db.execute('SELECT * FROM trials WHERE status=? ORDER BY ordinal', ('planned',)).fetchall()
@@ -227,6 +235,17 @@ def run_trial(root, trial_id=None, split='development'):
         if trial_id: raise ValueError('Trial unavailable or belongs to a different split')
         return None
     identifier = row['id']
+    settings = shadow.policy(manifest)
+    if settings['enabled']:
+        history = [dict(r) for r in db.execute('SELECT * FROM trials ORDER BY ordinal')]
+        if split == 'heldout' and any(tasks[r['task']]['split'] == 'development' and r['status'] != 'finished' for r in history):
+            db.rollback(); db.close()
+            raise ValueError('Finish all development trials before freezing held-out shadow predictions')
+        cutoff = db.execute('SELECT coalesce(max(id),0) FROM events').fetchone()[0]
+        prediction = shadow.predict(manifest, history, tasks[row['task']], row['configuration'], cutoff)
+        prediction.update(trial_id=identifier, task_id=row['task'], split=split)
+        db.execute('INSERT INTO events(trial,at,kind,payload) VALUES (?,?,?,?)',
+                   (identifier, stamp(), 'shadow_prediction', json.dumps(prediction)))
     db.execute("UPDATE trials SET status='running', started_at=? WHERE id=?", (stamp(), identifier))
     db.execute('INSERT INTO events(trial,at,kind,payload) VALUES (?,?,?,?)', (identifier, stamp(), 'started', '{}'))
     db.commit()
@@ -264,10 +283,10 @@ def run_trial(root, trial_id=None, split='development'):
                                       worktree, directory / 'verifier.log', manifest['timeout_seconds'])
             outcome['verifier_seconds'] = time.monotonic() - before
             outcome.update(verifier_exit=code, verifier_timed_out=timed_out)
-            outcome['verified'] = code == 0 and not timed_out
-            outcome['accepted'] = outcome['verified'] and 'telemetry_error' not in outcome
+            outcome['verified'] = (code == 0) if not timed_out and code in (0, 1) else None
+            outcome['accepted'] = outcome['verified'] is True and 'telemetry_error' not in outcome
             if not outcome['verified']:
-                outcome['failure'] = 'verifier_timeout' if timed_out else 'verification_failed'
+                outcome['failure'] = 'verifier_timeout' if timed_out else ('verification_failed' if code == 1 else 'verifier_error')
             elif 'telemetry_error' in outcome:
                 outcome['failure'] = 'invalid_adapter_telemetry'
         (directory / 'changes.patch').write_text(git('-C', worktree, 'diff', manifest['revision']))
@@ -277,6 +296,7 @@ def run_trial(root, trial_id=None, split='development'):
         outcome.update(accepted=False, failure='interrupted' if isinstance(error, KeyboardInterrupt) else 'harness_error', error=str(error))
     finally:
         outcome['wall_seconds'] = time.monotonic() - started
+        outcome.update(shadow.attribution(outcome))
         write(directory / 'outcome.json', outcome)
         encoded = json.dumps(outcome)
         with db:
@@ -342,7 +362,7 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     demo = sub.add_parser('demo'); demo.add_argument('directory')
     init = sub.add_parser('init'); init.add_argument('manifest'); init.add_argument('experiment')
-    for name in ('run', 'report'):
+    for name in ('run', 'report', 'shadow-report'):
         command = sub.add_parser(name); command.add_argument('experiment', type=Path)
         command.add_argument('--split', choices=['development','heldout'], default='development')
         if name == 'run':
@@ -354,6 +374,13 @@ def main():
             return
         if args.action == 'init': result = initialize(args.manifest, args.experiment)
         elif args.action == 'report': result = report(args.experiment.resolve(), args.split)
+        elif args.action == 'shadow-report':
+            root = args.experiment.resolve()
+            manifest = load(root)
+            db = database(root)
+            events = [dict(r) for r in db.execute('SELECT * FROM events ORDER BY id')]
+            db.close()
+            result = shadow.evaluate(manifest, events, args.split)
         else:
             result = []
             while True:

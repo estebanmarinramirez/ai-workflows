@@ -133,7 +133,9 @@ and a failed outcome. Write usage even on failed attempts when possible.
 python verifier.py REQUEST_JSON
 ```
 
-Exit zero only when the acceptance criteria pass. Run tests and assertions of
+Exit zero only when the acceptance criteria pass, 1 when a completed check
+fails, and 2 or higher when verification could not be performed (infrastructure
+or verifier errors). Run tests and assertions of
 behavior, not checks for an agent's self-reported success. The verifier script is
 frozen outside the worker checkout, and the harness restores the original request
 before invoking it. This is a trusted-program evaluation boundary, not protection
@@ -199,3 +201,10 @@ quality floor are chosen.
    evaluate once on held-out tasks.
 4. Only then estimate task-conditioned model utility or train a router. Account
    for changing provider versions, correlated failures and subscription limits.
+
+## Bayesian shadow policy
+
+New experiments may enable [Bayesian shadow evaluation](bayesian-shadow.md).
+It adds frozen model-version/task-family identities, pre-outcome predictions,
+conservative Beta updates, explicit abstention, and calibration reports. The
+included synthetic demo exercises recording but is excluded from learning.

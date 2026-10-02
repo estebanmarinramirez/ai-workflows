@@ -22,10 +22,11 @@ roles = {
 }
 manifest = {'schema_version':1, 'repository':'source', 'revision':'HEAD',
     'adapter':'adapter.py', 'verifier':'verifier.py', 'seed':42, 'repeats':2, 'timeout_seconds':10,
-    'tasks':[{'id':'clamp','split':'development','objective':'Clamp values to the inclusive bounds.'},
-             {'id':'divide','split':'heldout','objective':'Return None for a zero divisor.'}],
+    'tasks':[{'id':'clamp','split':'development','family':'python-repair','instance_id':'demo-clamp-v1','objective':'Clamp values to the inclusive bounds.'},
+             {'id':'divide','split':'heldout','family':'python-repair','instance_id':'demo-divide-v1','objective':'Return None for a zero divisor.'}],
+    'data_kind':'synthetic', 'shadow':{'enabled':True},
     'configurations':[{'id':name,'topology':name,'roles':{
-        role:{'provider':'demo','model':'deterministic-fixture','effort':'none'}
+        role:{'provider':'demo','model':'deterministic-fixture','effort':'none','model_version':'demo-v1'}
         for role in ['coordinator',*workers]}} for name,workers in roles.items()]}
 (root/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(root/'manifest.json')
