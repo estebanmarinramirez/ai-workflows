@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Four-window roster behavior with isolated provider availability."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory() as directory:
+    base = Path(directory)
+    config = base / 'config/agent-workspaces'
+    shutil.copytree(ROOT / 'config', config)
+    binaries = base / 'bin'
+    binaries.mkdir()
+    for provider in ('claude', 'codex', 'grok'):
+        path = binaries / provider
+        path.write_text('#!/bin/sh\nexit 0\n')
+        path.chmod(0o755)
+    env = dict(os.environ, PATH=f'{binaries}:{os.environ["PATH"]}', XDG_CONFIG_HOME=str(base / 'config'),
+               AW_LIB=str(ROOT / 'lib/core.sh'))
+    def cli(*args, check=True):
+        return subprocess.run([str(ROOT / 'bin/agent-workspaces'), *args], env=env, text=True, capture_output=True, check=check)
+    assert cli('provider-slots', 'four-windows').stdout.splitlines() == ['claude\tclaude', 'codex\tcodex', 'grok\tgrok']
+    cli('provider-disable', 'grok')
+    assert cli('provider-slots', 'four-windows').stdout.splitlines() == ['claude\tclaude', 'codex\tcodex', 'claude-2\tclaude']
+    cli('provider-disable', 'claude')
+    assert cli('provider-slots', 'adaptive-grid').stdout == 'codex\tcodex\n'
+    assert cli('provider-slots', 'four-windows').stdout.splitlines() == ['codex\tcodex', 'codex-2\tcodex', 'codex-3\tcodex']
+    cli('layout-set', 'four-windows')
+    assert len(cli('provider-slots').stdout.splitlines()) == 3
+    cli('layout-set', 'adaptive-grid')
+    before = (config / 'config.json').read_text()
+    assert cli('layout-set', 'invalid', check=False).returncode != 0
+    assert (config / 'config.json').read_text() == before
+    cli('provider-disable', 'codex')
+    assert cli('provider-slots', 'four-windows', check=False).returncode != 0
+print('ok - adaptive/four-window presets, unique roles, disabled providers and invalid layouts')

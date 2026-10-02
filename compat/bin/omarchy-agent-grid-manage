@@ -49,11 +49,13 @@ selection=$(printf '%s\n' "${rows[@]}" | fzf \
 
 IFS=$'\t' read -r repository set_slug class_prefix workspace_id expected_windows <<<"$selection"
 action=$(printf '%s\n' \
+  "Change agents — orchestrator and lead worker" \
   "Open $expected_windows windows — reconnect and arrange" \
   "Hide $expected_windows windows — keep agents running" \
   "End $expected_windows sessions — stop agents, keep history and worktrees" | gum choose --header="$set_slug · $(basename "$repository")") || exit 0
 
 case "$action" in
+  'Change agents'*) exec agent-workspaces-agents "$workspace_id" ;;
   'Open '*)
     exec env OMARCHY_AGENT_REPOSITORY="$repository" OMARCHY_AGENT_SET="$set_slug" omarchy-agent-grid
     ;;

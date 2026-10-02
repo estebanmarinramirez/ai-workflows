@@ -15,8 +15,8 @@ jobs:
       - name: Install checks
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck jq
+          sudo apt-get install -y shellcheck jq ripgrep
       - name: ShellCheck
         run: shellcheck -x -S error bin/agent-workspaces lib/core.sh packaging/install packaging/migrate packaging/rollback tests/run
       - name: Tests
-        run: ./tests/run
+        run: make test

@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Drive the chooser with stubbed UI/CLI; no real sessions or configs change."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory() as directory:
+    fixture = Path(directory)
+    binaries = fixture / 'bin'
+    binaries.mkdir()
+    root = fixture / 'workspace'
+    (root / '.coordination').mkdir(parents=True)
+    config = fixture / 'config/agent-workspaces'
+    config.mkdir(parents=True)
+    (config / 'config.json').write_text(json.dumps({'model_policy': {'codex': {'model': 'default-model', 'effort': 'high'}}}))
+    gum = binaries / 'gum'
+    gum.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+if sys.argv[1] == 'choose':
+    choices = json.loads(os.environ.get('CHOICES', 'null')) or ['Change lead worker', 'Next workflow (default lead)', 'codex', 'Custom model…', 'high', 'Back']
+    path = pathlib.Path(os.environ['COUNTER'])
+    index = int(path.read_text()) if path.exists() else 0
+    path.write_text(str(index + 1))
+    sys.stdin.read()
+    print(choices[index])
+elif sys.argv[1] == 'input':
+    print('chosen-model' if '--header=Model' in sys.argv else '')
+''')
+    cli = binaries / 'agent-workspaces'
+    cli.write_text('''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['CAPTURE'], 'a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')
+if sys.argv[1] == 'workspace-root': print(os.environ['WORKSPACE_ROOT'])
+elif sys.argv[1] == 'available-providers': print('codex')
+elif sys.argv[1] == 'models': print('low\\nmedium\\nhigh' if '--efforts' in sys.argv else 'gpt-6.1-sol')
+elif sys.argv[1] == 'agents': print('Selection saved')
+''')
+    gum.chmod(0o755)
+    cli.chmod(0o755)
+    env = dict(os.environ, PATH=f'{binaries}:{os.environ["PATH"]}', XDG_CONFIG_HOME=str(fixture / 'config'),
+               COUNTER=str(fixture / 'counter'), CAPTURE=str(fixture / 'capture'), WORKSPACE_ROOT=str(root))
+    subprocess.run([str(ROOT / 'compat/bin/agent-workspaces-agents'), 'w:set'], env=env, check=True, capture_output=True, text=True)
+    calls = [json.loads(line) for line in (fixture / 'capture').read_text().splitlines()]
+    select = next(call for call in calls if 'select' in call)
+    assert select == ['agents', 'w:set', 'select', '--role', 'lead', '--provider', 'codex', '--model', 'chosen-model', '--effort', 'high', '--when', 'next-task'], select
+    assert not any('apply' in call or 'checkpoint' in call for call in calls), calls
+    for label, mode in [('Keep current model and effort settings','fixed'), ('Auto · balance model and effort','auto')]:
+        (fixture/'counter').unlink()
+        (fixture/'capture').unlink()
+        env['CHOICES'] = json.dumps(['Effort mode and quota routing', label, 'Back'])
+        subprocess.run([str(ROOT/'compat/bin/agent-workspaces-agents'),'w:set'],env=env,check=True,capture_output=True,text=True)
+        calls=[json.loads(line) for line in (fixture/'capture').read_text().splitlines()]
+        assert ['routing','w:set','effort-mode','--mode',mode] in calls, calls
+        assert not any('apply' in call or 'checkpoint' in call for call in calls), calls
+print('ok - chooser persists next-workflow lead selection without switching a live session')

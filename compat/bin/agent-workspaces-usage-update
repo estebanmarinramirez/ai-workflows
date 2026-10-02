@@ -37,4 +37,9 @@ for entry in "${entries[@]}"; do
   fi
   aw_usage_refresh_collector "$id" "$collector" "$usage_dir" || status=1
 done
+# Durable observations include inactive workspaces and existing audit history.
+if ! python3 "$(dirname "$usage_lib")/telemetry.py" collect >/dev/null; then
+  aw_usage_log ERROR telemetry "collection incomplete; inspect agent-workspaces telemetry status"
+  status=1
+fi
 exit "$status"

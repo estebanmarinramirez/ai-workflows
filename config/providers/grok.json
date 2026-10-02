@@ -4,13 +4,85 @@
   "label": "Grok Build",
   "executable": "grok",
   "process_pattern": "-grok,",
-  "update": {"manager": "mise", "tool": "npm:@xai-official/grok"},
-  "fresh": ["grok", "--model", "grok-4.6", "--reasoning-effort", "high"],
-  "resume": ["grok", "--resume", "{session_id}", "--model", "grok-4.6", "--reasoning-effort", "high"],
-  "continue": ["grok", "--continue", "--model", "grok-4.6", "--reasoning-effort", "high"],
+  "update": {
+    "manager": "mise",
+    "tool": "npm:@xai-official/grok"
+  },
+  "fresh": [
+    "grok",
+    "--model",
+    "grok-4.6",
+    "--reasoning-effort",
+    "high"
+  ],
+  "resume": [
+    "grok",
+    "--resume",
+    "{session_id}",
+    "--model",
+    "grok-4.6",
+    "--reasoning-effort",
+    "high"
+  ],
+  "continue": [
+    "grok",
+    "--continue",
+    "--model",
+    "grok-4.6",
+    "--reasoning-effort",
+    "high"
+  ],
   "profiles": {
-    "safe": ["--permission-mode", "default"],
-    "trusted": ["--permission-mode", "acceptEdits"],
-    "yolo": ["--permission-mode", "bypassPermissions"]
-  }
+    "safe": [
+      "--permission-mode",
+      "default"
+    ],
+    "trusted": [
+      "--permission-mode",
+      "acceptEdits"
+    ],
+    "yolo": [
+      "--permission-mode",
+      "bypassPermissions"
+    ]
+  },
+  "models": [
+    {
+      "id": "grok-4.7",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    {
+      "id": "grok-4.7-build-fast",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    {
+      "id": "grok-4.6",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    {
+      "id": "grok-4.5",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    }
+  ],
+  "catalog_reviewed_at": "2026-09-30",
+  "repository": "https://github.com/xai-org/grok-build"
 }

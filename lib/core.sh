@@ -2,12 +2,13 @@
 
 set -o pipefail
 
-AW_VERSION=1.0.0
+AW_VERSION=1.5.0
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
 AW_CONFIG_FILE=$AW_CONFIG_HOME/config.json
 AW_PROVIDER_HOME=$AW_CONFIG_HOME/providers
+AW_SESSION_HELPER=$(dirname "${BASH_SOURCE[0]}")/sessions.py
 
 aw_die() { printf 'agent-workspaces: %s\n' "$*" >&2; exit 1; }
 aw_now() { date --iso-8601=seconds; }
@@ -88,6 +89,9 @@ aw_audit() {
     '{schema_version:1,at:$at,event:$event,actor:$actor,details:$details}' >>"$audit_file"
   flock -u "$audit_lock"
   exec {audit_lock}>&-
+  # Observe after releasing the source lock; failures must not block task work.
+  python3 "$(dirname "$AW_SESSION_HELPER")/telemetry.py" collect --fast --workspace "$workspace_root" >/dev/null || \
+    printf 'agent-workspaces: telemetry collection incomplete; inspect telemetry status\n' >&2
 }
 
 aw_task_refresh() {
@@ -96,6 +100,11 @@ aw_task_refresh() {
   exec {task_lock}>"$task_dir/.state.lock"
   flock "$task_lock"
   state=$(jq '.' "$state_file") || aw_die "invalid task state: $state_file"
+  if aw_handover_frozen "$task_dir"; then
+    flock -u "$task_lock"; exec {task_lock}>&-
+    jq -r '.status' <<<"$state"
+    return 0
+  fi
   while IFS=$'\t' read -r role status_file; do
     [[ -f $status_file ]] || { role_state=dispatched; all_completed=false; }
     if [[ -f $status_file ]]; then
@@ -152,12 +161,56 @@ aw_task_refresh() {
   printf '%s\n' "$next"
 }
 
+# Role slots stay stable across provider changes, retaining their worktrees.
+aw_role_provider() {
+  local provider=$1 role=$2 workspace_id=${3:-${AW_WORKSPACE_ID:-}} root selection=''
+  if [[ -n $workspace_id ]]; then
+    root=$(aw_workspace_root "$workspace_id" 2>/dev/null || true)
+    if [[ -f $root/.coordination/agents.json ]]; then
+      selection=$(jq -r --arg role "$role" '.active[$role].provider // empty' "$root/.coordination/agents.json")
+    fi
+  fi
+  printf '%s\n' "${selection:-$provider}"
+}
+
+aw_handover_frozen() {
+  local task root records
+  task=$(realpath "$1") || return 1
+  root=${task%/.coordination/*}
+  records="$root/.coordination/agents.json"
+  [[ -f $records ]] || return 1
+  jq -e --arg task "$task" 'any(.requests[]; .task == $task and (.phase == "ready" or .phase == "launching" or .phase == "awaiting_ack"))' "$records" >/dev/null
+}
+
+aw_require_no_handover() {
+  if aw_handover_frozen "$1"; then aw_die 'task ownership is paused for handover; the successor must acknowledge before work resumes'; fi
+}
+
 aw_provider_command() {
-  local provider=$1 mode=$2 profile=$3 session_id=${4:-} model_override=${5:-}
+  local provider=$1 mode=$2 profile=$3 session_id=${4:-} model_override=${5:-} role=${6:-$1} workspace_id=${7:-${AW_WORKSPACE_ID:-}}
+  local workspace_root='' selection='{}'
+  if [[ -n $workspace_id ]]; then
+    workspace_root=$(aw_workspace_root "$workspace_id" 2>/dev/null || true)
+    if [[ -f $workspace_root/.coordination/agents.json ]]; then
+      selection=$(jq -c --arg role "$role" '.active[$role] // {}' "$workspace_root/.coordination/agents.json")
+    fi
+  fi
+  [[ -z ${AW_HANDOVER_TARGET:-} ]] || selection=$AW_HANDOVER_TARGET
+  provider=$(jq -r --arg provider "$provider" '.provider // $provider' <<<"$selection")
   local manifest="$AW_PROVIDER_HOME/$provider.json"
   [[ -f $manifest ]] || aw_die "unknown provider: $provider"
   aw_valid_profile "$profile" || aw_die "invalid permission profile: $profile"
   local command_json
+  # Codex --last can select a sibling worktree's conversation. Managed
+  # workspaces must verify even cached IDs and never use that fallback.
+  local resume_directory=''
+  if [[ $provider == codex && $mode == resume && -n $workspace_id ]]; then
+    [[ -n $workspace_root ]] || aw_die "cannot verify resume workspace: $workspace_id"
+    resume_directory="$workspace_root/$role"
+    [[ $role == orchestrator ]] && resume_directory="$workspace_root/.orchestrator"
+    session_id=$(python3 "$AW_SESSION_HELPER" "$resume_directory" "$session_id") || return 1
+    [[ -n $session_id ]] || mode=fresh
+  fi
   if [[ $mode == resume && -n $session_id ]]; then
     command_json=$(jq -c --arg id "$session_id" --arg profile "$profile" '[.resume[] | if . == "{session_id}" then $id else . end] + .profiles[$profile]' "$manifest")
   elif [[ $mode == resume ]]; then
@@ -165,16 +218,42 @@ aw_provider_command() {
   else
     command_json=$(jq -c --arg profile "$profile" '.fresh + .profiles[$profile]' "$manifest")
   fi
-  if [[ -n $model_override ]]; then
-    command_json=$(jq -c --arg model "$model_override" '
-      reduce .[] as $argument
-        ({command:[],skip:false};
-          if .skip then .skip=false
-          elif $argument == "--model" or $argument == "-m" then .skip=true
-          else .command += [$argument]
-          end)
-      | .command + ["--model",$model]' <<<"$command_json")
+  if [[ -n $resume_directory ]]; then
+    command_json=$(jq -c --arg cwd "$resume_directory" '. + ["--cd", $cwd]' <<<"$command_json")
   fi
+  # Explicit override > acknowledged workspace assignment > orchestrator selection > provider policy > template.
+  # Resolve here so fresh, resume, and recovery cannot drift apart.
+  local policy model effort effort_flag=''
+  policy=$(jq -c --arg provider "$provider" --arg role "$role" '
+    (.model_policy[$provider] // {}) +
+    (if $role == "orchestrator" and $provider == (.orchestrator_provider // "codex")
+     then {model:(.orchestrator_model // .model_policy[$provider].model)}
+     else {} end)' "$AW_CONFIG_FILE") || return 1
+  policy=$(jq -c --argjson selection "$selection" '. + $selection' <<<"$policy") || return 1
+  model=${model_override:-$(jq -r '.model // empty' <<<"$policy")}
+  effort=$(jq -r '.effort // empty' <<<"$policy")
+  case "$provider" in
+    codex) effort_flag=config ;;
+    claude) effort_flag=--effort ;;
+    grok) effort_flag=--reasoning-effort ;;
+  esac
+  command_json=$(jq -c --arg model "$model" --arg effort "$effort" --arg flag "$effort_flag" '
+    def reasoning: test("^model_reasoning_effort\\s*=");
+    def clean:
+      if length == 0 then []
+      elif $model != "" and (.[0] == "--model" or .[0] == "-m") then .[2:] | clean
+      elif $model != "" and (.[0] | startswith("--model=")) then .[1:] | clean
+      elif $effort != "" and $flag != "" and $flag != "config" and .[0] == $flag then .[2:] | clean
+      elif $effort != "" and $flag != "" and $flag != "config" and (.[0] | startswith($flag + "=")) then .[1:] | clean
+      elif $effort != "" and $flag == "config" and (.[0] == "-c" or .[0] == "--config") and ((.[1] // "") | reasoning) then .[2:] | clean
+      elif $effort != "" and $flag == "config" and (.[0] | test("^(--config=|-c)model_reasoning_effort\\s*=")) then .[1:] | clean
+      else [.[0]] + (.[1:] | clean) end;
+    clean
+    + (if $model != "" then ["--model",$model] else [] end)
+    + (if $effort == "" or $flag == "" then []
+       elif $effort == "default" then []
+       elif $flag == "config" then ["-c", "model_reasoning_effort=" + ($effort | tojson)]
+       else [$flag,$effort] end)' <<<"$command_json") || return 1
   jq -r '.[] | @sh' <<<"$command_json" | paste -sd' ' -
 }
 
@@ -226,6 +305,10 @@ aw_next_actions_json() {
   local task_dir=$1 state_file="$1/state.json" status
   [[ -f $state_file ]] || aw_die "missing task: $task_dir"
   status=$(jq -r '.status' "$state_file")
+  if aw_handover_frozen "$task_dir"; then
+    jq -cn '[{id:"complete-handover",label:"Finish the pending agent handover before continuing",mutating:false}]'
+    return 0
+  fi
   case "$status" in
     active) jq -cn '[{id:"wait",label:"Agents are still working",mutating:false}]' ;;
     awaiting_review) jq -cn '[{id:"activate-reviewers",label:"Release the immutable lead artifact to reviewers",mutating:true}]' ;;

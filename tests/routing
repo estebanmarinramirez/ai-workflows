@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Quota routing and effort preferences without live sessions or paid turns."""
+import argparse
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'lib'))
+import assignments
+from assignments import atomic
+from capacity import capacities, provider_for_slot, read_capacity
+from routing import Router
+
+
+class Routing(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.root = self.base / 'data/agent-workspaces/repo/set'
+        self.task = self.root / '.coordination/t1'
+        self.config_root = self.base / 'config/agent-workspaces'
+        shutil.copytree(ROOT / 'config', self.config_root)
+        self.config = json.loads((self.config_root / 'config.json').read_text())
+        self.config['routing']['manage_orchestrator'] = False
+        self.config['routing']['effort_mode'] = 'auto'
+        self.config['routing']['switch_improvement'] = 0.99 # Isolate effort tests from provider balancing.
+        self.save_config()
+        self.now = datetime.now(timezone.utc)
+        self.usage = self.base / 'state/omarchy/agents/usage'
+        self.manifest = {'workspace_id': 'w:set', 'profile': 'safe', 'agents': [{'role': p, 'provider': p} for p in self.config['providers']]}
+        atomic(self.root / 'workspace.json', self.manifest)
+        self.state = dict(id='t1', workspace_id='w:set', status='active', stage='execute', lead='codex',
+                          created_at=self.now.isoformat(), routing={'difficulty': 'simple'},
+                          roles={p: {'provider': p, 'worktree': str(self.root/p), 'state': 'in_progress' if p == 'codex' else 'deferred'}
+                                 for p in self.config['providers']})
+        self.save_task()
+        binaries = self.base/'bin'
+        binaries.mkdir()
+        for provider in self.config['providers']:
+            path = binaries/provider
+            path.write_text('#!/bin/sh\nexit 0\n')
+            path.chmod(0o755)
+            self.quota(provider, .2)
+        env = patch.dict(os.environ, XDG_CONFIG_HOME=str(self.base/'config'), XDG_DATA_HOME=str(self.base/'data'),
+                         XDG_STATE_HOME=str(self.base/'state'), CODEX_HOME=str(self.base/'codex'), GROK_HOME=str(self.base/'grok'),
+                         AW_LIB=str(ROOT/'lib/core.sh'), PATH=f'{binaries}:{os.environ["PATH"]}')
+        env.start(); self.addCleanup(env.stop)
+
+    def save_config(self): atomic(self.config_root/'config.json', self.config)
+    def save_task(self): atomic(self.task/'state.json', self.state)
+    def quota(self, provider, used, **changes):
+        value = dict(schemaVersion=1, id=provider, ready=True, updatedAt=self.now.isoformat(),
+                     limits=[dict(percent=used, resetsAt=(self.now+timedelta(hours=4)).isoformat())])
+        value.update(changes)
+        atomic(self.usage/f'{provider}.json', value)
+    def router(self): return Router(self.root, str(ROOT/'bin/agent-workspaces'), self.now)
+    def decision(self, slot='codex'): return next(r for r in self.router().plan()['decisions'] if r['slot']==slot)
+    def cli(self, *args):
+        return subprocess.run([str(ROOT/'bin/agent-workspaces'), 'routing', 'w:set', *args], text=True, capture_output=True)
+    def reconcile(self):
+        def session(store, slot): return f's-{slot}', provider_for_slot(store.root, slot, self.state, self.config)
+        with patch.object(assignments.Assignments, 'sessions', session), patch.object(assignments, 'run', return_value='saved'):
+            return self.router().reconcile()
+
+    def test_simple_and_complex_profiles_and_quality_floor(self):
+        self.assertEqual(self.decision()['target'], {'provider':'codex','model':'gpt-6-luna','effort':'medium'})
+        self.state['routing']['difficulty']='complex'; self.save_task()
+        self.assertEqual(self.decision()['target']['effort'], 'xhigh')
+        self.quota('codex', .8)
+        self.assertEqual(self.decision()['target']['effort'], 'high')
+        self.assertEqual(self.decision()['target']['model'], self.config['model_policy']['codex']['model'])
+
+    def test_fixed_mode_preserves_configured_effort_and_model_under_pressure(self):
+        self.config['routing']['effort_mode']='fixed'
+        self.config['model_policy']['codex']['effort']='xhigh'; self.save_config()
+        self.quota('codex', .8)
+        row=self.decision()
+        self.assertEqual(row['action'], 'keep')
+        self.assertEqual(row['target']['effort'], 'xhigh')
+        self.assertEqual(row['target']['model'], 'gpt-6.1-sol')
+
+    def test_bad_telemetry_is_unknown_not_spare_capacity(self):
+        for changes in [dict(updatedAt='bad'), dict(updatedAt=(self.now-timedelta(seconds=301)).isoformat()),
+                        dict(updatedAt=(self.now+timedelta(minutes=5)).isoformat()), dict(ready=False), dict(limits=[]),
+                        dict(limits=[{'percent':float('nan')}]), dict(limits=[{'percent':1.1}]),
+                        dict(limits=[{'percent':.1,'resetsAt':(self.now-timedelta(seconds=1)).isoformat()}])]:
+            self.quota('codex', .1, **changes)
+            self.assertEqual(self.decision()['action'], 'unknown', changes)
+        (self.usage/'codex.json').unlink()
+        self.assertEqual(self.decision()['action'], 'unknown')
+
+    def test_invalid_second_limit_does_not_hide_a_possible_bottleneck(self):
+        self.quota('codex', .1, limits=[{'percent':.1}, {'percent':'unknown'}])
+        self.assertEqual(read_capacity('codex', self.usage, self.now, 300)['state'], 'unknown')
+
+    def test_exhausted_lead_moves_to_verified_alternative(self):
+        self.quota('codex', 1)
+        row=self.decision()
+        self.assertEqual(row['action'], 'handover')
+        self.assertNotEqual(row['target']['provider'], 'codex')
+        self.assertEqual(row['slot'], 'codex')
+
+    def test_disabled_or_unverified_alternative_is_never_selected(self):
+        self.quota('codex', 1)
+        self.quota('claude', .1, ready=False)
+        self.config['provider_overrides']={'grok':{'enabled':False}}; self.save_config()
+        self.assertEqual(self.decision()['action'], 'wait')
+
+    def test_review_can_spend_reserve_implementation_cannot(self):
+        for p in self.config['providers']: self.quota(p, .9)
+        rows=self.router().plan()['decisions']
+        self.assertEqual(rows[0]['action'], 'wait')
+        self.assertTrue(all(r['action'] in ('keep','handover') for r in rows[1:]))
+        self.assertTrue(self.router().guard(['codex'], str(self.task)))
+        self.assertFalse(self.router().guard(['claude'], str(self.task)))
+        self.assertFalse(self.router().guard(['codex'], review=True))
+
+    def test_all_exhausted_wait_even_for_review(self):
+        for p in self.config['providers']: self.quota(p, 1)
+        self.assertTrue(all(r['action']=='wait' for r in self.router().plan()['decisions']))
+        self.assertTrue(self.router().guard(['claude'], str(self.task)))
+
+    def test_duplicate_slots_share_one_pool_and_load_is_counted(self):
+        self.state['roles']['codex-2']={'provider':'codex','state':'deferred'}; self.save_task()
+        self.assertEqual(self.router().load_counts()['codex'], 2)
+        self.assertEqual(len(self.router().pools), 3)
+        self.config['routing']['account_pools']={'codex':'shared','grok':'shared'}; self.save_config()
+        self.quota('grok', .8)
+        self.assertEqual(len(self.router().pools), 2)
+        self.assertEqual(self.router().pools['shared']['remaining'], .2)
+        self.assertEqual(self.router().load_counts()['shared'], 3)
+
+    def test_incomplete_shared_pool_retains_known_spending_constraints(self):
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'grok': 'shared'}
+        # Aggregation must not depend on whether the unknown member comes first.
+        for providers in (['codex', 'grok', 'claude'], ['grok', 'codex', 'claude']):
+            self.config['providers'] = providers
+            self.save_config()
+            self.quota('grok', .1, ready=False)
+            for used in (1, .9, .2):
+                with self.subTest(providers=providers, used=used):
+                    self.quota('codex', used)
+                    router = self.router()
+                    pool = router.pools['shared']
+                    self.assertEqual(pool['remaining'], round(1-used, 6))
+                    self.assertTrue(pool['incomplete'])
+                    self.assertEqual(pool['state'], 'exhausted' if used == 1 else 'unknown')
+                    self.assertEqual(bool(router.guard(['codex'], str(self.task))), used >= .9)
+                    self.assertEqual(bool(router.guard(['codex'], review=True)), used == 1)
+                    self.assertEqual(bool(router.guard(['grok'], review=True)), used == 1)
+                    self.assertEqual(bool(router.guard(['codex'])), used >= .9)
+                    # Partial headroom is never an eligible automatic destination.
+                    self.quota('claude', 1)
+                    row = next(r for r in self.router().plan()['decisions'] if r['slot'] == 'claude')
+                    self.assertNotEqual(row['action'], 'handover')
+                    self.quota('claude', .2)
+            self.quota('codex', .1, ready=False)
+            self.assertIsNone(self.router().pools['shared']['remaining'])
+            self.assertFalse(self.router().guard(['codex']))
+
+    def test_identity_after_switch_overrides_task_and_historical_slot(self):
+        atomic(self.root/'.coordination/agents.json', {'active':{'codex':{'provider':'grok'}},'requests':{}})
+        self.assertEqual(provider_for_slot(self.root,'codex',self.state,self.config),'grok')
+        self.assertEqual(provider_for_slot(self.root,'codex-2',self.state,self.config),'codex')
+
+    def test_review_independence_is_preserved_when_available(self):
+        self.quota('codex', 1)
+        rows=self.router().plan()['decisions']
+        lead=rows[0]['target']['provider']
+        self.assertTrue(all(r['target']['provider']!=lead for r in rows[1:]))
+
+    def test_manual_assignment_is_pinned_until_auto_is_explicitly_selected(self):
+        atomic(self.root/'.coordination/agents.json', {'active':{'codex':{'provider':'codex','model':'gpt-6-astra','effort':'max'}},'requests':{}})
+        self.assertEqual(self.decision()['action'],'pinned')
+        result=self.cli('effort-mode','--mode','auto')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.decision()['action'],'handover')
+
+    def test_reconcile_only_requests_and_deduplicates_without_launch(self):
+        report=self.reconcile()
+        state=self.router().store.load()
+        self.assertTrue(state['requests'])
+        self.assertTrue(all(r['phase']=='requested' and r['source']=='routing' for r in state['requests'].values()))
+        self.assertEqual(state['active'],{})
+        self.reconcile()
+        self.assertEqual(len(self.router().store.load()['requests']),len(state['requests']))
+        self.reconcile()
+        self.assertEqual(len((self.root/'.coordination/routing-audit.jsonl').read_text().splitlines()),2)
+
+    def test_cancelled_choice_does_not_reappear_under_low_quota(self):
+        self.quota('codex', .95)
+        self.reconcile()
+        store=self.router().store
+        record=next(r for r in store.load()['requests'].values() if r['slot']=='codex')
+        store.cancel(record['id'])
+        self.assertEqual(self.decision()['action'],'cancelled')
+        self.reconcile()
+        self.assertEqual(sum(r['slot']=='codex' for r in store.load()['requests'].values()),1)
+
+    def test_effort_mode_is_workspace_scoped_and_cancels_unlaunched_requests(self):
+        self.reconcile()
+        other=self.root.parent/'other/workspace.json'; atomic(other,{'workspace_id':'w:other'})
+        original=other.read_bytes()
+        result=self.cli('effort-mode','--mode','fixed')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(other.read_bytes(),original)
+        self.assertEqual(self.router().plan()['effort_mode'],'fixed')
+        self.assertTrue(all(r['phase']=='cancelled' for r in self.router().store.load()['requests'].values()))
+
+    def test_launched_handover_must_finish_before_mode_change(self):
+        self.reconcile(); store=self.router().store; state=store.load()
+        next(iter(state['requests'].values()))['phase']='awaiting_ack'; store.save(state)
+        before=(self.root/'workspace.json').read_bytes()
+        result=self.cli('effort-mode','--mode','fixed')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual((self.root/'workspace.json').read_bytes(),before)
+
+    def test_observation_modes_do_not_mutate(self):
+        for mode in ('off','recommend'):
+            self.config['routing']['mode']=mode; self.save_config()
+            self.reconcile()
+            self.assertFalse((self.root/'.coordination/agents.json').exists())
+
+    def test_difficulty_cli_and_invalid_policy(self):
+        result=self.cli('difficulty','--task',str(self.task),'--difficulty','complex')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.router().plan()['difficulty'],'complex')
+        self.config['routing']['reserve_fraction']=1.2; self.save_config()
+        with self.assertRaises(assignments.ChangeError): self.router()
+
+    def test_difficulty_change_cancels_only_its_unlaunched_automatic_requests(self):
+        self.config['routing']['manage_orchestrator'] = True
+        self.save_config()
+        self.reconcile()
+        store = self.router().store
+        state = store.load()
+        lead = next(r for r in state['requests'].values() if r['slot'] == 'codex')
+        lead['phase'] = 'ready'
+        unrelated = dict(lead, id='other-task', routing=dict(lead['routing'], task=str(self.task.parent/'other')))
+        manual = dict(lead, id='manual', source='manual')
+        state['requests'].update({'other-task': unrelated, 'manual': manual})
+        store.save(state)
+        result = self.cli('difficulty', '--task', str(self.task), '--difficulty', 'complex')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = store.load()
+        for key, row in after['requests'].items():
+            self.assertEqual(row['phase'], 'ready' if key in ('manual','other-task') else 'cancelled')
+        self.assertEqual(after['requests']['manual'], manual)
+        self.assertEqual(after['requests']['other-task'], unrelated)
+        # Remove unrelated fixture requests to inspect the new lead choice.
+        del after['requests']['manual'], after['requests']['other-task']
+        store.save(after)
+        self.reconcile()
+        new = next(r for r in store.load()['requests'].values() if r['slot']=='codex' and r['phase']=='requested')
+        self.assertNotEqual(new['target']['model'], 'gpt-6-luna')
+        self.assertEqual(new['target']['effort'], 'xhigh')
+        self.assertEqual(new['routing']['difficulty'], 'complex')
+        self.assertEqual(new['routing']['task_revision'], 1)
+
+    def test_difficulty_change_preserves_launched_handover_and_same_value_is_noop(self):
+        self.reconcile()
+        store = self.router().store
+        state = store.load()
+        next(iter(state['requests'].values()))['phase'] = 'awaiting_ack'
+        store.save(state)
+        before = (self.task/'state.json').read_bytes()
+        same = self.cli('difficulty', '--task', str(self.task), '--difficulty', 'simple')
+        self.assertEqual(same.returncode, 0, same.stderr)
+        result = self.cli('difficulty', '--task', str(self.task), '--difficulty', 'complex')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('launched handover', result.stderr)
+        self.assertEqual((self.task/'state.json').read_bytes(), before)
+        self.assertEqual(store.load(), state)
+
+    def test_completed_tasks_do_not_trigger_handover(self):
+        self.state['status']='completed'; self.save_task()
+        self.assertEqual(self.reconcile()['decisions'],[])
+
+    def test_account_model_allowlist_is_enforced(self):
+        self.config['routing']['allowed_models']={p:[] for p in self.config['providers']}; self.save_config()
+        self.assertTrue(all(r['action']=='wait' for r in self.router().plan()['decisions']))
+
+    def test_collector_attributes_switched_slots_and_orchestrator_to_one_account(self):
+        self.state['roles']['codex-2']={'state':'deferred'}; self.save_task()
+        atomic(self.root/'.coordination/agents.json', {'active':{s:{'provider':'grok'} for s in ['codex','claude','grok','codex-2','orchestrator']},'requests':{}})
+        self.quota('claude',.9); self.quota('codex',.3); self.quota('grok',.6)
+        command=[sys.executable,str(ROOT/'compat/bin/omarchy-agent-usage-workspaces')]
+        result=json.loads(subprocess.check_output(command,text=True))
+        self.assertEqual(result['limits'][0]['percent'],.6)
+        self.assertIn('1 account pools',result['limits'][0]['label'])
+        self.quota('grok',.6,updatedAt=(self.now-timedelta(hours=1)).isoformat())
+        result=json.loads(subprocess.check_output(command,text=True))
+        self.assertEqual(result['limits'],[])
+        self.assertIn('unknown',result['usageStatusText'])
+
+    def test_cooldown_does_not_prevent_complex_task_upgrade(self):
+        target={'provider':'codex','model':'gpt-6-luna','effort':'medium'}
+        atomic(self.root/'.coordination/agents.json', {'active':{'codex':dict(target,source='routing')},
+             'requests':{'old':{'slot':'codex','phase':'active','source':'routing','target':target,
+                'requested_at':self.now.isoformat(),'accepted_at':self.now.isoformat(),
+                'routing':{'difficulty':'simple','effort_mode':'auto'}}}})
+        self.assertEqual(self.decision()['action'],'cooldown')
+        self.state['routing']['difficulty']='complex'; self.save_task()
+        self.assertEqual(self.decision()['action'],'handover')
+        self.assertEqual(self.decision()['target']['effort'],'xhigh')
+
+
+unittest.main()

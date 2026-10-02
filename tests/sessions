@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Verify worktree-scoped discovery and real launch commands without live agents."""
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT/'lib'))
+from sessions import discover
+
+
+class Sessions(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.workspace = self.base/'data/agent-workspaces/repo/set'
+        self.workspace.mkdir(parents=True)
+        (self.workspace/'workspace.json').write_text(json.dumps({'workspace_id':'w:set'}))
+        self.cwd = self.workspace/'codex'
+        self.logs = self.base/'codex/sessions'
+        self.logs.mkdir(parents=True)
+        shutil.copytree(ROOT/'config', self.base/'config/agent-workspaces')
+        self.env = patch.dict(os.environ, CODEX_HOME=str(self.base/'codex'),
+            XDG_DATA_HOME=str(self.base/'data'), XDG_CONFIG_HOME=str(self.base/'config'), AW_LIB=str(ROOT/'lib/core.sh'))
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def log(self, name, cwd=None, latest=None, source='cli'):
+        path = self.logs/(name+'.jsonl')
+        rows = [{'type':'session_meta','payload':{'id':name,'cwd':str(cwd or self.cwd),'source':source}}]
+        if latest: rows.append({'type':'turn_context','payload':{'cwd':str(latest)}})
+        path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        return path
+
+    def command(self, preferred='', role='codex'):
+        return shlex.split(subprocess.check_output([str(ROOT/'bin/agent-workspaces'), 'provider-command',
+            'codex','resume','safe',preferred,'',role,'w:set'], text=True))
+
+    def test_newer_sibling_and_stale_cached_id_cannot_cross_workspaces(self):
+        self.log('correct')
+        self.log('wrong', self.workspace.parent/'other/codex')
+        self.assertEqual(discover(self.cwd, 'wrong'), 'correct')
+        args = self.command('wrong')
+        self.assertEqual(args[:3], ['codex','resume','correct'])
+        self.assertNotIn('--last', args)
+        self.assertEqual(args[args.index('--cd')+1], str(self.cwd))
+
+    def test_no_matching_history_starts_fresh_in_expected_directory(self):
+        self.log('wrong', self.workspace.parent/'other/codex')
+        args = self.command('wrong')
+        self.assertNotIn('resume', args)
+        self.assertNotIn('--last', args)
+        self.assertEqual(args[args.index('--cd')+1], str(self.cwd))
+
+    def test_latest_cwd_and_noninteractive_sources_are_checked(self):
+        self.log('moved', latest=self.workspace.parent/'other/codex')
+        self.log('exec', source='exec')
+        self.log('subagent', source={'subagent':{'thread_spawn':{}}})
+        (self.logs/'broken.jsonl').write_text('{broken')
+        self.assertEqual(discover(self.cwd), '')
+        self.log('valid')
+        self.assertEqual(discover(self.cwd), 'valid')
+
+    def test_verified_saved_id_wins_and_canonical_paths_match(self):
+        self.log('saved')
+        self.log('newer')
+        self.assertEqual(discover(self.cwd, 'saved'), 'saved')
+        self.assertEqual(discover(self.cwd/'..'/'codex'), 'newer')
+
+    def test_repeated_slots_and_orchestrator_are_isolated(self):
+        for role, directory in [('codex-2','codex-2'),('orchestrator','.orchestrator')]:
+            self.log(role, self.workspace/directory)
+            args = self.command(role=role)
+            self.assertEqual(args[:3], ['codex','resume',role])
+            self.assertEqual(args[args.index('--cd')+1], str(self.workspace/directory))
+
+
+unittest.main()

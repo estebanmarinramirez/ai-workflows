@@ -28,6 +28,9 @@
   // fields are kept unless overridden.
   // "about": {"icon":"","label":"About","action":"omarchy-launch-or-focus-tui \"zsh -c 'fastfetch; read -k 1'\""},
   "agent-launch": {"icon":"󰚩","label":"Workspaces","aliases":["agent","agents","workspace-agent"],"description":"Repositories, isolated worktrees, and coordinated agents"},
+  "agent-launch.manager": {"icon":"󰉋","label":"Workspaces Manager","action":"omarchy-launch-floating-terminal-with-presentation workspaces-manager","description":"Local and GitHub repositories, workspace presets, and hand controls"},
+  "agent-launch.four": {"icon":"󱃉","label":"Four-window Workspace","action":"omarchy-launch-floating-terminal-with-presentation env AW_LAYOUT=four-windows omarchy-agent-grid","description":"Three workers and one orchestrator on the same desktop"},
+  "agent-launch.agents": {"icon":"󰚩","label":"Change Agents","action":"omarchy-launch-floating-terminal-with-presentation agent-workspaces-agents","description":"Choose provider, model, effort and checkpointed handover"},
   "agent-launch.grid": {"icon":"󱃉","label":"Open Workspace","action":"omarchy-launch-floating-terminal-with-presentation omarchy-agent-grid","aliases":["workspaces","repositories","projects"],"description":"Open 2–4 panes from the available providers and orchestrator"},
   "agent-launch.manage": {"icon":"󰆍","label":"Manage Workspaces","action":"omarchy-launch-floating-terminal-with-presentation omarchy-agent-grid-manage","description":"Reopen, hide, or end a workspace"},
   "agent-launch.health": {"icon":"󰓅","label":"Workspace Health","action":"omarchy-launch-floating-terminal-with-presentation agent-workspaces dashboard","description":"Agents, tasks, branches, worktree risk, and recent activity"},

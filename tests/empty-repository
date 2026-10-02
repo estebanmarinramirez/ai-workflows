@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+import os
+from datetime import datetime
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory() as directory:
+    base = Path(directory)
+    repository = base / 'repo'
+    subprocess.run(['git', 'init', '-q', '--initial-branch=main', str(repository)], check=True)
+    subprocess.run(['git', '-C', str(repository), 'config', 'user.name', 'Fixture'], check=True)
+    subprocess.run(['git', '-C', str(repository), 'config', 'user.email', 'fixture@example.invalid'], check=True)
+    failure = subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-b', 'agents/probe', str(base / 'failed'), 'HEAD'], capture_output=True, text=True)
+    assert failure.returncode != 0 and 'HEAD' in failure.stderr, failure.stderr
+    (repository / 'staged.txt').write_text('user work')
+    (repository / 'untracked.txt').write_text('other work')
+    subprocess.run(['git', '-C', str(repository), 'add', 'staged.txt'], check=True)
+    binaries = base / 'bin'
+    binaries.mkdir()
+    gum = binaries / 'gum'
+    gum.write_text('#!/bin/bash\nexit "${CONFIRM_EXIT:-1}"\n')
+    gum.chmod(0o755)
+    env = dict(os.environ, PATH=f'{binaries}:{os.environ["PATH"]}', AW_LIB=str(ROOT / 'lib/core.sh'))
+    command = [str(ROOT / 'bin/agent-workspaces'), 'prepare-repository', str(repository)]
+    declined = subprocess.run(command, env=env, capture_output=True, text=True)
+    assert declined.returncode != 0
+    assert subprocess.run(['git', '-C', str(repository), 'rev-parse', '--verify', 'HEAD'], capture_output=True).returncode != 0
+    result = subprocess.run(command, env=dict(env, CONFIRM_EXIT='0'), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    message = subprocess.check_output(['git', '-C', str(repository), 'log', '-1', '--format=%B'], text=True)
+    assert message.strip() == f'Initial commit\n\nCopyright (c) {datetime.now().year} Fixture.', message
+    tree = subprocess.check_output(['git', '-C', str(repository), 'ls-tree', '-r', 'HEAD'], text=True)
+    assert not tree, tree
+    assert subprocess.check_output(['git', '-C', str(repository), 'diff', '--cached', '--name-only'], text=True).strip() == 'staged.txt'
+    assert (repository / 'untracked.txt').read_text() == 'other work'
+    head = subprocess.check_output(['git', '-C', str(repository), 'rev-parse', 'HEAD'], text=True)
+    assert subprocess.run(command, env=env, capture_output=True).returncode == 0  # No second confirmation.
+    for role in ('codex', 'claude', 'grok'):
+        worktree = base / role
+        subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-q', '-b', f'agents/{role}', str(worktree), 'HEAD'], check=True)
+        assert subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', 'HEAD'], text=True) == head
+print('ok - empty repository bootstrap is confirmed, preserves user files, and gives every worker the same base')

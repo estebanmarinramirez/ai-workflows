@@ -5,7 +5,7 @@ This task is coordinated by Agent Workspaces.
 ## Instruction order
 
 1. Follow the repository's own instructions (`AGENTS.md`, `CLAUDE.md`, and scoped equivalents).
-2. Follow the immutable task manifest and the selected development template.
+2. Follow the immutable task manifest and selected development template. A recorded, acknowledged agent handover may replace the provider owning a role slot; it never changes task scope or worktree boundaries.
 3. Follow your tool-specific task instructions.
 4. If instructions conflict or required evidence is unavailable, stop and record a blocker. Never guess.
 
@@ -40,3 +40,15 @@ This task is coordinated by Agent Workspaces.
 
 The first `State:` line must be one of: `dispatched`, `in-progress`, `blocked`, or `completed`.
 Keep findings, changes or commits, validation, and blockers concise and auditable.
+
+## Agent handovers
+
+Agent selections and pending handovers are recorded in the workspace's
+`.coordination/agents.json`. When asked to hand over, finish a safe checkpoint,
+commit the work, and record the objective, progress, commits, validation,
+remaining work and blockers in a note. Submit it through `agent-workspaces agents
+WORKSPACE checkpoint CHANGE_ID --note NOTE_PATH`, then stop work and exit the CLI.
+The successor reads that note and calls `agents WORKSPACE accept CHANGE_ID` before
+continuing in the same role worktree and status file. Checkpointed tasks cannot
+advance until the successor acknowledges. Never interpret pending selection as
+ownership, and never let both outgoing and incoming agents work on the role.
