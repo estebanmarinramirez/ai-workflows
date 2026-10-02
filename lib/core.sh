@@ -2,7 +2,7 @@
 
 set -o pipefail
 
-AW_VERSION=1.4.0
+AW_VERSION=1.5.0
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
@@ -89,6 +89,9 @@ aw_audit() {
     '{schema_version:1,at:$at,event:$event,actor:$actor,details:$details}' >>"$audit_file"
   flock -u "$audit_lock"
   exec {audit_lock}>&-
+  # Observe after releasing the source lock; failures must not block task work.
+  python3 "$(dirname "$AW_SESSION_HELPER")/telemetry.py" collect --fast --workspace "$workspace_root" >/dev/null || \
+    printf 'agent-workspaces: telemetry collection incomplete; inspect telemetry status\n' >&2
 }
 
 aw_task_refresh() {

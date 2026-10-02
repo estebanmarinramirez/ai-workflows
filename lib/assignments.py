@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import uuid
@@ -88,6 +89,13 @@ class Assignments:
 
     def save(self, state):
         atomic(self.file, state)
+        try:
+            from telemetry import collect
+            report = collect(workspace=self.root, fast=True)
+            if report.get('errors'):
+                print('agent-workspaces: telemetry collection incomplete; inspect telemetry status', file=sys.stderr)
+        except (OSError, ValueError, sqlite3.Error):
+            print('agent-workspaces: telemetry unavailable; assignment saved', file=sys.stderr)
 
     def task(self, task):
         path = Path(task).resolve()

@@ -295,3 +295,12 @@ The preview identifies the selected role and why dictation is unavailable.
 If a paste or send has an ambiguous transport failure, controls enter manual
 review rather than retrying; inspect the pane and restart the controller to reset.
 See [the hardening review](docs/gesture-review.md) for validation and remaining limits.
+
+## Everyday evidence collection
+
+Normal workspace activity is recorded locally in an append-only telemetry ledger.
+Run `agent-workspaces telemetry status` to inspect coverage and collection errors,
+or `agent-workspaces telemetry export` for JSONL evidence. Existing and inactive
+workspaces are included; no new session is required. See [collection and receipt
+details](docs/telemetry.md) for scope, privacy, controls and statistical limits.
+This observational data does not automatically train the Bayesian shadow policy.

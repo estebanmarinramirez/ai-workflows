@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Durable collection tests, isolated from user state and real agent processes."""
+import concurrent.futures
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'lib'))
+import telemetry as t
+
+class Telemetry(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        env = patch.dict(os.environ, XDG_DATA_HOME=str(self.base/'data'), XDG_STATE_HOME=str(self.base/'state'), XDG_CONFIG_HOME=str(self.base/'config'))
+        env.start(); self.addCleanup(env.stop)
+        self.data, self.directory, self.config = t.roots()
+        self.ws = self.data/'project/workspace'; self.task = self.ws/'.coordination/task'
+        self.write(self.config, {'telemetry': {'enabled': True}, 'api_key': 'secret'})
+        self.write(self.ws/'workspace.json', {'workspace_id':'w', 'routing':{'effort_mode':'fixed'}})
+        self.write(self.task/'state.json', {'id':'task', 'status':'active', 'objective':'secret', 'roles':{'codex':{'state':'in_progress'}}, 'transitions':[]})
+        self.run = patch.object(t.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 's\tw\tcodex\tcodex\n', ''))
+        self.run.start(); self.addCleanup(self.run.stop)
+    def write(self,path,value):
+        path.parent.mkdir(parents=True,exist_ok=True); path.write_text(json.dumps(value))
+    def rows(self, kind=None):
+        with closing(sqlite3.connect(self.directory/'ledger.sqlite')) as db:
+            db.row_factory=sqlite3.Row
+            return [dict(r, payload=json.loads(r['payload'])) for r in db.execute('SELECT * FROM events ORDER BY id') if kind is None or r['kind']==kind]
+    def test_imports_inactive_tasks_and_repeated_collection_is_idempotent(self):
+        first=t.collect(); second=t.collect()
+        self.assertEqual(first['tasks'],1); self.assertEqual(second['events_added'],0)
+        self.assertEqual(self.rows('task')[0]['provenance'],'initial_observation')
+    def test_a_b_a_state_changes_are_all_preserved(self):
+        t.collect()
+        self.write(self.task/'state.json', {'id':'task','status':'blocked'});t.collect()
+        self.write(self.task/'state.json', {'id':'task','status':'active','roles':{'codex':{'state':'in_progress'}},'transitions':[]});t.collect()
+        self.assertEqual([r['payload']['status'] for r in self.rows('task')],['active','blocked','active'])
+    def test_no_prompts_commands_or_arbitrary_secrets(self):
+        self.write(self.task/'codex.status.json', {'state':'completed','summary':'secret','blockers':['secret'],'evidence':[{'command':'secret','exit_code':0}]})
+        t.collect(); text=json.dumps(self.rows())
+        self.assertNotIn('secret',text)
+        role=self.rows('role')[0]['payload']
+        self.assertEqual(role['evidence'][0]['exit_code'],0)
+        self.assertEqual(role['verification_provenance'],'agent_reported_not_independent')
+    def test_audit_duplicates_rotation_and_partial_line(self):
+        path=self.ws/'.coordination/audit.jsonl'
+        line=json.dumps({'at':'2026-10-02T00:00:00Z','event':'role.status','details':{'task_id':'task','summary':'secret'}})+'\n'
+        path.write_text(line+line+'{')
+        self.assertTrue(t.collect()['errors']); self.assertEqual(len(self.rows('audit')),2)
+        path.write_text(line+line); t.collect(); self.assertEqual(len(self.rows('audit')),2)
+        self.assertNotIn('secret',json.dumps(self.rows()))
+    def test_malformed_source_does_not_discard_other_workspaces(self):
+        other=self.data/'other/set';self.write(other/'workspace.json',{'workspace_id':'other'})
+        (self.task/'state.json').write_text('{')
+        report=t.collect();self.assertTrue(report['errors']);self.assertEqual(len(self.rows('workspace')),2)
+    def test_quota_is_account_scoped_and_keeps_unknowns(self):
+        path=self.base/'state/omarchy/agents/usage/codex.json'
+        self.write(path,{'id':'codex','updatedAt':'one','limits':[{'percent':40}]});t.collect()
+        self.write(path,{'id':'codex','updatedAt':'two','limits':[{'percent':50}]});t.collect()
+        self.assertEqual(len(self.rows('quota')),2)
+        self.assertEqual(self.rows('quota')[0]['payload']['scope'],'account_not_task')
+        self.assertNotIn('cost_usd',self.rows('quota')[0]['payload'])
+    def test_disabled_collection_does_not_create_ledger(self):
+        self.write(self.config,{'telemetry':{'enabled':False}})
+        self.assertFalse(t.collect()['enabled']);self.assertFalse(self.directory.exists())
+    def test_append_only_and_private_permissions(self):
+        t.collect()
+        self.assertEqual(self.directory.stat().st_mode & 0o777,0o700)
+        self.assertEqual((self.directory/'ledger.sqlite').stat().st_mode & 0o777,0o600)
+        with closing(sqlite3.connect(self.directory/'ledger.sqlite')) as db:
+            for query in ('DELETE FROM events','UPDATE events SET kind="wrong"'):
+                with self.assertRaises(sqlite3.IntegrityError): db.execute(query)
+    def test_receipt_idempotency_conflict_unknown_cost_and_correction(self):
+        value={'receipt_id':'r1','kind':'usage','workspace':'project/workspace','task':'task','role':'codex','attempt_id':'a1','source':'provider-adapter','at':'2026-10-02T10:00:00Z','provider':'codex','model':'m','cost_usd':None,'input_tokens':10}
+        ledger=t.Ledger(self.directory)
+        with ledger.db:
+            t.receipt(ledger,value);t.receipt(ledger,value)
+            with self.assertRaises(ValueError):t.receipt(ledger,{**value,'input_tokens':11})
+            t.receipt(ledger,{**value,'receipt_id':'r2','supersedes':'r1','input_tokens':11})
+        ledger.close()
+        self.assertEqual(len(self.rows()),2);self.assertIsNone(self.rows()[0]['payload']['cost_usd'])
+    def test_bad_receipts_rejected(self):
+        value={'receipt_id':'r','kind':'verification','workspace':'project/workspace','task':'task','attempt_id':'a','source':'verifier','at':'2026-10-02T00:00:00Z','accepted':True,'verifier_id':'tests','verifier_version':'v1','evidence_sha256':'a'*64}
+        ledger=t.Ledger(self.directory)
+        for change in ({'input_tokens':-1},{'cost_usd':float('nan')},{'accepted':'true'},{'evidence_sha256':'fake'},{'command':'secret'},{'failure_category':'quality'},{'at':'2026-10-02T00:00:00'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):t.receipt(ledger,{**value,**change})
+        ledger.close()
+    def test_concurrent_collectors_do_not_duplicate(self):
+        # Precreate schema to exercise the transactional snapshot claim.
+        t.Ledger(self.directory).close()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            reports=list(pool.map(lambda _:t.collect(),range(4)))
+        self.assertEqual(len(self.rows('task')),1)
+        self.assertEqual(sum(r['events_added'] for r in reports),len(self.rows()))
+    def test_export_cursor_and_status_cli(self):
+        t.collect()
+        self.run.stop()
+        result=subprocess.check_output([sys.executable,str(ROOT/'lib/telemetry.py'),'export','--after','1'],text=True)
+        self.assertTrue(all(json.loads(line)['id']>1 for line in result.splitlines()))
+        status=json.loads(subprocess.check_output([sys.executable,str(ROOT/'lib/telemetry.py'),'status'],text=True))
+        self.assertFalse(status['automatic_bayesian_training'])
+        self.assertIsInstance(status['last_collection']['report'],dict)
+    def test_targeted_scan_does_not_hide_full_scan_health(self):
+        (self.task/'state.json').write_text('{')
+        t.collect()
+        self.write(self.task/'state.json', {'id':'task','status':'active'})
+        t.collect(workspace=self.ws,fast=True)
+        with closing(sqlite3.connect(self.directory/'ledger.sqlite')) as db:
+            reports={scope:json.loads(report) for scope,report in db.execute('SELECT scope,report FROM health')}
+        self.assertTrue(reports['all']['errors'])
+        self.assertFalse(reports['workspace:'+str(self.ws)]['errors'])
+    def test_worktree_observations_do_not_modify_checkout(self):
+        self.run.stop()
+        checkout=self.ws/'codex';checkout.mkdir()
+        subprocess.run(['git','init','-q',str(checkout)],check=True)
+        subprocess.run(['git','-C',str(checkout),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','base'],check=True)
+        (checkout/'untracked').write_text('private content')
+        before=subprocess.check_output(['git','-C',str(checkout),'status','--porcelain'])
+        t.collect()
+        after=subprocess.check_output(['git','-C',str(checkout),'status','--porcelain'])
+        self.assertEqual(before,after)
+        self.assertTrue(self.rows('worktree')[0]['payload']['dirty'])
+        self.assertNotIn('private content',json.dumps(self.rows()))
+    def test_assignment_save_survives_ledger_failure(self):
+        import assignments
+        self.write(self.config,{'telemetry':{'enabled':True}})
+        assignment=assignments.Assignments(self.ws,'unused')
+        with patch.object(t,'collect',side_effect=sqlite3.OperationalError('locked')):
+            assignment.save({'active':{},'requests':{}})
+        self.assertEqual(json.loads(assignment.file.read_text()),{'active':{},'requests':{}})
+    def test_tmux_failure_is_not_claimed_as_no_active_sessions(self):
+        with patch.object(t.subprocess,'run',side_effect=OSError('unavailable')):
+            report=t.collect()
+        self.assertEqual(report['active_session_observation'],'unavailable')
+        self.assertEqual(self.rows('session_inventory'),[])
+
+if __name__=='__main__': unittest.main()

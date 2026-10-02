@@ -178,5 +178,8 @@
         }
       }
     }
+  },
+  "telemetry": {
+    "enabled": true
   }
 }
