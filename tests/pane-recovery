@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Exercise the real pane launcher without starting providers or live tmux."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class Recovery(unittest.TestCase):
+    def check_recovery(self, phase, exists=False, recorded_session='test-orchestrator'):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binaries = root / 'bin'
+            binaries.mkdir()
+            config = root / '.config/agent-workspaces'
+            config.mkdir(parents=True)
+            (config / 'config.json').write_text(json.dumps({'orchestrator_provider': 'codex'}))
+            coordination = root / '.coordination'
+            coordination.mkdir()
+            record = dict(id='change-1', slot='orchestrator', phase=phase,
+                          session=recorded_session, outgoing_provider='codex',
+                          outgoing_session_id='previous', target={'provider': 'claude'})
+            state = coordination / 'agents.json'
+            state.write_text(json.dumps({'requests': {'change-1': record}}))
+            before = state.read_bytes()
+            stub = '''#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['FIXTURE'])
+args = sys.argv[1:]
+tool = pathlib.Path(sys.argv[0]).name
+with (root / 'calls').open('a') as f: f.write(json.dumps([tool] + args) + '\\n')
+if tool == 'agent-workspaces':
+    if args[0] == 'available-providers': print('codex')
+    elif args[0] == 'role-provider': print('codex')
+    elif args[0] == 'workspace-root': print(root)
+elif tool == 'tmux':
+    if args[0] == 'has-session': sys.exit(0 if (root / 'exists').exists() else 1)
+    if args[0] == 'new-session': (root / 'exists').touch()
+    if args[0] == 'attach-session': sys.exit(0 if (root / 'exists').exists() else 1)
+'''
+            for name in ('agent-workspaces', 'tmux'):
+                path = binaries / name
+                path.write_text(stub)
+                path.chmod(0o755)
+            if exists:
+                (root / 'exists').touch()
+            env = dict(os.environ, HOME=tmp, FIXTURE=tmp, PATH=f'{binaries}:{os.environ["PATH"]}')
+            result = subprocess.run(['bash', str(ROOT / 'compat/bin/omarchy-agent-pane'),
+                                     'orchestrator', 'test-orchestrator', tmp,
+                                     'Orchestrator', '', '', 'test', '', 'test:workspace'],
+                                    env=env, capture_output=True, text=True)
+            calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
+            self.assertEqual(state.read_bytes(), before)
+            self.assertFalse(any('provider-command' in call or 'send-keys' in call for call in calls))
+            return result, calls
+
+    def test_missing_session_restored_for_each_pending_phase(self):
+        for phase in ('ready', 'launching', 'awaiting_ack'):
+            with self.subTest(phase=phase):
+                result, calls = self.check_recovery(phase)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(sum(call[:2] == ['tmux', 'new-session'] for call in calls), 1)
+                provider = 'codex' if phase == 'ready' else 'claude'
+                self.assertIn(['tmux', 'set-option', '-q', '-t', 'test-orchestrator', '@aw_provider', provider], calls)
+                option, value = ('@aw_provider_session_id', 'previous') if phase == 'ready' else ('@aw_handover_id', 'change-1')
+                self.assertIn(['tmux', 'set-option', '-q', '-t', 'test-orchestrator', option, value], calls)
+                self.assertIn(['agent-workspaces', 'monitor-start', 'test:workspace'], calls)
+                self.assertEqual(calls[-1], ['tmux', 'attach-session', '-t', 'test-orchestrator'])
+
+    def test_existing_session_is_only_attached(self):
+        result, calls = self.check_recovery('ready', exists=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(call[:2] in (['tmux', 'new-session'], ['tmux', 'set-option']) for call in calls))
+
+    def test_different_recorded_session_is_not_recreated(self):
+        result, calls = self.check_recovery('ready', recorded_session='another-session')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call[:2] == ['tmux', 'new-session'] for call in calls))
+
+
+unittest.main()

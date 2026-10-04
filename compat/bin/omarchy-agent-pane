@@ -14,7 +14,7 @@ provider=${AW_AGENT_PROVIDER:-$role}
 configured_orchestrator=$(jq -r '.orchestrator_provider // "codex"' "$HOME/.config/agent-workspaces/config.json")
 if [[ $role == orchestrator ]]; then
   provider=$configured_orchestrator
-  if ! agent-workspaces available-providers | grep -qx "$provider"; then
+  if ! agent-workspaces available-providers | grep -x -- "$provider" >/dev/null; then
     provider=$(agent-workspaces available-providers | head -1)
   fi
   [[ -n $provider ]] || { printf 'No enabled provider is installed.\n' >&2; exit 1; }
@@ -40,6 +40,23 @@ set_session_metadata() {
 
 assignment_root=$(agent-workspaces workspace-root "$workspace_id" 2>/dev/null || true)
 if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  # Checkpointed handovers survive a tmux/server restart. Restore their shell,
+  # not an ordinary agent: that would bypass the pending ownership transfer.
+  if ! tmux has-session -t "=$session" 2>/dev/null; then
+    pending=$(jq -c --arg role "$role" '.requests[] | select(.slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json")
+    [[ $(jq -r '.session' <<<"$pending") == "$session" ]] || { printf 'Pending handover belongs to another session; inspect agents status.\n' >&2; exit 1; }
+    provider=$(jq -r 'if .phase=="ready" then .outgoing_provider else .target.provider end' <<<"$pending")
+    tmux new-session -d -s "$session" -c "$directory" || exit 1
+    set_session_metadata
+    if [[ $(jq -r '.phase' <<<"$pending") == ready ]]; then
+      tmux set-option -q -t "$session" @aw_provider_session_id "$(jq -r '.outgoing_session_id // ""' <<<"$pending")"
+    else
+      tmux set-option -q -t "$session" @aw_handover_id "$(jq -r '.id' <<<"$pending")"
+    fi
+    printf 'Restored session for pending handover. Use agents apply/accept to continue it.\n'
+  fi
+  # The monitor resumes ready handovers using the existing safety checks.
+  agent-workspaces monitor-start "$workspace_id" >/dev/null 2>&1
   exec tmux attach-session -t "$session"
 fi
 was_started=false
