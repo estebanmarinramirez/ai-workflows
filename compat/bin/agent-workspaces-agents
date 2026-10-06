@@ -14,11 +14,11 @@ while :; do
   case "$action" in
     'Back') exit 0 ;;
     'Effort mode and quota routing')
-      agent-workspaces routing "$workspace"
+      agent-workspaces routing "$workspace" || { gum input --placeholder='Routing failed — Enter to continue' >/dev/null || true; continue; }
       choice=$(printf '%s\n' 'Keep current model and effort settings' 'Auto · balance model and effort' 'Back' | gum choose --header='Workspace effort mode (changes use safe checkpoints)') || continue
       case "$choice" in
-        'Keep current model and effort settings') agent-workspaces routing "$workspace" effort-mode --mode fixed ;;
-        'Auto · balance model and effort') agent-workspaces routing "$workspace" effort-mode --mode auto ;;
+        'Keep current model and effort settings') agent-workspaces routing "$workspace" effort-mode --mode fixed || { gum input --placeholder='Effort change failed — Enter to continue' >/dev/null || true; } ;;
+        'Auto · balance model and effort') agent-workspaces routing "$workspace" effort-mode --mode auto || { gum input --placeholder='Effort change failed — Enter to continue' >/dev/null || true; } ;;
       esac
       continue
       ;;

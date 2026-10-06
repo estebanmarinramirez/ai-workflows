@@ -83,6 +83,7 @@ class Router:
         if slot == 'orchestrator' and provider == self.config.get('orchestrator_provider'):
             value['model'] = self.config.get('orchestrator_model', value.get('model'))
         value.update(state.get('active', {}).get(slot, {}))
+        if value.get('effort') is None: value['effort'] = 'default'
         return {key: value.get(key) for key in ('provider', 'model', 'effort')}
 
     def plan(self, path=None):

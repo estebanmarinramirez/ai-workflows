@@ -87,10 +87,13 @@ def merge(source, destination):
 
 def main():
     source, target = map(Path, sys.argv[1:])
+    target = target.resolve()  # Preserve a dotfiles-managed symlink itself.
+    mode = target.stat().st_mode & 0o7777 if target.exists() else 0o644
     result = merge(source.read_text(), target.read_text() if target.exists() else '{}\n')
     fd, temporary = tempfile.mkstemp(prefix='.menu.', dir=target.parent)
     try:
         with os.fdopen(fd, 'w') as stream: stream.write(result)
+        os.chmod(temporary, mode)
         os.replace(temporary, target)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)

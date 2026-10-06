@@ -49,6 +49,8 @@ def attribution(outcome):
         return {'failure_category': None, 'capability_label': True}
     if failure == 'verification_failed' and 'telemetry_error' not in outcome:
         return {'failure_category': 'quality', 'capability_label': False}
+    if failure == 'verification_failed' and 'telemetry_error' in outcome:
+        return {'failure_category': 'protocol', 'capability_label': None}
     category = {'adapter_timeout': 'execution_timeout', 'adapter_failed': 'execution_unknown',
                 'verifier_timeout': 'verification_infrastructure', 'verifier_error': 'verification_infrastructure',
                 'invalid_adapter_telemetry': 'protocol', 'harness_error': 'harness',

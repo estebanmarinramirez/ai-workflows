@@ -41,6 +41,7 @@ if sys.argv[1] == 'workspace-root': print(os.environ['WORKSPACE_ROOT'])
 elif sys.argv[1] == 'available-providers': print('codex')
 elif sys.argv[1] == 'models': print('low\\nmedium\\nhigh' if '--efforts' in sys.argv else 'gpt-6.1-sol')
 elif sys.argv[1] == 'agents': print('Selection saved')
+elif sys.argv[1] == 'routing' and '--mode' in sys.argv and os.environ.get('FAIL_ROUTING'): sys.exit(1)
 ''')
     gum.chmod(0o755)
     cli.chmod(0o755)
@@ -55,6 +56,7 @@ elif sys.argv[1] == 'agents': print('Selection saved')
     select = next(call for call in calls if 'select' in call)
     assert select == ['agents', 'w:set', 'select', '--role', 'lead', '--provider', 'codex', '--model', 'chosen-model', '--effort', 'high', '--when', 'next-task'], select
     assert not any('apply' in call or 'checkpoint' in call for call in calls), calls
+    env['FAIL_ROUTING']='1' # Failed effort changes must return to the menu.
     for label, mode in [('Keep current model and effort settings','fixed'), ('Auto · balance model and effort','auto')]:
         (fixture/'counter').unlink()
         (fixture/'capture').unlink()

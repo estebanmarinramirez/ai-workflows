@@ -88,6 +88,14 @@ class Routing(unittest.TestCase):
         self.assertEqual(row['target']['effort'], 'xhigh')
         self.assertEqual(row['target']['model'], 'gpt-6.1-sol')
 
+    def test_fixed_mode_missing_effort_keeps_provider_default(self):
+        self.config['routing']['effort_mode']='fixed'
+        del self.config['model_policy']['codex']['effort'];self.save_config()
+        self.quota('codex',.2)
+        row=self.decision()
+        self.assertEqual(row['action'],'keep')
+        self.assertEqual(row['target']['effort'],'default')
+
     def test_bad_telemetry_is_unknown_not_spare_capacity(self):
         for changes in [dict(updatedAt='bad'), dict(updatedAt=(self.now-timedelta(seconds=301)).isoformat()),
                         dict(updatedAt=(self.now+timedelta(minutes=5)).isoformat()), dict(ready=False), dict(limits=[]),
