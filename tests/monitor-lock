@@ -9,6 +9,12 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 
 class Lock(unittest.TestCase):
+    def test_resume_fallback_groups_compound_commands_and_honors_exit(self):
+        for code,expected in [(0,'resume'),(1,'resumefresh'),(130,'resume'),(143,'resume')]:
+            command=subprocess.check_output([str(ROOT/'bin/agent-workspaces'),'resume-command',f'printf resume; exit {code}','true; printf fresh'],text=True)
+            output=subprocess.check_output(['bash','-c',command],text=True)
+            self.assertEqual(output,expected)
+
     def test_exclusion_then_recovery_after_unclean_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);lock=root/'.monitor-instance.lock';ready=root/'ready'

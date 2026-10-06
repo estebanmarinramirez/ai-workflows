@@ -34,6 +34,7 @@ case "$cmd" in
     printf 'config   %s\nstate    %s\n' "$AW_CONFIG_HOME" "$AW_DATA_HOME"
     exit "$failed"
     ;;
+  resume-command) aw_resume_command "${1:?resume command}" "${2:?fresh command}" ;;
   provider-command)
     provider=${1:?provider}; mode=${2:?fresh or resume}; profile=${3:?profile}; session_id=${4:-}; model_override=${5:-}; role=${6:-}; workspace_id=${7:-${AW_WORKSPACE_ID:-}}
     aw_provider_command "$provider" "$mode" "$profile" "$session_id" "$model_override" "$role" "$workspace_id"

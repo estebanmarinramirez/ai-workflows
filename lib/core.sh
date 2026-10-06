@@ -257,6 +257,12 @@ aw_provider_command() {
   jq -r '.[] | @sh' <<<"$command_json" | paste -sd' ' -
 }
 
+aw_resume_command() {
+  # Group compound launchers; a successful resume must not run a fresh session.
+  # An explicit interrupt/termination is an exit request, not a resume failure.
+  printf '(%s); aw_resume_exit=$?; if (( aw_resume_exit > 0 && aw_resume_exit < 128 )); then (%s); fi\n' "$1" "$2"
+}
+
 aw_orchestrator_prompt_idle() {
   local provider=$1 content
   content=$(cat)

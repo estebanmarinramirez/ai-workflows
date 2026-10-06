@@ -306,7 +306,7 @@ ensure_agent_running() {
     *)
       [[ -f $HOME/.config/agent-workspaces/providers/$provider.json ]] || return 0
       provider_session_id=$(tmux show-option -qv -t "$pane_session" @aw_provider_session_id)
-      relaunch="$(agent-workspaces provider-command "$provider" resume "$permission_profile" "$provider_session_id" '' "$role" "$repo_hash:$set_slug") || $(agent-workspaces provider-command "$provider" fresh "$permission_profile" '' '' "$role" "$repo_hash:$set_slug")"
+      relaunch=$(agent-workspaces resume-command "$(agent-workspaces provider-command "$provider" resume "$permission_profile" "$provider_session_id" '' "$role" "$repo_hash:$set_slug")" "$(agent-workspaces provider-command "$provider" fresh "$permission_profile" '' '' "$role" "$repo_hash:$set_slug")")
       ;;
   esac
   state_file="$worktree_root/.state/$role.started"

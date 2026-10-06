@@ -76,7 +76,7 @@ if tmux has-session -t "$session" 2>/dev/null; then
     pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
     if ! omarchy-agent-pane-active "$provider" "$session"; then
       relaunch=$fresh
-      [[ $was_started == true ]] && relaunch="$resume || $fresh"
+      [[ $was_started == true ]] && relaunch=$(agent-workspaces resume-command "$resume" "$fresh")
       tmux send-keys -t "$pane" -l -- "$relaunch"
       tmux send-keys -t "$pane" Enter
     fi
@@ -90,7 +90,7 @@ if [[ $role != integration ]]; then
     # A missing tmux session means the machine or tmux server stopped. Resume
     # the newest conversation scoped to this worktree; fall back to a fresh
     # conversation only when the agent reports that nothing can be resumed.
-    launch="$resume || $fresh"
+    launch=$(agent-workspaces resume-command "$resume" "$fresh")
   fi
   # Keep an interactive shell in the pane if the agent exits, so the tmux
   # session remains available for review and manual relaunching.
