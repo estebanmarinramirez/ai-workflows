@@ -63,6 +63,14 @@ else
   printf 'ok - typed Codex prompt protection\n'
 fi
 printf '%s\n' '❯' | aw_orchestrator_prompt_idle claude || { printf 'not ok - idle Claude prompt detection\n'; failures=$((failures+1)); }
+printf '%s\n' $'❯\u00a0' | aw_orchestrator_prompt_idle claude || { printf 'not ok - Claude NBSP prompt\n'; failures=$((failures+1)); }
+if printf '%s\n' '❯' $'❯\u00a0user draft' | aw_orchestrator_prompt_idle claude; then
+  printf 'not ok - newest Claude draft protection\n'; failures=$((failures+1))
+fi
+if printf '%s\n' '› Ask Codex to do anything' '› user draft' | aw_orchestrator_prompt_idle codex; then
+  printf 'not ok - newest Codex draft protection\n'; failures=$((failures+1))
+fi
+
 
 prompt_probe="$fixture/prompt-probe"
 printf '%s\n' '#!/bin/bash' 'jq -cn --arg workspace "$AW_WORKSPACE_ID" --arg template "$AW_TEMPLATE" --arg objective "$AW_OBJECTIVE" --arg lead "$AW_LEAD" --arg seam "$AW_SEAM" '\''{workspace:$workspace,template:$template,objective:$objective,lead:$lead,seam:$seam}'\''' >"$prompt_probe"

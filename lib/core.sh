@@ -260,6 +260,13 @@ aw_provider_command() {
 aw_orchestrator_prompt_idle() {
   local provider=$1 content
   content=$(cat)
+  # Claude renders an empty composer with NBSP; normalize only that space.
+  content=${content//$'\u00a0'/ }
+  # An earlier empty composer must never override the user's current draft.
+  case "$provider" in
+    codex) content=$(awk '/^[[:space:]]*›/ {last=$0} END {print last}' <<<"$content") ;;
+    claude|grok) content=$(awk '/^[[:space:]]*❯/ {last=$0} END {print last}' <<<"$content") ;;
+  esac
   case "$provider" in
     codex) grep -Eq '^[[:space:]]*›[[:space:]]+Ask Codex to do anything[[:space:]]*$' <<<"$content" ;;
     claude|grok) grep -Eq '^[[:space:]]*❯[[:space:]]*$' <<<"$content" ;;
