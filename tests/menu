@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from menu import merge, clean_jsonc
+source = '{"agent-launch":{"label":"New"},"agent-launch.four":{"label":"Four"}}'
+foreign = '  // managed by another app\n  "foreign": {"url":"https://example.test", "text":"literal ,} and /* text */",},\n  // end other app\n'
+original = '{\n"agent-launch":{"label":"Old"},\n' + foreign + '}\n'
+result = merge(source, original)
+assert foreign in result
+assert json.loads(clean_jsonc(result))['agent-launch']['label'] == 'New'
+assert merge(source, result) == result
+for empty in ('{}', '{ // empty\n}', '{/* block */}'):
+    assert len(json.loads(clean_jsonc(merge(source, empty)))) == 2
+try: merge(source, '{"a":1,"a":2}')
+except ValueError: pass
+else: raise AssertionError('duplicate keys accepted')
+print('ok - menu updates preserve unrelated entries, comments, strings and trailing commas; repeat installs are idempotent')
+
+import subprocess
+import tempfile
+with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp); template=root/'source.json'; template.write_text(source)
+    destination=root/'managed.json';destination.write_text('{}');destination.chmod(0o640)
+    link=root/'menu.json';link.symlink_to(destination.name)
+    subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'lib/menu.py'),str(template),str(link)],check=True)
+    assert link.is_symlink()
+    assert destination.stat().st_mode & 0o777 == 0o640
+    assert 'agent-launch' in json.loads(destination.read_text())
+print('ok - menu preserves existing permissions and symlinks')

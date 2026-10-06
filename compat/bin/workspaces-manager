@@ -11,7 +11,8 @@ while :; do
   rows=(
     $'__group_actions__\t▾  Actions'
     "__refresh__"$'\t'"   ├─ $refresh_label"
-    $'__add__\t   └─   Register a local repository path'
+    $'__add__\t   ├─   Register a local repository path'
+    $'__hands__\t   └─ Hand controls · camera and dictation'
   )
 
   append_repository_branch() {
@@ -64,6 +65,15 @@ while :; do
       fi
       continue
       ;;
+    __hands__)
+      action=$(printf '%s\n' 'Start hand controls' 'Stop hand controls' 'Camera preview (no actions)' 'Back' | gum choose --header='Workspace hand controls') || continue
+      case "$action" in
+        'Start hand controls') agent-workspaces-gestures start ;;
+        'Stop hand controls') agent-workspaces-gestures stop ;;
+        'Camera preview (no actions)') agent-workspaces-gestures preview ;;
+      esac
+      continue
+      ;;
     __add__)
       path=$(gum input --header='Repository path' --placeholder="$HOME/Developer/project") || continue
       [[ -n $path ]] || continue
@@ -79,11 +89,13 @@ while :; do
     path=$(jq -r '.local_path' <<<"$record")
     action=$(printf '%s\n' \
       'Open or create workspace' \
+      'Open four-window workspace' \
       'Launch Omarchy default agent' \
       'Open terminal here' \
       'Back' | gum choose --header="$name · local") || continue
     case "$action" in
       'Open or create workspace') exec env OMARCHY_AGENT_REPOSITORY="$path" omarchy-agent-grid ;;
+      'Open four-window workspace') exec env AW_LAYOUT=four-windows OMARCHY_AGENT_REPOSITORY="$path" omarchy-agent-grid ;;
       'Launch Omarchy default agent') cd "$path" && exec omarchy agent ;;
       'Open terminal here') exec xdg-terminal-exec --dir="$path" ;;
       *) continue ;;

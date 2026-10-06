@@ -166,6 +166,13 @@ fi
 
 worktree_root="$repo_worktree_root/$set_slug"
 workspace_manifest="$worktree_root/workspace.json"
+layout=${AW_LAYOUT:-}
+if [[ -z $layout && -f $workspace_manifest ]]; then
+  layout=$(jq -r '.layout // empty' "$workspace_manifest")
+fi
+layout=${layout:-$(jq -r '.default_layout // "adaptive-grid"' "${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces/config.json")}
+[[ $layout != three-plus-orchestrator ]] || layout=adaptive-grid
+case "$layout" in adaptive-grid|four-windows) ;; *) gum style "Unknown layout: $layout"; exit 1 ;; esac
 machine_id=$(hostnamectl --static 2>/dev/null || hostname)
 machine_slug=$(sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+|-+$//g' <<<"$machine_id")
 if [[ -f $workspace_manifest ]]; then
@@ -176,9 +183,29 @@ if [[ -f $workspace_manifest ]]; then
   agent_roles=(); role_providers=()
   while IFS=$'\t' read -r role provider; do
     agent_roles+=("$role"); role_providers["$role"]=$provider
-  done < <(agent-workspaces provider-slots)
+  done < <(agent-workspaces provider-slots "$layout")
 else
   permission_profile=$(jq -r '.default_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json" 2>/dev/null || printf trusted)
+fi
+# Resolve the explicit preset for both new and existing workspaces.
+agent_roles=(); role_providers=()
+slot_rows=$(agent-workspaces provider-slots "$layout") || exit 1
+while IFS=$'\t' read -r role provider; do
+  agent_roles+=("$role"); role_providers["$role"]=$provider
+done <<<"$slot_rows"
+# Never hide existing managed roles when availability or a preset changes.
+# Their processes, worktrees and handover ownership remain addressable.
+if [[ -f $workspace_manifest ]]; then
+  while IFS=$'\t' read -r role provider; do
+    [[ -n $role && -n $provider ]] || continue
+    if [[ -z ${role_providers[$role]:-} ]]; then
+      agent_roles+=("$role"); role_providers["$role"]=$provider
+    fi
+  done < <(jq -r '.agents[]? | [.role,.provider] | @tsv' "$workspace_manifest")
+  if ((${#agent_roles[@]} > 3)); then
+    gum style 'This preset would replace existing worker slots. Create a new collaboration set to preserve their sessions.'
+    exit 1
+  fi
 fi
 [[ $permission_profile =~ ^(safe|trusted|yolo)$ ]] || permission_profile=trusted
 session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"aw-$repo_hash-$repo_name-$set_slug" | cut -c1-80)
@@ -190,6 +217,8 @@ if [[ $is_new == true ]]; then
   provider_labels=$(printf '%s\n' "${agent_roles[@]}" | sed 's/.*/\u&/' | paste -sd ', ' -)
   gum confirm "Create ${#agent_roles[@]} provider worktree(s) for '$set_slug': $provider_labels?" || exit 130
 fi
+
+agent-workspaces prepare-repository "$repository" || exit 1
 
 mkdir -p "$worktree_root"
 exec {launch_lock_fd}>"$worktree_root/.launch.lock"
@@ -244,13 +273,13 @@ agents_json='[]'
 for role in "${agent_roles[@]}"; do agents_json=$(jq --arg role "$role" --arg provider "${role_providers[$role]}" '. + [{role:$role,provider:$provider}]' <<<"$agents_json"); done
 if [[ ! -f $workspace_manifest ]]; then
   jq -n --arg id "$repo_hash:$set_slug" --arg repository "$repository" --arg set "$set_slug" \
-    --arg profile "$permission_profile" --arg machine_id "$machine_id" --arg at "$(date --iso-8601=seconds)" --argjson providers "$providers_json" --argjson agents "$agents_json" \
+    --arg layout "$layout" --arg profile "$permission_profile" --arg machine_id "$machine_id" --arg at "$(date --iso-8601=seconds)" --argjson providers "$providers_json" --argjson agents "$agents_json" \
     '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,
-      machine_id:$machine_id,layout:"adaptive-grid",providers:$providers,agents:$agents,created_at:$at,updated_at:$at}' >"$workspace_manifest"
+      machine_id:$machine_id,layout:$layout,providers:$providers,agents:$agents,created_at:$at,updated_at:$at}' >"$workspace_manifest"
 else
   temporary=$(mktemp "$worktree_root/.workspace.json.XXXXXX")
-  jq --argjson providers "$providers_json" --argjson agents "$agents_json" --arg at "$(date --iso-8601=seconds)" \
-    '.providers=$providers | .agents=$agents | .layout="adaptive-grid" | .updated_at=$at' "$workspace_manifest" >"$temporary"
+  jq --arg layout "$layout" --argjson providers "$providers_json" --argjson agents "$agents_json" --arg at "$(date --iso-8601=seconds)" \
+    '.providers=$providers | .agents=$agents | .layout=$layout | .updated_at=$at' "$workspace_manifest" >"$temporary"
   mv "$temporary" "$workspace_manifest"
 fi
 paths[orchestrator]="$orchestrator_root"
@@ -270,11 +299,14 @@ ensure_agent_running() {
   tmux has-session -t "$pane_session" 2>/dev/null || return 0
   pane=$(tmux list-panes -t "$pane_session" -F '#{pane_id}' | head -1)
   omarchy-agent-pane-active "$role" "$pane_session" && return 0
+  if [[ -f $worktree_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$worktree_root/.coordination/agents.json" >/dev/null; then return 0; fi
+  provider=$(agent-workspaces role-provider "$provider" "$role" "$repo_hash:$set_slug")
+  tmux set-option -q -t "$pane_session" @aw_provider "$provider"
   case "$role" in
     *)
       [[ -f $HOME/.config/agent-workspaces/providers/$provider.json ]] || return 0
       provider_session_id=$(tmux show-option -qv -t "$pane_session" @aw_provider_session_id)
-      relaunch="$(agent-workspaces provider-command "$provider" resume "$permission_profile" "$provider_session_id") || $(agent-workspaces provider-command "$provider" fresh "$permission_profile")"
+      relaunch=$(agent-workspaces resume-command "$(agent-workspaces provider-command "$provider" resume "$permission_profile" "$provider_session_id" '' "$role" "$repo_hash:$set_slug")" "$(agent-workspaces provider-command "$provider" fresh "$permission_profile" '' '' "$role" "$repo_hash:$set_slug")")
       ;;
   esac
   state_file="$worktree_root/.state/$role.started"
@@ -366,11 +398,12 @@ done
 # Wait briefly for the compositor to register newly created terminal windows.
 for _ in $(seq 1 50); do
   all_ready=true
+  clients=$(hyprctl clients -j)
   for role in "${roles[@]}"; do
     [[ -n ${addresses[$role]:-} ]] && continue
     app_class="$class_prefix.$role"
-    addresses[$role]=$(hyprctl clients -j | jq -r --arg class "$app_class" \
-      '.[] | select(.class == $class or .initialClass == $class) | .address' | head -1)
+    addresses[$role]=$(jq -r --arg class "$app_class" \
+      '.[] | select(.class == $class or .initialClass == $class) | .address' <<<"$clients" | head -1)
     [[ -n ${addresses[$role]} ]] || all_ready=false
   done
   [[ $all_ready == true ]] && break
@@ -395,8 +428,12 @@ monitor_width=$(jq -r '.width' <<<"$monitor")
 monitor_height=$(jq -r '.height' <<<"$monitor")
 read -r reserved_left reserved_top reserved_right reserved_bottom < <(jq -r '.reserved | @tsv' <<<"$monitor")
 
-logical_x=$(awk "BEGIN {print int($monitor_x / $scale) + $reserved_left}")
-logical_y=$(awk "BEGIN {print int($monitor_y / $scale) + $reserved_top}")
+logical_x=$((monitor_x + reserved_left))
+logical_y=$((monitor_y + reserved_top))
+transform=$(jq -r '.transform // 0' <<<"$monitor")
+if ((transform % 2 == 1)); then
+  swap=$monitor_width; monitor_width=$monitor_height; monitor_height=$swap
+fi
 logical_width=$(awk "BEGIN {print int($monitor_width / $scale) - $reserved_left - $reserved_right}")
 logical_height=$(awk "BEGIN {print int($monitor_height / $scale) - $reserved_top - $reserved_bottom}")
 

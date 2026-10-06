@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('gestures', ROOT / 'lib/gestures.py')
+g = importlib.util.module_from_spec(spec)
+sys.modules['gestures'] = g
+spec.loader.exec_module(g)
+
+
+class Gestures(unittest.TestCase):
+    def test_thick_pointing_dividers_and_outside_box_are_inactive(self):
+        self.assertFalse(g.pointing_active(.5, .35))
+        self.assertFalse(g.pointing_active(.3, .5))
+        self.assertFalse(g.pointing_active(.01, .3))
+        for x in (.3, .7):
+            for y in (.35, .65):
+                self.assertTrue(g.pointing_active(x, y))
+        with patch.object(g, 'command') as command:
+            self.assertIsNone(g.Desktop().candidate(.5, .35))
+            command.assert_not_called()
+
+    def test_box_indicator_matches_active_quadrants(self):
+        self.assertEqual(g.pointing_box(.3, .35), 'top-left')
+        self.assertEqual(g.pointing_box(.7, .35), 'top-right')
+        self.assertEqual(g.pointing_box(.3, .65), 'bottom-left')
+        self.assertEqual(g.pointing_box(.7, .65), 'bottom-right')
+        self.assertIsNone(g.pointing_box(.5, .35))
+        self.assertIsNone(g.pointing_box(.3, .5))
+
+    def test_laptop_pointing_area_is_centered_and_clamped(self):
+        self.assertAlmostEqual(g.pointing_position(.5, .23)[1], .02)
+        self.assertAlmostEqual(g.pointing_position(.5, .5)[1], .5)
+        self.assertAlmostEqual(g.pointing_position(.5, .77)[1], .98)
+        self.assertEqual(g.pointing_position(-1, 2), (.02, .98))
+
+    def test_laptop_tolerance_does_not_relax_send(self):
+        self.assertEqual(g.accepted_gesture('Open_Palm', .63), 'Open_Palm')
+        self.assertIsNone(g.accepted_gesture('Open_Palm', .63, 'desktop'))
+        self.assertIsNone(g.accepted_gesture('Thumb_Up', .79))
+        self.assertEqual(g.accepted_gesture('Thumb_Up', .8), 'Thumb_Up')
+        self.assertIsNone(g.accepted_gesture('Pointing_Up', .59))
+
+    def test_short_recognition_dropout_does_not_restart_hold(self):
+        hold = g.Hold()
+        hold.update('start', 0)
+        hold.update(None, .4)
+        self.assertIsNone(hold.update('start', .5))
+        self.assertEqual(hold.update('start', .9), 'start')
+
+    def test_long_dropout_requires_a_new_hold(self):
+        hold = g.Hold()
+        hold.update('send', 0)
+        hold.update(None, 1.)
+        self.assertIsNone(hold.update('send', 1.4))
+        self.assertIsNone(hold.update('send', 2.))
+        self.assertEqual(hold.update('send', 2.8), 'send')
+
+    def test_unmanaged_window_supports_focus_but_cannot_receive_dictation(self):
+        desktop = g.Desktop()
+        with patch.object(g, 'command') as command:
+            target = desktop.target({'address': '0x2', 'class': 'chromium'})
+            command.assert_not_called()
+            desktop.focus(target)
+            self.assertEqual(command.call_count, 1)
+            with self.assertRaises(g.GestureError): desktop.validate(target)
+            self.assertEqual(command.call_count, 1)
+
+    def test_hold_releases_and_does_not_repeat(self):
+        hold = g.Hold()
+        self.assertIsNone(hold.update('start', 0))
+        self.assertEqual(hold.update('start', .9), 'start')
+        self.assertIsNone(hold.update('start', 10))
+        self.assertIsNone(hold.update('stop', 11))
+        hold.update(None, 12)
+        hold.update(None, 12.4)
+        hold.update('stop', 13)
+        self.assertEqual(hold.update('stop', 14), 'stop')
+
+    def test_send_needs_a_longer_hold_and_target_stability(self):
+        hold = g.Hold()
+        hold.update('send', 0)
+        self.assertIsNone(hold.update('send', .9))
+        self.assertEqual(hold.update('send', 1.4), 'send')
+        hold = g.Hold()
+        hold.update(('select', 'first'), 0)
+        hold.update(('select', 'second'), .7)
+        self.assertIsNone(hold.update(('select', 'second'), .9))
+        self.assertEqual(hold.update(('select', 'second'), 1.6), ('select', 'second'))
+
+    def test_composer_guard(self):
+        self.assertTrue(g.composer('› Ask Codex to do anything\n\n  gpt-5.6-sol xhigh · ~/repo'))
+        self.assertTrue(g.composer('│ ❯ hello │'))
+        self.assertFalse(g.composer('user@host $'))
+        self.assertFalse(g.composer('Do you want to proceed?\n› Yes, proceed'))
+        self.assertFalse(g.composer('Allow once\n❯'))
+
+    def test_fresh_codex_and_claude_trust_screens_are_not_composers(self):
+        codex = 'Do you trust the contents of this directory?\n' + '\n' * 15 + '› 1. Yes, continue\n  2. No, quit\nPress enter to continue'
+        claude = 'Accessing workspace:\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\nYes, I trust this folder\nEnter to confirm · Esc to cancel'
+        for screen in (codex, claude):
+            self.assertEqual(g.composer_state(screen), 'trust-required')
+            self.assertFalse(g.composer(screen))
+        self.assertFalse(g.composer('› 1. Yes, continue'))
+
+    def test_dictation_cannot_type_terminal_control_sequences(self):
+        text = g.clean_text('hello\nworld\r\x1b\x03next')
+        self.assertNotIn('\n', text)
+        self.assertNotIn('\x1b', text)
+        self.assertEqual(text, 'hello world next')
+
+    def controller(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        class Desktop:
+            events = []
+            daemon = 'idle'
+            def target(self, window): return window['target'] if isinstance(window, dict) else window
+            def focus(self, target): self.events.append(('focus', target))
+            def readiness(self, target): return 'ready'
+            def start(self, target, output): self.events.append(('start', target)); self.daemon = 'recording'
+            def stop(self): self.events.append(('stop',)); self.daemon = 'transcribing'
+            def status(self): return self.daemon
+            def cancel(self): self.events.append(('cancel',)); self.daemon = 'idle'
+            def paste(self, target, text): self.events.append(('paste', target, text))
+            def send(self, target): self.events.append(('send', target))
+        desktop = Desktop()
+        desktop.events = []
+        controller = g.Controller(desktop, temporary.name, lambda _: None)
+        target = g.Target('0x1', 'session', '%1', 'codex', 'codex', 'w:set', 'class', '123')
+        return controller, desktop, target
+
+    def test_record_stop_paste_then_separate_send(self):
+        controller, desktop, target = self.controller()
+        controller.select(target)
+        controller.action('start', 0)
+        controller.action('send', 1)
+        self.assertEqual(controller.state, 'recording')
+        controller.action('stop', 2)
+        controller.action('send', 3)
+        self.assertNotIn(('send', target), desktop.events)
+        controller.output.write_text('the dictated message')
+        desktop.daemon = 'idle'
+        controller.poll(4)
+        self.assertEqual(controller.state, 'draft')
+        self.assertEqual(desktop.events[-1], ('paste', target, 'the dictated message'))
+        self.assertTrue(controller.hold.latched)
+        controller.action('send', 6)
+        controller.action('send', 8)
+        self.assertEqual(desktop.events.count(('send', target)), 1)
+
+    def test_requires_selection_and_pins_target(self):
+        controller, desktop, target = self.controller()
+        with self.assertRaises(g.GestureError): controller.action('start', 0)
+        controller.select(target)
+        controller.action('start', 0)
+        other = g.Target('0x2', 'other', '%2', 'grok', 'grok', 'w:set', 'otherclass', '456')
+        with self.assertRaises(g.GestureError): controller.select(other)
+        controller.select(target)  # Refocusing the same pinned pane is allowed.
+        self.assertEqual(controller.target, target)
+
+    def test_shutdown_cancels_only_owned_recording_and_deletes_temporary_text(self):
+        controller, desktop, target = self.controller()
+        controller.close()
+        self.assertEqual(desktop.events, [])
+        controller.select(target)
+        controller.action('start', 0)
+        output = controller.output
+        controller.close()
+        self.assertIn(('cancel',), desktop.events)
+        self.assertFalse(output.exists())
+
+    def test_no_speech_does_not_send_or_stay_stuck(self):
+        controller, desktop, target = self.controller()
+        controller.select(target)
+        controller.action('start', 0)
+        controller.action('stop', 2)
+        desktop.daemon = 'idle'
+        controller.poll(6)
+        self.assertEqual(controller.state, 'idle')
+        self.assertFalse(any(event[0] in ('send', 'paste') for event in desktop.events))
+
+    def test_start_forces_file_output_without_auto_submit(self):
+        target = g.Target('0x1', 'session', '%1', 'codex', 'codex', 'w:set', 'class', '123')
+        desktop = g.Desktop()
+        with patch.object(desktop, 'validate'), patch.object(desktop, 'status', return_value='idle'), patch.object(g, 'command') as run:
+            desktop.start(target, Path('/tmp/fixture.txt'))
+        args = run.call_args.args[0]
+        self.assertIn('--file=/tmp/fixture.txt', args)
+        self.assertIn('--no-auto-submit', args)
+        self.assertIn('--no-smart-auto-submit', args)
+
+    def test_recognized_pose_sequence_requires_neutral_and_sends_once(self):
+        controller, desktop, target = self.controller()
+        window = {'address': target.address, 'target': target}
+        controller.observe('Pointing_Up', window, 0)
+        controller.observe('Pointing_Up', window, 1)
+        controller.observe(None, None, 1.1)
+        controller.observe(None, None, 1.5)
+        controller.observe('Open_Palm', None, 2)
+        controller.observe('Open_Palm', None, 3)
+        self.assertEqual(controller.state, 'recording')
+        controller.observe('Open_Palm', None, 3.5)
+        controller.observe('Open_Palm', None, 4)
+        controller.observe('Closed_Fist', None, 5)
+        controller.observe('Closed_Fist', None, 6)
+        self.assertEqual(controller.state, 'recording')
+        controller.observe(None, None, 6.1)
+        controller.observe(None, None, 6.5)
+        controller.observe('Closed_Fist', None, 7)
+        controller.observe('Closed_Fist', None, 8)
+        self.assertEqual(controller.state, 'transcribing')
+        controller.output.write_text('hello demo')
+        desktop.daemon = 'idle'
+        controller.poll(9)
+        controller.observe('Thumb_Up', None, 9)
+        controller.observe('Thumb_Up', None, 11)
+        self.assertEqual(controller.state, 'draft')
+        controller.observe(None, None, 12)
+        controller.observe(None, None, 12.4)
+        controller.observe('Thumb_Up', None, 13)
+        controller.observe('Thumb_Up', None, 14.4)
+        controller.observe('Thumb_Up', None, 16)
+        self.assertEqual(desktop.events.count(('send', target)), 1)
+
+    def test_ambiguous_paste_is_not_retried(self):
+        controller, desktop, target = self.controller()
+        controller.select(target)
+        controller.action('start', 0)
+        controller.output.write_text('hello')
+        desktop.daemon = 'idle'
+        with patch.object(desktop, 'paste', side_effect=g.GestureError('timeout after paste')) as paste:
+            with self.assertRaises(g.GestureError): controller.poll(4)
+            controller.poll(5)
+            controller.action('send', 6)
+            self.assertEqual(paste.call_count, 1)
+            self.assertEqual(controller.state, 'review')
+        self.assertFalse(any(e[0] == 'send' for e in desktop.events))
+        controller.close()
+
+    def test_ambiguous_send_is_not_retried(self):
+        controller, desktop, target = self.controller()
+        controller.select(target)
+        controller.state = 'draft'
+        with patch.object(desktop, 'send', side_effect=g.GestureError('timeout after Enter')) as send:
+            with self.assertRaises(g.GestureError): controller.action('send', 1)
+            controller.action('send', 2)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(controller.state, 'review')
+
+    def test_timeout_cleans_up_even_when_daemon_status_keeps_failing(self):
+        controller, desktop, target = self.controller()
+        controller.select(target)
+        controller.action('start', 0)
+        output = controller.output
+        with patch.object(desktop, 'status', side_effect=g.GestureError('daemon gone')):
+            with self.assertRaises(g.GestureError): controller.poll(5)
+            controller.poll(126)
+        self.assertEqual(controller.state, 'idle')
+        self.assertFalse(output.exists())
+
+    def test_buffer_cleanup_error_does_not_report_paste_failure(self):
+        desktop = g.Desktop()
+        def run(args, text=None):
+            if args[1] == 'delete-buffer': raise g.GestureError('buffer already gone')
+            return ''
+        with patch.object(desktop, 'validate'), patch.object(g, 'command', side_effect=run) as commands:
+            target = g.Target('0x1', 'session', '%1', 'codex', 'codex', 'w:set', 'class', '123')
+            desktop.paste(target, 'hello')
+        self.assertEqual(sum(c.args[0][1] == 'paste-buffer' for c in commands.call_args_list), 1)
+
+    def test_focus_change_and_agent_restart_reject_send(self):
+        target = g.Target('0x1', 'session', '%1', 'codex', 'codex', 'w:set', 'class', '123')
+        import json
+        for metadata, active in [('session\t999\tcodex', '0x1'), ('session\t123\tcodex', '0x2')]:
+            def run(args, text=None):
+                if args[:2] == ['hyprctl', 'clients']: return json.dumps([{'address': '0x1', 'class': 'class'}])
+                if args[:2] == ['tmux', 'display-message']: return metadata
+                if args[0] == 'omarchy-agent-pane-active': return ''
+                if args[:2] == ['hyprctl', 'activewindow']: return json.dumps({'address': active})
+                self.fail('Unexpected input command: ' + str(args))
+            with patch.object(g, 'command', side_effect=run), self.assertRaises(g.GestureError):
+                g.Desktop().send(target)
+
+    def test_provider_restart_inside_same_pane_rejects_send(self):
+        import json
+        target = g.Target('0x1', 'session', '%1', 'codex', 'codex', 'w:set', 'class', '123', '456')
+        replies = [json.dumps([{'address': '0x1', 'class': 'class'}]), 'session\t123\tcodex', 'bash(123)---codex(789)']
+        with patch.object(g, 'command', side_effect=replies) as command, self.assertRaises(g.GestureError):
+            g.Desktop().send(target)
+        self.assertFalse(any(c.args[0][1] == 'send-keys' for c in command.call_args_list))
+
+    def test_ambiguous_provider_tree_is_rejected(self):
+        with patch.object(g, 'command', return_value='bash(123)---codex(456)---codex(789)'), self.assertRaises(g.GestureError):
+            g.Desktop().agent_pid('123', 'codex')
+
+
+unittest.main()

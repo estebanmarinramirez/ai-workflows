@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Actual cross-process singleton and recovery checks; no workspace agents."""
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+ROOT=Path(__file__).resolve().parents[1]
+
+class Lock(unittest.TestCase):
+    def test_resume_fallback_groups_compound_commands_and_honors_exit(self):
+        for code,expected in [(0,'resume'),(1,'resumefresh'),(130,'resume'),(143,'resume')]:
+            command=subprocess.check_output([str(ROOT/'bin/agent-workspaces'),'resume-command',f'printf resume; exit {code}','true; printf fresh'],text=True)
+            output=subprocess.check_output(['bash','-c',command],text=True)
+            self.assertEqual(output,expected)
+
+    def test_exclusion_then_recovery_after_unclean_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);lock=root/'.monitor-instance.lock';ready=root/'ready'
+            (root/'.monitor-instance').mkdir() # Legacy stale sentinel cannot block startup.
+            script='from pathlib import Path;import time;Path('+repr(str(ready))+').write_text("ready");time.sleep(30)'
+            command=[sys.executable,str(ROOT/'lib/monitor_lock.py'),str(lock),sys.executable,'-c',script]
+            first=subprocess.Popen(command)
+            try:
+                deadline=time.monotonic()+3
+                while not ready.exists() and time.monotonic()<deadline:time.sleep(.01)
+                self.assertTrue(ready.exists())
+                second=subprocess.run(command,timeout=3)
+                self.assertEqual(second.returncode,0);self.assertIsNone(first.poll())
+                first.kill();first.wait();ready.unlink()
+                third=subprocess.Popen(command)
+                try:
+                    deadline=time.monotonic()+3
+                    while not ready.exists() and time.monotonic()<deadline:time.sleep(.01)
+                    self.assertTrue(ready.exists());self.assertIsNone(third.poll())
+                finally:third.kill();third.wait()
+            finally:
+                if first.poll() is None:first.kill();first.wait()
+
+unittest.main()

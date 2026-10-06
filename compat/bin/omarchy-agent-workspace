@@ -36,7 +36,16 @@ agent=$(printf '%s\n' "${agent_choices[@]}" | gum choose \
   --height=12 \
   --label-delimiter='|') || exit 130
 
-model_choice=$(printf '%s\n' "Use agent default" "Enter a model ID..." | gum choose \
+model_choices=('Use agent default')
+case "$agent" in
+  claude|codex|grok)
+    while IFS= read -r candidate; do
+      [[ -z $candidate ]] || model_choices+=("$candidate")
+    done < <(agent-workspaces models "$agent" 2>/dev/null)
+    ;;
+esac
+model_choices+=('Enter a model ID...')
+model_choice=$(printf '%s\n' "${model_choices[@]}" | gum choose \
   --header="Model for ${agent_names[$agent]}" \
   --height=5) || exit 130
 
@@ -45,6 +54,9 @@ if [[ $model_choice == "Enter a model ID..." ]]; then
   model=$(gum input \
     --header="Model ID (provider/model where supported)" \
     --placeholder="Leave empty to use the agent default") || exit 130
+fi
+if [[ $model_choice != 'Use agent default' && $model_choice != 'Enter a model ID...' ]]; then
+  model=$model_choice
 fi
 
 # Override with a colon-separated list for unusual project layouts.
@@ -198,4 +210,3 @@ case "$agent" in
 esac
 
 exec "${command[@]}"
-

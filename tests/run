@@ -32,7 +32,7 @@ trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/config/agent-workspaces/providers" "$fixture/data/agent-workspaces/repo-hash/set/.coordination/t1"
 cp "$root/config/providers"/*.json "$fixture/config/agent-workspaces/providers/"
 cp "$root/config/config.json" "$fixture/config/agent-workspaces/config.json"
-export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" XDG_STATE_HOME="$fixture/data-state"
 mkdir -p "$fixture/bin"
 for provider in claude codex grok; do
   printf '#!/bin/bash\nexit 0\n' >"$fixture/bin/$provider"
@@ -63,6 +63,17 @@ else
   printf 'ok - typed Codex prompt protection\n'
 fi
 printf '%s\n' '❯' | aw_orchestrator_prompt_idle claude || { printf 'not ok - idle Claude prompt detection\n'; failures=$((failures+1)); }
+printf '%s\n' $'❯\u00a0' | aw_orchestrator_prompt_idle claude || { printf 'not ok - Claude NBSP prompt\n'; failures=$((failures+1)); }
+if printf '%s\n' $'❯\u00a0' 'bypass permissions · esc to interrupt' | aw_orchestrator_prompt_idle claude; then
+  printf 'not ok - busy Claude composer protection\n'; failures=$((failures+1))
+fi
+if printf '%s\n' '❯' $'❯\u00a0user draft' | aw_orchestrator_prompt_idle claude; then
+  printf 'not ok - newest Claude draft protection\n'; failures=$((failures+1))
+fi
+if printf '%s\n' '› Ask Codex to do anything' '› user draft' | aw_orchestrator_prompt_idle codex; then
+  printf 'not ok - newest Codex draft protection\n'; failures=$((failures+1))
+fi
+
 
 prompt_probe="$fixture/prompt-probe"
 printf '%s\n' '#!/bin/bash' 'jq -cn --arg workspace "$AW_WORKSPACE_ID" --arg template "$AW_TEMPLATE" --arg objective "$AW_OBJECTIVE" --arg lead "$AW_LEAD" --arg seam "$AW_SEAM" '\''{workspace:$workspace,template:$template,objective:$objective,lead:$lead,seam:$seam}'\''' >"$prompt_probe"
@@ -86,12 +97,14 @@ git -C "$repository" fetch origin >/dev/null
 jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex","grok"]}' \
   >"$fixture/data/agent-workspaces/repo-hash/set/workspace.json"
 
+# Restore defaults after testing orchestrator-set above.
+cp "$root/config/config.json" "$AW_CONFIG_FILE"
 trusted_codex=$(aw_provider_command codex fresh trusted)
 [[ $trusted_codex == *"--approve-for-me"* && $trusted_codex != *"--sandbox"* ]] || { printf 'not ok - trusted codex profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) != *bypassPermissions* ]] || { printf 'not ok - trusted claude is not bypass\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh yolo) == *bypassPermissions* ]] || { printf 'not ok - explicit yolo profile\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command claude fresh trusted) == *"'--model' 'opus' '--effort' 'high'"* ]] || { printf 'not ok - claude worker policy\n'; failures=$((failures+1)); }
-[[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-5.6-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
+[[ $(aw_provider_command codex fresh trusted) == *"'--model' 'gpt-6.1-sol'"* ]] || { printf 'not ok - frontier codex policy\n'; failures=$((failures+1)); }
 [[ $(aw_provider_command grok fresh trusted) == *"'--model' 'grok-4.6' '--reasoning-effort' 'high'"* ]] || { printf 'not ok - frontier grok policy\n'; failures=$((failures+1)); }
 orchestrator_codex=$(aw_provider_command codex resume yolo session-123 gpt-5.6-sol)
 [[ $(grep -o -- "'--model'" <<<"$orchestrator_codex" | wc -l) == 1 ]] || { printf 'not ok - orchestrator model deduplication\n'; failures=$((failures+1)); }
@@ -134,6 +147,7 @@ audit_after=$(jq -s '[.[] | select(.event=="role.status" and .details.role=="gro
 [[ $audit_before == "$audit_after" ]] || { printf 'not ok - duplicate status audit suppression\n'; failures=$((failures+1)); }
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 [[ -s $fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md ]] || { printf 'not ok - orchestrator snapshot\n'; failures=$((failures+1)); }
+rg -q '^## Model configuration$' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" || { printf 'not ok - snapshot includes live configuration\n'; failures=$((failures+1)); }
 signature_one=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
 AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" snapshot x:set --write >/dev/null
 signature_two=$(sed '/^Updated:/d' "$fixture/data/agent-workspaces/repo-hash/set/.orchestrator/snapshot.md" | sha256sum | awk '{print $1}')
@@ -185,8 +199,8 @@ jq --arg created "$now_iso" --arg deadline "$deadline_iso" \
   '.created_at=$created | .delivery={mode:"bounded",run_budget_minutes:90,deadline_at:$deadline}' \
   "$deferred_task/state.json" >"$deferred_task/state.tmp" && mv "$deferred_task/state.tmp" "$deferred_task/state.json"
 mkdir -p "$fixture/data-state/omarchy/agents/usage"
-printf '%s\n' '{"schemaVersion":1,"id":"claude","limits":[{"percent":0.2},{"percent":0.4}]}' >"$fixture/data-state/omarchy/agents/usage/claude.json"
-printf '%s\n' '{"schemaVersion":1,"id":"codex","limits":[{"percent":0.6}]}' >"$fixture/data-state/omarchy/agents/usage/codex.json"
+jq -cn --arg at "$now_iso" '{schemaVersion:1,id:"claude",ready:true,updatedAt:$at,limits:[{percent:0.2},{percent:0.4}]}' >"$fixture/data-state/omarchy/agents/usage/claude.json"
+jq -cn --arg at "$now_iso" '{schemaVersion:1,id:"codex",ready:true,updatedAt:$at,limits:[{percent:0.6}]}' >"$fixture/data-state/omarchy/agents/usage/codex.json"
 workspace_usage=$(XDG_STATE_HOME="$fixture/data-state" python3 "$root/compat/bin/omarchy-agent-usage-workspaces")
 [[ $(jq -r '.tierLabel' <<<"$workspace_usage") == '1 running · 1 review · 1 done/7d' ]] || { printf 'not ok - current workspace lifecycle metrics\n'; failures=$((failures+1)); }
 [[ $(jq -r '.limits[0] | [.title, .percent] | @tsv' <<<"$workspace_usage") == $'Pooled model quota\t0.5' ]] || { printf 'not ok - pooled provider capacity metric\n'; failures=$((failures+1)); }

@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Retry a repeated slot using its real provider, not its slot name."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+ROOT=Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory() as tmp:
+    base=Path(tmp);binaries=base/'bin';binaries.mkdir()
+    config=base/'config/agent-workspaces';config.mkdir(parents=True)
+    (config/'config.json').write_text(json.dumps({'telemetry':{'enabled':False}}))
+    workspace=base/'data/agent-workspaces/project/set';task=workspace/'.coordination/t';task.mkdir(parents=True)
+    status=task/'codex-2.status.json'
+    status.write_text(json.dumps({'state':'blocked','summary':'fixture','updated_at':'2026-01-01T00:00:00Z','blockers':['fixture'],'evidence':[],'commits':[]}))
+    (task/'state.json').write_text(json.dumps({'id':'t','workspace_id':'w:set','stage':'execute','status':'blocked','lead':'codex-2','gates':{},'transitions':[],
+        'roles':{'codex-2':{'state':'blocked','provider':'codex','status_json':str(status),'worktree':str(workspace/'codex-2')}}}))
+    tmux=binaries/'tmux';tmux.write_text('''#!/usr/bin/env python3
+import json,os,sys
+with open(os.environ['SLOT_LOG'],'a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')
+if sys.argv[1]=='list-sessions':print('session\\tcodex-2\\tw:set')
+elif sys.argv[1]=='show-option':print('codex')
+elif sys.argv[1]=='list-panes':print('%1')
+elif sys.argv[1]=='capture-pane':print('› Ask Codex to do anything')
+''');tmux.chmod(0o755)
+    env={**os.environ,'PATH':str(binaries)+os.pathsep+os.environ['PATH'],'SLOT_LOG':str(base/'log'),
+         'XDG_CONFIG_HOME':str(base/'config'),'XDG_DATA_HOME':str(base/'data'),'XDG_STATE_HOME':str(base/'state'),'AW_LIB':str(ROOT/'lib/core.sh')}
+    subprocess.run([str(ROOT/'bin/agent-workspaces'),'retry-agent',str(task),'codex-2'],env=env,check=True,capture_output=True,text=True)
+    calls=[json.loads(line) for line in (base/'log').read_text().splitlines()]
+    prompt=next(c[-1] for c in calls if c[0]=='set-buffer')
+    assert str(task/'instructions/AGENTS.md') in prompt,prompt
+    assert sum(c[0]=='send-keys' and c[-1]=='Enter' for c in calls)==2,calls
+print('ok - repeated Codex slot receives its provider guide and submission keys')

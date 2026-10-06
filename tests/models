@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Catalog/cache capability contract, isolated from real accounts."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'lib'))
+import models
+
+class Models(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.config = self.root / 'config/agent-workspaces'
+        shutil.copytree(ROOT / 'config', self.config)
+        self.cache = self.root / 'codex/models_cache.json'
+        self.cache.parent.mkdir()
+        env = patch.dict(os.environ, CODEX_HOME=str(self.cache.parent), XDG_CONFIG_HOME=str(self.root / 'config'),
+                         GROK_HOME=str(self.root / 'grok'),
+                         XDG_DATA_HOME=str(self.root / 'data'), AW_LIB=str(ROOT / 'lib/core.sh'))
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_offline_fallback_and_custom_ids(self):
+        for provider, model in [('codex', 'gpt-6.1-sol'), ('claude', 'fable'), ('grok', 'grok-4.7')]:
+            self.assertIn(model, [r['id'] for r in models.catalog(provider)])
+        models.validate('claude', 'deployment/custom', 'default')
+        for name in ('', '  ', 'model\n', 'model\x1b'):
+            with self.assertRaises(ValueError): models.validate('codex', name, 'high')
+        with self.assertRaises(ValueError): models.catalog('../codex')
+
+    def test_cache_updates_efforts_and_adds_models_without_hidden_entries(self):
+        self.cache.write_text(json.dumps({'models': [
+            {'slug': 'gpt-next', 'visibility': 'list', 'supported_reasoning_levels': [{'effort': 'high'}]},
+            {'slug': 'gpt-6.1-sol', 'visibility': 'list', 'supported_reasoning_levels': [{'effort': 'low'}]},
+            {'slug': 'secret', 'visibility': 'hide', 'supported_reasoning_levels': [{'effort': 'high'}]},
+        ]}))
+        self.assertEqual(models.efforts_for('codex', 'gpt-next'), ['default', 'high'])
+        self.assertEqual(models.efforts_for('codex', 'gpt-6.1-sol'), ['default', 'low'])
+        self.assertNotIn('secret', [r['id'] for r in models.catalog('codex')])
+
+    def test_malformed_cache_does_not_break_selection(self):
+        for content in ('broken', '{}', '{"models":null}', '{"models":[null]}'):
+            self.cache.write_text(content)
+            self.assertIn('gpt-6.1-sol', [r['id'] for r in models.catalog('codex')])
+
+    def test_grok_cache_only_exposes_model_capabilities(self):
+        cache = self.root / 'grok/models_cache.json'
+        cache.parent.mkdir()
+        cache.write_text(json.dumps({'identity': 'private-account', 'models': {
+            'grok-next': {'api_key': 'private-key', 'info': {'reasoning_efforts': [{'value': 'xhigh'}]}}
+        }}))
+        rows = models.catalog('grok')
+        self.assertEqual(models.efforts_for('grok', 'grok-next'), ['default', 'xhigh'])
+        self.assertNotIn('private', json.dumps(rows))
+
+    def test_default_effort_removes_template_flags_on_every_launch_mode(self):
+        policy = json.loads((self.config / 'config.json').read_text())
+        for provider in ('claude', 'codex', 'grok'):
+            policy['model_policy'][provider]['effort'] = 'default'
+        (self.config / 'config.json').write_text(json.dumps(policy))
+        for provider in ('claude', 'codex', 'grok'):
+            for mode, session in [('fresh', ''), ('resume', 'saved'), ('resume', '')]:
+                command = subprocess.check_output([str(ROOT / 'bin/agent-workspaces'), 'provider-command', provider,
+                                                  mode, 'safe', session], text=True)
+                self.assertNotIn('--effort', command)
+                self.assertNotIn('--reasoning-effort', command)
+                self.assertNotIn('model_reasoning_effort', command)
+
+    def test_event_reviewer_receives_low_effort_without_paid_request(self):
+        workspace = self.root / 'data/agent-workspaces/repo/test'
+        (workspace / '.orchestrator').mkdir(parents=True)
+        (workspace / 'workspace.json').write_text('{"workspace_id":"review:test"}')
+        (workspace / '.orchestrator/snapshot.md').write_text('Stable fixture state')
+        binaries = self.root / 'bin'
+        binaries.mkdir()
+        stub = binaries / 'codex'
+        capture = self.root / 'argv.json'
+        stub.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['CAPTURE']).write_text(json.dumps(sys.argv[1:]))
+sys.stdin.read()
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('Fixture briefing')
+''')
+        stub.chmod(0o755)
+        subprocess.run([str(ROOT / 'bin/agent-workspaces'), 'event-review', 'review:test'], check=True,
+                       env=dict(os.environ, PATH=f'{binaries}:{os.environ["PATH"]}', CAPTURE=str(capture)))
+        args = json.loads(capture.read_text())
+        self.assertIn('model_reasoning_effort="low"', args)
+        self.assertEqual(args[args.index('--model')+1], 'gpt-6-luna')
+        self.assertEqual(args[args.index('--sandbox')+1], 'read-only')
+
+unittest.main()

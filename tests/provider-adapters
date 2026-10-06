@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+import argparse
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode=True
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'lib'))
+import provider_adapter as a
+import attempts
+
+class Adapters(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.base=Path(self.tmp.name)
+    def codex(self,**usage):
+        return '\n'.join(json.dumps(e) for e in [{'type':'thread.started','thread_id':'s'}, {'type':'item.completed','item':{'type':'agent_message','text':'done'}}, {'type':'turn.completed','usage':{'input_tokens':12,'output_tokens':3,'cached_input_tokens':8,**usage}}])
+    def test_codex_counts_and_unknown_identity(self):
+        r=a.parse('codex',self.codex());self.assertEqual(r['input_tokens'],12);self.assertEqual(r['cached_input_tokens'],8)
+        self.assertIsNone(r['model_version']);self.assertIsNone(r['cost_usd'])
+    def test_duplicate_completed_turn_rejected(self):
+        with self.assertRaises(ValueError):a.parse('codex',self.codex()+'\n'+self.codex())
+    def test_missing_bad_or_failed_usage_rejected(self):
+        for text in (self.codex(input_tokens=None),self.codex(output_tokens=-1),self.codex(input_tokens=True),self.codex()+'\n'+json.dumps({'type':'turn.failed'}),'not json'):
+            with self.assertRaises(ValueError):a.parse('codex',text)
+    def test_claude_cache_not_added_to_regular_input(self):
+        row={'type':'result','subtype':'success','is_error':False,'usage':{'input_tokens':5,'output_tokens':2,'cache_read_input_tokens':10,'cache_creation_input_tokens':4},'modelUsage':{'resolved-model':{}},'total_cost_usd':.01}
+        r=a.parse('claude',json.dumps(row));self.assertEqual(r['input_tokens'],5);self.assertEqual(r['cached_input_tokens'],10);self.assertEqual(r['model_version'],'resolved-model')
+        row['modelUsage']['other']={};self.assertIsNone(a.parse('claude',json.dumps(row))['model_version'])
+    def test_commands_never_resume_or_bypass(self):
+        for provider in ('codex','claude'):
+            cmd=a.command({'provider':provider,'model':'m','effort':'high'},self.base,False)
+            self.assertNotIn('--resume',cmd);self.assertFalse(any('bypass' in x for x in cmd))
+        with self.assertRaises(ValueError):a.command({'provider':'grok','model':'m','effort':'high'},self.base,False)
+    def test_provider_receipt_and_version_attestation_failure(self):
+        executable=self.base/'codex';executable.write_text('#!/usr/bin/env python3\nimport sys\nif "--version" in sys.argv: print("fixture 1")\nelse: print('+repr(self.codex())+')\n');executable.chmod(0o755)
+        with patch.dict(os.environ,PATH=str(self.base)+os.pathsep+os.environ['PATH']):
+            result=a.run_role({'provider':'codex','model':'requested','effort':'low','model_version':'unattested'},self.base,self.base/'run','hello',5)
+        self.assertEqual(result['status'],'protocol_or_launch_error');self.assertIsNone(result['model_version'])
+        self.assertEqual(result['input_tokens'],12);self.assertTrue((self.base/'run/receipt.json').exists())
+    def test_timeout_and_child_group_cleanup(self):
+        pidfile=self.base/'child.pid'
+        script='import subprocess,time; p=subprocess.Popen(["sleep","60"]);open('+repr(str(pidfile))+',"w").write(str(p.pid));time.sleep(60)'
+        code,timed,wall=a.bounded([sys.executable,'-c',script],self.base,self.base/'out',self.base/'err',.2)
+        self.assertTrue(timed);self.assertIsNone(code);self.assertLess(wall,3)
+        pid=int(pidfile.read_text())
+        try:
+            state=subprocess.check_output(['ps','-o','stat=','-p',str(pid)],text=True).strip()
+            self.assertTrue(state.startswith('Z'))
+        except subprocess.CalledProcessError:pass
+    def test_unsupported_topology_rejected_before_calls(self):
+        with patch.object(a,'run_role') as call,self.assertRaises(ValueError):a.benchmark({'configuration':{'topology':'parallel','roles':{}}},self.base/'usage')
+        call.assert_not_called()
+    def attempt_fixture(self,exit_code):
+        task=self.base/'data/agent-workspaces/project/set/.coordination/t1';task.mkdir(parents=True)
+        worktree=task.parent.parent/'codex';worktree.mkdir()
+        (task/'state.json').write_text(json.dumps({'id':'t1','roles':{'codex':{'worktree':str(worktree)}}}))
+        verifier=self.base/'verify.py';verifier.write_text('import sys\nprint("independent evidence")\nsys.exit('+str(exit_code)+')\n')
+        prompt=self.base/'prompt';prompt.write_text('fixture')
+        args=argparse.Namespace(task=task,role='codex',provider='codex',model='m',effort='low',prompt_file=prompt,verifier=verifier,timeout=3)
+        env={'XDG_DATA_HOME':str(self.base/'data'),'XDG_STATE_HOME':str(self.base/'state'),'XDG_CONFIG_HOME':str(self.base/'config')}
+        return args,env
+    def execute_attempt(self,exit_code):
+        args,env=self.attempt_fixture(exit_code)
+        with patch.dict(os.environ,env),patch.object(a,'run_role',return_value={'status':'completed','at':a.stamp(),'input_tokens':12,'output_tokens':3}):
+            result=attempts.run(args)
+            directory=next((args.task/'attempts').iterdir())
+            attempts.ingest(directory) # Retrying ingestion must not duplicate receipts.
+        with closing(sqlite3.connect(self.base/'state/agent-workspaces/telemetry/ledger.sqlite')) as db:
+            records=[json.loads(x[0]) for x in db.execute('SELECT payload FROM events')]
+        return result,records,directory
+    def test_success_verification_and_idempotent_ingest(self):
+        code,records,directory=self.execute_attempt(0);self.assertEqual(code,0);self.assertEqual(len(records),2)
+        self.assertTrue(records[1]['accepted']);self.assertEqual(len(records[1]['evidence_sha256']),64)
+        self.assertTrue((directory/'verifier.py').is_file())
+    def test_acceptance_failure_separate_from_infrastructure(self):
+        code,records,_=self.execute_attempt(1);self.assertEqual(code,1)
+        self.assertFalse(records[1]['accepted']);self.assertEqual(records[2]['failure_category'],'quality')
+    def test_verifier_error_never_quality_failure(self):
+        code,records,_=self.execute_attempt(2);self.assertEqual(code,1)
+        self.assertFalse(any(x['kind']=='verification' for x in records));self.assertEqual(records[1]['failure_category'],'infrastructure')
+    def test_failed_claude_result_retains_measured_cost(self):
+        value={'type':'result','subtype':'error_max_turns','is_error':True,'usage':{'input_tokens':3,'output_tokens':2},'total_cost_usd':.02}
+        row=a.parse('claude',json.dumps(value),require_success=False)
+        self.assertFalse(row['provider_success']);self.assertEqual(row['cost_usd'],.02)
+        with self.assertRaises(ValueError):a.parse('claude',json.dumps(value))
+    def test_occupied_role_rejected_before_provider_call(self):
+        args,env=self.attempt_fixture(0)
+        state=json.loads((args.task/'state.json').read_text());state['workspace_id']='w';(args.task/'state.json').write_text(json.dumps(state))
+        with patch.dict(os.environ,env),patch.object(attempts.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'s\tw\tcodex\n','')),patch.object(a,'run_role') as call:
+            with self.assertRaises(ValueError):attempts.run(args)
+        call.assert_not_called()
+    def test_pending_handover_rejected_before_provider_call(self):
+        args,env=self.attempt_fixture(0)
+        (args.task.parent/'agents.json').write_text(json.dumps({'requests':{'r':{'slot':'codex','phase':'ready'}}}))
+        with patch.dict(os.environ,env),patch.object(a,'run_role') as call:
+            with self.assertRaises(ValueError):attempts.run(args)
+        call.assert_not_called()
+    def test_review_workflow_runs_distinct_roles_in_order(self):
+        order=[]
+        def role(settings,cwd,directory,prompt,timeout,read_only=False,isolated_group=True):
+            directory.mkdir();(directory/'final.txt').write_text('role evidence')
+            order.append((directory.name,read_only,isolated_group))
+            return {**settings,'status':'completed','input_tokens':1,'output_tokens':1,'cost_usd':None}
+        config={'topology':'review','roles':{r:{'provider':'codex','model':'m','effort':'low'} for r in ('coordinator','implementer','reviewer')}}
+        with patch.object(a,'run_role',side_effect=role):
+            code=a.benchmark({'configuration':config,'task':{'objective':'fixture'},'worktree':str(self.base),'artifacts':str(self.base),'timeout_seconds':10},self.base/'usage.json')
+        self.assertEqual(code,0)
+        self.assertEqual(order,[('provider-coordinator',True,False),('provider-implementer',False,False),('provider-reviewer',True,False)])
+    def test_worker_verifier_rejected(self):
+        args,env=self.attempt_fixture(0);args.verifier=Path(json.loads((args.task/'state.json').read_text())['roles']['codex']['worktree'])/'verify.py';args.verifier.write_text('')
+        with patch.dict(os.environ,env),self.assertRaises(ValueError):attempts.run(args)
+
+if __name__=='__main__':unittest.main()

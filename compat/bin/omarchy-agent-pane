@@ -20,8 +20,7 @@ if [[ $role == orchestrator ]]; then
   [[ -n $provider ]] || { printf 'No enabled provider is installed.\n' >&2; exit 1; }
 fi
 [[ $role == orchestrator ]] && profile=$(jq -r '.orchestrator_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json")
-orchestrator_model=$(jq -r '.orchestrator_model // empty' "$HOME/.config/agent-workspaces/config.json")
-[[ $provider == "$configured_orchestrator" ]] || orchestrator_model=''
+provider=$(agent-workspaces role-provider "$provider" "$role" "$workspace_id")
 worker_env=''
 if [[ $role != orchestrator && $role != integration ]] && command -v sccache >/dev/null 2>&1; then
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sccache"
@@ -39,6 +38,10 @@ set_session_metadata() {
   tmux set-option -q -t "$session" @aw_profile "$profile"
 }
 
+assignment_root=$(agent-workspaces workspace-root "$workspace_id" 2>/dev/null || true)
+if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  exec tmux attach-session -t "$session"
+fi
 was_started=false
 if [[ -n $state_file ]]; then
   [[ -f $state_file ]] && was_started=true
@@ -55,15 +58,15 @@ case "$role" in
     remote_control=''
     [[ $provider == codex || $provider == claude ]] && directory_access="--add-dir $(printf %q "$coordination_dir")"
     [[ $provider == claude ]] && remote_control="--remote-control $(printf %q "Workspaces · $set_slug")"
-    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile" '' "$orchestrator_model") $remote_control $directory_access $(printf %q "$welcome")"
+    fresh="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" fresh "$profile" '' '' orchestrator "$workspace_id") $remote_control $directory_access $(printf %q "$welcome")"
     provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
-    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id" "$orchestrator_model") $remote_control $directory_access"
+    resume="$monitor AW_WORKSPACE_ID=$(printf %q "$workspace_id") $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id" '' orchestrator "$workspace_id") $remote_control $directory_access"
     ;;
   integration) launch='' ;;
   *)
-    fresh="$worker_env $(agent-workspaces provider-command "$provider" fresh "$profile")"
+    fresh="$worker_env $(agent-workspaces provider-command "$provider" fresh "$profile" '' '' "$role" "$workspace_id")"
     provider_session_id=$(tmux show-option -qv -t "$session" @aw_provider_session_id 2>/dev/null)
-    resume="$worker_env $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id")"
+    resume="$worker_env $(agent-workspaces provider-command "$provider" resume "$profile" "$provider_session_id" '' "$role" "$workspace_id")"
     ;;
 esac
 
@@ -73,7 +76,7 @@ if tmux has-session -t "$session" 2>/dev/null; then
     pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
     if ! omarchy-agent-pane-active "$provider" "$session"; then
       relaunch=$fresh
-      [[ $was_started == true ]] && relaunch="$resume || $fresh"
+      [[ $was_started == true ]] && relaunch=$(agent-workspaces resume-command "$resume" "$fresh")
       tmux send-keys -t "$pane" -l -- "$relaunch"
       tmux send-keys -t "$pane" Enter
     fi
@@ -87,7 +90,7 @@ if [[ $role != integration ]]; then
     # A missing tmux session means the machine or tmux server stopped. Resume
     # the newest conversation scoped to this worktree; fall back to a fresh
     # conversation only when the agent reports that nothing can be resumed.
-    launch="$resume || $fresh"
+    launch=$(agent-workspaces resume-command "$resume" "$fresh")
   fi
   # Keep an interactive shell in the pane if the agent exits, so the tmux
   # session remains available for review and manual relaunching.

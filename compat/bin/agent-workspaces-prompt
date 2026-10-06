@@ -39,6 +39,11 @@ else
   workspace_id=${workspace_selection##*$'\t'}
 fi
 
+if [[ -z ${AW_TEMPLATE:-} ]]; then
+  operation=$(printf '%s\n' 'Start workflow' 'Change agents' | gum choose --header="${workspace_labels[$workspace_id]}") || exit 0
+  [[ $operation != 'Change agents' ]] || exec agent-workspaces-agents "$workspace_id"
+fi
+
 declare -A role_sessions=()
 declare -A role_panes=()
 declare -A role_paths=()
@@ -103,11 +108,18 @@ fi
 [[ -n ${prompt//[[:space:]]/} ]] || exit 0
 
 stage=${AW_STAGE:-$(jq -r '.stage' "$template_file")}
+difficulty=${AW_DIFFICULTY:-standard}
+[[ $difficulty =~ ^(simple|standard|complex)$ ]] || { notify-send 'Agent Dispatcher' 'Invalid routing difficulty'; exit 1; }
 case "$stage" in review|execute|verify|integrate) ;; *) notify-send 'Agent Dispatcher' "Unsupported workflow stage: $stage"; exit 1 ;; esac
 
+assignment_root=$(agent-workspaces workspace-root "$workspace_id")
+saved_lead=$(jq -r '.default_lead // empty' "$assignment_root/.coordination/agents.json" 2>/dev/null || true)
 if [[ -n ${AW_LEAD:-} ]]; then
   lead=$AW_LEAD
   [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' "Requested lead is not active: $lead"; exit 1; }
+elif [[ -n $saved_lead ]]; then
+  lead=$saved_lead
+  [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' 'Selected lead is not running; open Change agents to complete the handover.'; exit 1; }
 elif ((active_count > 1)); then
   lead_options=()
   for role in "${active_roles[@]}"; do lead_options+=("󰒓"$'\t'"${role^}"$'\t'"$role"); done
@@ -117,7 +129,15 @@ else
   lead=${active_roles[0]}
 fi
 
+if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e 'any(.requests[]; .role=="lead" and (.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  notify-send 'Agent Dispatcher' 'A lead change is pending. Complete or cancel it in Change agents before dispatching another task.'
+  exit 1
+fi
+
 repository=${workspace_repositories[$workspace_id]}
+routing_guard=(--roles "$lead")
+[[ $stage != review && $stage != verify ]] || routing_guard=(--review --roles "${active_roles[@]}")
+agent-workspaces routing "$workspace_id" guard "${routing_guard[@]}" || { notify-send 'Agent Dispatcher' 'Capacity or handover prevents new work. Check workspace routing.'; exit 1; }
 set_slug=${workspace_sets[$workspace_id]}
 repo_name=$(basename "$repository")
 repo_hash=${workspace_id%%:*}
@@ -231,8 +251,8 @@ roles_json='{}'
 for role in "${active_roles[@]}"; do
   initial_state=$(jq -r '.state' "$task_root/$role.status.json")
   roles_json=$(jq --arg role "$role" --arg assignment "${assignments[$role]}" --arg worktree "${role_paths[$role]}" \
-    --arg status_json "$task_root/$role.status.json" --arg report_file "$task_root/$role.status.md" --arg state "$initial_state" \
-    '. + {($role): {assignment: $assignment, worktree: $worktree, status_json: $status_json, report_file: $report_file, state:$state}}' <<<"$roles_json")
+    --arg provider "${role_providers[$role]}" --arg status_json "$task_root/$role.status.json" --arg report_file "$task_root/$role.status.md" --arg state "$initial_state" \
+    '. + {($role): {provider:$provider, assignment: $assignment, worktree: $worktree, status_json: $status_json, report_file: $report_file, state:$state}}' <<<"$roles_json")
 done
 jq -n \
   --arg id "$task_id" \
@@ -250,12 +270,13 @@ jq -n \
   --arg issue "${AW_ISSUE:-}" \
   --arg created_at "$(date --iso-8601=seconds)" \
   --arg lead "$lead" \
+  --arg difficulty "$difficulty" \
   --argjson repair_round "$repair_round" \
   --argjson roles "$roles_json" \
   '{schema_version: 2, id: $id, workspace_id: $workspace_id, repository: $repository, set: $set,
     objective: $objective, seam: $seam, allowed_paths: $allowed_paths, stage: $stage, template_id: $template_id, template_version: $template_version,
     profile: $profile, status: "active", parent_id: $parent_id, issue: $issue, pr: {}, lead: $lead,
-    delivery: {mode:"quota-aware",continue_while_capacity_remains:true,repair_round:$repair_round},
+    delivery: {mode:"quota-aware",continue_while_capacity_remains:true,repair_round:$repair_round}, routing:{difficulty:$difficulty},
     created_at: $created_at, updated_at: $created_at, roles: $roles,
     gates: {triage_approved: false, execution_approved: false, integration_approved: false, pr_prepared: false, pr_approved: false},
     transitions: [{from: null, to: "active", at: $created_at, actor: "dispatcher"}]}' >"$task_root/state.json"

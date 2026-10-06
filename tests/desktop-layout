@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Execute the actual desktop launcher against a compositor test double."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory() as directory:
+    base = Path(directory)
+    home = base / 'home'
+    binaries = base / 'bin'
+    binaries.mkdir()
+    repository = base / 'repo'
+    subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+    subprocess.run(['git', '-C', str(repository), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '--allow-empty', '-qm', 'initial'], check=True)
+    repo_hash = hashlib.sha256(str(repository / '.git').encode()).hexdigest()[:10]
+    workspace = home / '.local/share/agent-workspaces' / f'repo-{repo_hash}' / 'test'
+    workspace.mkdir(parents=True)
+    config = home / '.config/agent-workspaces'
+    shutil.copytree(ROOT / 'config', config)
+    (workspace / 'workspace.json').write_text(json.dumps({'workspace_id': f'{repo_hash}:test', 'profile': 'safe', 'layout': 'four-windows'}))
+    prefix = f'org.omarchy.agentworkspaces.r{repo_hash}.stest'
+    roles = ['claude', 'codex', 'grok', 'orchestrator']
+    clients = [{'class': f'{prefix}.{role}', 'initialClass': f'{prefix}.{role}', 'address': f'0x{i+1}',
+                'workspace': {'id': 6}, 'floating': True} for i, role in enumerate(roles)]
+    (base / 'clients.json').write_text(json.dumps(clients))
+    def stub(name, source):
+        path = binaries / name
+        path.write_text(source)
+        path.chmod(0o755)
+    for name in ('gum', 'fzf', 'omarchy-restart-gum', 'omarchy-agent-pane', 'omarchy-agent-pane-active', 'omarchy-agent-grid-preview', 'claude', 'codex', 'grok'):
+        stub(name, '#!/bin/sh\nexit 0\n')
+    stub('omarchy-restart-gum', '#!/bin/sh\ntrue\n')
+    stub('xdg-terminal-exec', '#!/bin/sh\nprintf "ghostty\\n"\n')
+    stub('tmux', '#!/bin/sh\nexit 1\n') # No real sessions; no relaunch needed.
+    stub('agent-workspaces', '''#!/bin/bash
+case "$1" in snapshot|prepare-repository) exit 0;; esac
+exec "$REAL_CLI" "$@"
+''')
+    stub('hyprctl', '''#!/usr/bin/env python3
+import json, os, pathlib, sys
+base = pathlib.Path(os.environ['FIXTURE'])
+a = sys.argv[1:]
+with (base/'calls').open('a') as stream: stream.write(json.dumps(a)+'\\n')
+if a[0] == 'clients': print((base/'clients.json').read_text())
+elif a[0] == 'monitors': print((base/'monitor.json').read_text())
+elif a[0] == 'getoption': print(' {"css":"2"}')
+elif a[0] == 'dispatch': print('ok')
+else: raise SystemExit('Unexpected compositor call: '+repr(a))
+''')
+    env = dict(os.environ, HOME=str(home), PATH=f'{binaries}:{os.environ["PATH"]}',
+               XDG_CONFIG_HOME=str(home / '.config'), XDG_DATA_HOME=str(home / '.local/share'),
+               AW_LIB=str(ROOT / 'lib/core.sh'), REAL_CLI=str(ROOT / 'bin/agent-workspaces'),
+               OMARCHY_AGENT_REPOSITORY=str(repository), OMARCHY_AGENT_SET='test', AW_LAYOUT='four-windows', FIXTURE=str(base))
+    for transform, expected_width, expected_height in [(0, 892, 583), (1, 592, 883)]:
+        (base / 'monitor.json').write_text(json.dumps([{'focused': True, 'scale': 2, 'x': -1920, 'y': 120,
+                         'width': 3600, 'height': 2400, 'reserved': [0, 24, 8, 2], 'transform': transform}]))
+        (base / 'calls').write_text('')
+        subprocess.run(['bash', str(ROOT / 'compat/bin/omarchy-agent-grid')], env=env, check=True, capture_output=True, text=True)
+        calls = [json.loads(line) for line in (base / 'calls').read_text().splitlines()]
+        dispatches = [c[1] for c in calls if c[0] == 'dispatch']
+        moves = [c for c in dispatches if 'relative = false' in c and 'window.move' in c]
+        sizes = [c for c in dispatches if 'window.resize' in c]
+        assert len(moves) == len(sizes) == 4, dispatches
+        assert "x = -1918, y = 146" in moves[0], moves
+        assert f'x = {expected_width}, y = {expected_height}' in sizes[0], sizes
+        assert all("workspace = '6'" in c for c in dispatches if 'follow = false' in c)
+        manifest = json.loads((workspace / 'workspace.json').read_text())
+        assert manifest['layout'] == 'four-windows' and len(manifest['agents']) == 3
+        assert [row['role'] for row in manifest['agents']] == roles[:3]
+        assert sum(c[0] == 'clients' for c in calls) <= 9, calls # one snapshot per readiness poll
+    print('ok - four windows share one desktop; reopen preserves roles; scaled/rotated/negative-origin geometry')

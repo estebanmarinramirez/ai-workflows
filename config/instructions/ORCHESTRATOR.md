@@ -60,3 +60,73 @@ Before dispatching, briefly state the template, lead, and objective. Then use:
 Choose the narrowest configured ownership seam. Only a task in `active` execution holds a write lease; blocked, completed, review-gate, integration-gate, and legacy tasks remain auditable but do not reserve seams. Never claim a seam conflict without attempting dispatch and reporting the dispatcher's concrete rejection. If another actively executing task owns the same seam or either task owns `general`/`shared`, do not work around the rejection; reconcile scope with the user. Retiring or reconciling obsolete local coordination metadata is non-destructive because reports and audit history remain intact; do not ask the user for approval merely to release a stale seam. Before a new implementation session, show `agent-workspaces sync "$AW_WORKSPACE_ID"`. Rebase only after the user explicitly confirms, using `agent-workspaces sync "$AW_WORKSPACE_ID" --confirmed-by-user`.
 
 After dispatch, report the task id and what each agent was asked to do.
+
+## Agent selection and handover
+
+Read **Capacity and routing** in the snapshot before dispatch and reviewer
+activation. The monitor runs `routing WORKSPACE reconcile` to request model,
+effort or provider changes; it never kills an agent or fabricates a checkpoint.
+For each pending routing request, coordinate the outgoing note and clean
+worktree checkpoint, ask the outgoing CLI to exit at that boundary, and let the
+successor acknowledge. This applies to reviewer/verifier slots as well as lead
+and orchestrator. Deferred reviewers must remain idle after acknowledging until
+`activate-reviewers` dispatches their assignment. If the snapshot reports a wait,
+do not start work on exhausted quota or spend the implementation review reserve.
+
+The user's effort mode is workspace-specific. **fixed** preserves current
+per-provider model/effort settings while allowing quota-driven provider routing;
+**auto** permits task profiles and pressure-based effort adjustments. Keep fixed
+unless the user chooses Auto. Choosing Auto releases existing manual settings to
+the router; a later explicit agent choice pins that slot again. Never change the
+user's effort mode yourself. Unknown telemetry is not spare capacity. Quota
+percentages across separate subscriptions are not interchangeable token budgets.
+
+Classify authorized work with `dispatch ... --difficulty simple|standard|complex`.
+Use simple for narrow, low-risk edits; standard for ordinary implementation;
+complex for substantial architecture, difficult debugging or sensitive changes.
+When scope changes, record the revised classification with
+`routing WORKSPACE difficulty --task TASK_DIR --difficulty LEVEL`. Default is
+standard. Auto retains the complex-task model tier under quota pressure and
+lowers only its configured effort floor. Configured model allowlists and explicit
+assignments take precedence. Do not circumvent a disabled/unknown account.
+
+Capacity can change during handover. If applying a pending automatic request
+fails its capacity or preference check, inspect `routing WORKSPACE`, cancel the
+unlaunched request, and reconsider at the next safe boundary. Never repeatedly
+restart to force a quota-limited target. A user-cancelled routing choice remains
+suppressed until the routing intent changes.
+
+The user can choose the workspace orchestrator or a workflow's lead worker at any
+stage through Change agents or `agent-workspaces agents "$AW_WORKSPACE_ID" select`.
+Read the Agent assignments section of the snapshot. A requested selection is
+pending; it does not transfer ownership. Provider/model/effort belong to a stable
+role slot, so the same worktree, task status file and commits survive a switch.
+
+For a pending request, coordinate a checkpoint with the outgoing agent. `now`
+means request that checkpoint promptly, without killing an in-flight command;
+`checkpoint` means finish the current safe unit of work; `next-task` waits for
+existing tasks to finish. Record objective, scope, completed work, commits,
+validation, remaining work and blockers in a handover note. Lead worktrees must
+be clean and committed. Submit it with:
+
+`agent-workspaces agents "$AW_WORKSPACE_ID" checkpoint CHANGE_ID --note NOTE_PATH`
+
+After checkpointing, the outgoing agent must stop work and exit its CLI. Do not
+claim a composer or footer proves it has stopped. The monitor launches the
+selected successor only after the old process and all child processes exit.
+The user can also run `agent-workspaces agents "$AW_WORKSPACE_ID" apply CHANGE_ID`
+from an external terminal. Neither action kills a running agent.
+
+The successor reads the handover note and calls
+`agent-workspaces agents "$AW_WORKSPACE_ID" accept CHANGE_ID` before working.
+Only this acknowledgement transfers ownership and unfreezes the task. The
+successor keeps the same role slot/status file even if its provider differs from
+the slot's historical name. The original task scope and permission profile still
+apply. Use the successor provider's instruction file; never assume a slot named
+codex is still running Codex. If providers now overlap across roles, report the
+reduced independence of review.
+
+Pending selections can be cancelled before launch, or after an unacknowledged successor exits. A failed launch remains
+pending and can be retried with apply after the pane is stopped; it never grants
+ownership automatically. A selection alone never authorizes merging, pushing,
+publishing, broader permissions, or new task scope.
