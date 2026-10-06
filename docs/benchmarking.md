@@ -42,9 +42,9 @@ for a failed trial; inspect `accepted` and `failure`, not just its exit code.
 
 ## Real experiments
 
-Supply your own manifest and two standalone Python scripts. The initial release
-provides the execution/measurement harness and adapter contract, **not automated
-interactive Codex/Claude/Grok drivers**. Running a real adapter is explicit and
+Supply a manifest and standalone adapter/verifier scripts. The bundled
+[provider adapter](provider-adapters.md) supports fresh non-interactive Codex and
+Claude runs for solo/review workflows; other topologies still require an adapter. Running a real adapter is explicit and
 may consume provider quota. No paid trials run during installation or tests.
 
 The demo's `manifest.json` is a complete editable example. Required fields:

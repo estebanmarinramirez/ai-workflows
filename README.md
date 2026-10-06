@@ -304,3 +304,7 @@ or `agent-workspaces telemetry export` for JSONL evidence. Existing and inactive
 workspaces are included; no new session is required. See [collection and receipt
 details](docs/telemetry.md) for scope, privacy, controls and statistical limits.
 This observational data does not automatically train the Bayesian shadow policy.
+
+Measured [provider attempts](docs/provider-adapters.md) produce per-task usage
+and independent verifier receipts with `agent-workspaces attempts run`. They use
+fresh non-interactive sessions and refuse an already occupied managed role.

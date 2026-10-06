@@ -136,7 +136,8 @@ worktree, blocked status, disappeared terminal, or missing record.
 
 Receipts are marked `submitted_receipt_not_independently_authenticated`. Caller
 assertions about model versions and verifier independence require separate
-validation. There are no automatic real-provider per-task receipt adapters yet.
+validation. Explicit [measured task attempts](provider-adapters.md) now produce provider and
+verifier receipts. Existing interactive sessions are not automatically wrapped.
 
 ## Analysis boundaries
 

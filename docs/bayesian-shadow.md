@@ -161,8 +161,9 @@ this report does not claim causal improvement or counterfactual savings.
 
 ## Boundaries for this release
 
-Real provider adapters and a representative labelled task set are still needed
-before performance conclusions are possible. Sparse real data produces explicit
+The [provider adapters](provider-adapters.md) now support explicit measured CLI
+attempts. A representative labelled task set and adequate model-version
+attestation are still needed before performance conclusions are possible. Sparse real data produces explicit
 abstention, not a confident default recommendation. Current constraints stay
 outside the Bayesian layer; enabling shadow mode does not make a live assignment
 eligible, override an approval, or change the user's selected effort mode.

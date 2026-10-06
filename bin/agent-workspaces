@@ -10,6 +10,9 @@ usage() {
 
 cmd=${1:-help}; shift || true
 case "$cmd" in
+  attempts)
+    exec python3 "$(dirname "$catalog_script")/attempts.py" "$@"
+    ;;
   telemetry)
     exec python3 "$(dirname "$catalog_script")/telemetry.py" "$@"
     ;;
