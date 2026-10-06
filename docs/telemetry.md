@@ -152,3 +152,11 @@ add validated provider/verifier adapters, explicit task families and instance
 identities, attribution to real attempts, immutable model versions, correction
 resolution, and a frozen development/held-out evaluation protocol. Track coverage
 and missingness before interpreting configuration differences as causal benefit.
+
+Workspace monitors use a kernel-held singleton lock, which is released when the
+owning processes exit and cannot survive a reboot. Legacy `.monitor-instance`
+directories no longer prevent monitor startup. Agent selection queues a wake and
+the chooser starts the monitor; it reports when the monitor could not start.
+A selection is still pending until checkpoint, outgoing exit and successor
+acknowledgement complete. The lead chooser lists unfinished tasks rather than
+historical completed workflows.

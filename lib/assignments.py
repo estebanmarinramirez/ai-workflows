@@ -155,6 +155,8 @@ class Assignments:
         record['outgoing_session_id'] = run(['tmux', 'show-option', '-qv', '-t', session, '@aw_provider_session_id'])
         state['requests'][change_id] = record
         self.save(state)
+        wake = self.root / '.orchestrator/.pending-wake'
+        atomic(wake, 'handover-' + change_id)
         return record
 
     def change(self, state, change_id, phases):

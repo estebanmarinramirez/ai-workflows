@@ -13,6 +13,9 @@ with tempfile.TemporaryDirectory() as directory:
     binaries.mkdir()
     root = fixture / 'workspace'
     (root / '.coordination').mkdir(parents=True)
+    for identifier,status in [('old-done','completed'),('open-task','active')]:
+        task=root/'.coordination'/identifier;task.mkdir()
+        (task/'state.json').write_text(json.dumps({'id':identifier,'status':status,'objective':'example task'}))
     config = fixture / 'config/agent-workspaces'
     config.mkdir(parents=True)
     (config / 'config.json').write_text(json.dumps({'model_policy': {'codex': {'model': 'default-model', 'effort': 'high'}}}))
@@ -24,7 +27,8 @@ if sys.argv[1] == 'choose':
     path = pathlib.Path(os.environ['COUNTER'])
     index = int(path.read_text()) if path.exists() else 0
     path.write_text(str(index + 1))
-    sys.stdin.read()
+    incoming = sys.stdin.read()
+    with open(os.environ['CHOOSER_INPUTS'], 'a') as stream: stream.write(json.dumps({'args':sys.argv,'input':incoming}) + '\\n')
     print(choices[index])
 elif sys.argv[1] == 'input':
     print('chosen-model' if '--header=Model' in sys.argv else '')
@@ -41,9 +45,13 @@ elif sys.argv[1] == 'agents': print('Selection saved')
     gum.chmod(0o755)
     cli.chmod(0o755)
     env = dict(os.environ, PATH=f'{binaries}:{os.environ["PATH"]}', XDG_CONFIG_HOME=str(fixture / 'config'),
-               COUNTER=str(fixture / 'counter'), CAPTURE=str(fixture / 'capture'), WORKSPACE_ROOT=str(root))
+               CHOOSER_INPUTS=str(fixture/'chooser-inputs'), COUNTER=str(fixture / 'counter'), CAPTURE=str(fixture / 'capture'), WORKSPACE_ROOT=str(root))
     subprocess.run([str(ROOT / 'compat/bin/agent-workspaces-agents'), 'w:set'], env=env, check=True, capture_output=True, text=True)
     calls = [json.loads(line) for line in (fixture / 'capture').read_text().splitlines()]
+    chooser=[json.loads(line) for line in (fixture/'chooser-inputs').read_text().splitlines()]
+    workflows=next(row['input'] for row in chooser if any('Choose unfinished task' in x for x in row['args']))
+    assert 'open-task' in workflows and 'old-done' not in workflows, workflows
+    assert ['monitor-start','w:set'] in calls, calls
     select = next(call for call in calls if 'select' in call)
     assert select == ['agents', 'w:set', 'select', '--role', 'lead', '--provider', 'codex', '--model', 'chosen-model', '--effort', 'high', '--when', 'next-task'], select
     assert not any('apply' in call or 'checkpoint' in call for call in calls), calls

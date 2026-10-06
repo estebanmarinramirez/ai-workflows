@@ -308,12 +308,14 @@ case "$cmd" in
     ;;
   monitor)
     workspace_id=${1:?workspace id}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    exec python3 "$(dirname "$catalog_script")/monitor_lock.py" "$workspace_root/.orchestrator/.monitor-instance.lock" "$(realpath "$0")" monitor-loop "$workspace_id"
+    ;;
+  monitor-loop)
+    workspace_id=${1:?workspace id}
     interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
     [[ $interval =~ ^[0-9]+$ && $interval -ge 5 ]] || interval=15
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
-    instance_lock="$workspace_root/.orchestrator/.monitor-instance"
-    mkdir "$instance_lock" 2>/dev/null || exit 0
-    trap 'rmdir "$instance_lock" 2>/dev/null || true' EXIT
     signature_file="$workspace_root/.orchestrator/.state-signature"
     while :; do
       "$0" routing "$workspace_id" reconcile >/dev/null 2>&1 || true

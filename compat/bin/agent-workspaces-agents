@@ -48,9 +48,10 @@ while :; do
     role=lead
     rows=('Next workflow (default lead)')
     while IFS= read -r state; do
-      rows+=("$(jq -r '[.id,.status,.objective] | @tsv' "$state")")
-    done < <(find "$root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f | sort)
-    selected=$(printf '%s\n' "${rows[@]}" | gum choose --header='Choose workflow') || continue
+      row=$(jq -r 'select(.status as $s | ["completed","draft_pr","ready_for_pr","cancelled","archived","superseded"] | index($s) | not) | [.id,.status,(.objective // "" | gsub("[\\r\\n\\t]+"; " ") | .[:160])] | @tsv' "$state")
+      [[ -z $row ]] || rows+=("$row")
+    done < <(find "$root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f | sort -r)
+    selected=$(printf '%s\n' "${rows[@]}" | gum choose --header='Choose unfinished task to change its lead (not a chat/session)' ) || continue
     if [[ $selected != 'Next workflow (default lead)' ]]; then task_args=(--task "$root/.coordination/${selected%%$'\t'*}"); fi
   fi
   provider=$(agent-workspaces available-providers | gum choose --header="Provider for $role") || continue
@@ -74,7 +75,11 @@ while :; do
     esac
   fi
   if agent-workspaces agents "$workspace" select --role "$role" --provider "$provider" --model "$model" --effort "$effort" --when "$when" "${task_args[@]}"; then
-    gum style 'Selection saved. Record a checkpoint, exit the outgoing agent, then launch the successor. It must acknowledge before taking ownership.'
+    if agent-workspaces monitor-start "$workspace"; then
+      gum style 'Change requested; the monitor is running. The outgoing agent must checkpoint and exit before the successor starts. See Manage pending handover for progress.'
+    else
+      gum style 'Change saved, but the monitor could not start. Open Manage pending handover to checkpoint and launch, or retry monitor-start.'
+    fi
   fi
   gum input --placeholder='Enter to continue' >/dev/null || true
 done
