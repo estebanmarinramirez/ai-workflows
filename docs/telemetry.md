@@ -12,7 +12,11 @@ The ledger is `$XDG_STATE_HOME/agent-workspaces/telemetry/ledger.sqlite`, normal
 concurrent collectors; event rows reject SQL updates and deletes. This protects
 against accidental modification, not against the machine owner modifying files.
 
-On Linux the existing usage timer collects every two minutes. Workspace audit
+On Linux the existing usage timer collects every two minutes, with its first
+run scheduled 30 seconds after timer activation (including login/restart).
+An active timer alone is not proof of collection: check the ledger
+`last_full_collection` timestamp and `systemctl --user list-timers
+agent-workspaces-usage.timer` for a future trigger. Workspace audit
 writes and assignment saves also trigger a lightweight collection. These hooks
 avoid runtime subprocess probes; the background scan adds those observations.
 On other platforms run `agent-workspaces telemetry collect` periodically; this
