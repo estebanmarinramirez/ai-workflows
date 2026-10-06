@@ -262,6 +262,8 @@ aw_orchestrator_prompt_idle() {
   content=$(cat)
   # Claude renders an empty composer with NBSP; normalize only that space.
   content=${content//$'\u00a0'/ }
+  # Providers can keep an empty composer visible during an active turn.
+  if tail -8 <<<"$content" | grep -qi 'esc to interrupt'; then return 1; fi
   # An earlier empty composer must never override the user's current draft.
   case "$provider" in
     codex) content=$(awk '/^[[:space:]]*›/ {last=$0} END {print last}' <<<"$content") ;;

@@ -164,6 +164,7 @@ class Handover(unittest.TestCase):
     def test_selection_queues_monitor_delivery(self):
         record=self.request()
         self.assertEqual(a.read(self.root/'.orchestrator/.pending-wake'),'handover-'+record['id'])
+        self.assertEqual(record['source'],'manual')
 
     def test_next_task_waits_for_existing_work(self):
         record = self.request(when='next-task')

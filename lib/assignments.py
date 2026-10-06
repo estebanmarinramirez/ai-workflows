@@ -150,7 +150,7 @@ class Assignments:
         change_id = uuid.uuid4().hex[:12]
         record = dict(id=change_id, role=args.role, slot=slot, session=session,
                       outgoing_provider=outgoing, target=dict(provider=args.provider, model=args.model, effort=args.effort),
-                      task=str(task_path) if task_path else None, when=args.when, phase='requested',
+                      task=str(task_path) if task_path else None, when=args.when, phase='requested', source='manual',
                       requested_at=now(), checkpoint=None)
         record['outgoing_session_id'] = run(['tmux', 'show-option', '-qv', '-t', session, '@aw_provider_session_id'])
         state['requests'][change_id] = record

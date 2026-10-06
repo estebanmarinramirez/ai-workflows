@@ -64,6 +64,9 @@ else
 fi
 printf '%s\n' '❯' | aw_orchestrator_prompt_idle claude || { printf 'not ok - idle Claude prompt detection\n'; failures=$((failures+1)); }
 printf '%s\n' $'❯\u00a0' | aw_orchestrator_prompt_idle claude || { printf 'not ok - Claude NBSP prompt\n'; failures=$((failures+1)); }
+if printf '%s\n' $'❯\u00a0' 'bypass permissions · esc to interrupt' | aw_orchestrator_prompt_idle claude; then
+  printf 'not ok - busy Claude composer protection\n'; failures=$((failures+1))
+fi
 if printf '%s\n' '❯' $'❯\u00a0user draft' | aw_orchestrator_prompt_idle claude; then
   printf 'not ok - newest Claude draft protection\n'; failures=$((failures+1))
 fi
