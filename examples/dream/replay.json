@@ -1,0 +1,370 @@
+{
+  "schema_version": 1,
+  "data_kind": "synthetic",
+  "evaluation_protocol": "fixture-v1",
+  "objective": {
+    "quality": 1,
+    "cost_usd": 1,
+    "wall_seconds": 0.01,
+    "attempts": 0.001
+  },
+  "incumbent": "serial",
+  "policies": [
+    {
+      "id": "serial",
+      "strategy": "breadth",
+      "workers": 1,
+      "rounds": 2
+    },
+    {
+      "id": "parallel",
+      "strategy": "best_leaf",
+      "workers": 2,
+      "rounds": 2
+    }
+  ],
+  "worlds": [
+    {
+      "id": "w0",
+      "instance_id": "instance0",
+      "split": "development",
+      "root_score": 0,
+      "root_snapshot": "root",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": "root",
+          "score": 0.2,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "a",
+          "attempt_id": "a",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "b",
+          "parent": "root",
+          "score": 0.4,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "b",
+          "attempt_id": "b",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "aa",
+          "parent": "a",
+          "score": 0.8,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "aa",
+          "attempt_id": "aa",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "bb",
+          "parent": "b",
+          "score": 0.7,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "bb",
+          "attempt_id": "bb",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    {
+      "id": "w1",
+      "instance_id": "instance1",
+      "split": "development",
+      "root_score": 0,
+      "root_snapshot": "root",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": "root",
+          "score": 0.2,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "a",
+          "attempt_id": "a",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "b",
+          "parent": "root",
+          "score": 0.4,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "b",
+          "attempt_id": "b",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "aa",
+          "parent": "a",
+          "score": 0.8,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "aa",
+          "attempt_id": "aa",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "bb",
+          "parent": "b",
+          "score": 0.7,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "bb",
+          "attempt_id": "bb",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    {
+      "id": "w2",
+      "instance_id": "instance2",
+      "split": "development",
+      "root_score": 0,
+      "root_snapshot": "root",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": "root",
+          "score": 0.2,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "a",
+          "attempt_id": "a",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "b",
+          "parent": "root",
+          "score": 0.4,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "b",
+          "attempt_id": "b",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "aa",
+          "parent": "a",
+          "score": 0.8,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "aa",
+          "attempt_id": "aa",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "bb",
+          "parent": "b",
+          "score": 0.7,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "bb",
+          "attempt_id": "bb",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    {
+      "id": "w3",
+      "instance_id": "instance3",
+      "split": "heldout",
+      "root_score": 0,
+      "root_snapshot": "root",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": "root",
+          "score": 0.2,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "a",
+          "attempt_id": "a",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "b",
+          "parent": "root",
+          "score": 0.4,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "b",
+          "attempt_id": "b",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "aa",
+          "parent": "a",
+          "score": 0.8,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "aa",
+          "attempt_id": "aa",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "bb",
+          "parent": "b",
+          "score": 0.7,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "bb",
+          "attempt_id": "bb",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    {
+      "id": "w4",
+      "instance_id": "instance4",
+      "split": "heldout",
+      "root_score": 0,
+      "root_snapshot": "root",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": "root",
+          "score": 0.2,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "a",
+          "attempt_id": "a",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "b",
+          "parent": "root",
+          "score": 0.4,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "b",
+          "attempt_id": "b",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "aa",
+          "parent": "a",
+          "score": 0.8,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "aa",
+          "attempt_id": "aa",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "bb",
+          "parent": "b",
+          "score": 0.7,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "bb",
+          "attempt_id": "bb",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    {
+      "id": "w5",
+      "instance_id": "instance5",
+      "split": "heldout",
+      "root_score": 0,
+      "root_snapshot": "root",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": "root",
+          "score": 0.2,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "a",
+          "attempt_id": "a",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "b",
+          "parent": "root",
+          "score": 0.4,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "b",
+          "attempt_id": "b",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "aa",
+          "parent": "a",
+          "score": 0.8,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "aa",
+          "attempt_id": "aa",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "bb",
+          "parent": "b",
+          "score": 0.7,
+          "wall_seconds": 2,
+          "cost_usd": 0.01,
+          "snapshot": "bb",
+          "attempt_id": "bb",
+          "configuration": "codex/model/low",
+          "verifier_version": "fixture-v1",
+          "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  ]
+}

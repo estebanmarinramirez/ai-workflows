@@ -160,3 +160,23 @@ the chooser starts the monitor; it reports when the monitor could not start.
 A selection is still pending until checkpoint, outgoing exit and successor
 acknowledgement complete. The lead chooser lists unfinished tasks rather than
 historical completed workflows.
+
+## Evidence audit and heartbeat suppression (1.7)
+
+`agent-workspaces telemetry audit` reads one consistent SQLite statement snapshot
+and reports its maximum event ID, counts by kind, distinct workspace/task
+identities, receipted attempt identities, task statuses, timestamp-only repeats,
+and observed collector versions. It prints no task IDs, source paths or content.
+Receipts may include corrections; counts alone do not establish verified labels
+or training readiness. The report never enables training.
+
+Task and role snapshots now ignore only their top-level `updated_at` heartbeat
+(and task role `updated_at`) when comparing against the previous snapshot.
+Transition times, evidence times, started/completed times and meaningful state
+changes remain significant. Recorded payloads retain original timestamps.
+A→B→A changes are retained. Historical rows remain append-only. A first scan after
+upgrading can append one observation because the signature algorithm changed.
+Quota timestamps are retained because their freshness affects routing.
+Collector-version observations use a version-specific source to avoid alternating
+versions appearing as upgrades on every scan. Older running collectors may still
+emit their former snapshots until their sessions naturally restart.

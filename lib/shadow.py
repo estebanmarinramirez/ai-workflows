@@ -3,10 +3,10 @@ import hashlib
 import json
 import math
 
-VERSION = 'beta-shadow-v1'
+VERSION = 'beta-shadow-v2'
 DEFAULTS = {'enabled': False, 'prior_alpha': 1, 'prior_beta': 1, 'min_tasks': 3,
             'success_value': 1.0, 'cost_weight': 1.0, 'latency_weight': 0.001,
-            'minimum_success_mean': 0.0}
+            'minimum_success_mean': 0.0, 'uncertainty_weight': 0.0}
 
 
 def policy(manifest):
@@ -16,7 +16,7 @@ def policy(manifest):
     for name in ('prior_alpha', 'prior_beta', 'min_tasks'):
         if isinstance(result[name], bool) or not isinstance(result[name], int) or result[name] < 1:
             raise ValueError(f'shadow.{name} must be a positive integer')
-    for name in ('success_value', 'cost_weight', 'latency_weight', 'minimum_success_mean'):
+    for name in ('success_value', 'cost_weight', 'latency_weight', 'minimum_success_mean', 'uncertainty_weight'):
         value = result[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
             raise ValueError(f'Invalid shadow.{name}')
@@ -97,9 +97,10 @@ def predict(manifest, history, task, actual_configuration, cutoff):
                    (settings['latency_weight'] > 0 and latency is None))
         score = None if missing else (settings['success_value']*end_to_end['mean'] -
                 settings['cost_weight']*(cost or 0) - settings['latency_weight']*(latency or 0))
+        risk_adjusted = None if score is None else score - settings['success_value'] * settings['uncertainty_weight'] * end_to_end['stddev']
         candidates.append({'configuration': config['id'], 'fingerprint': fingerprint(manifest, config),
             'eligible': config.get('shadow_eligible', True), 'end_to_end': end_to_end, 'capability': capability,
-            'mean_cost_usd': cost, 'mean_wall_seconds': latency, 'expected_utility': score,
+            'mean_cost_usd': cost, 'mean_wall_seconds': latency, 'expected_utility': score, 'risk_adjusted_utility': risk_adjusted,
             'training_trials': [r['id'] for r in rows],
             'excluded_capability_outcomes': len(outcomes)-capability['observations']})
         all_training.extend(r['id'] for r in rows)
@@ -118,7 +119,7 @@ def predict(manifest, history, task, actual_configuration, cutoff):
         if not feasible:
             reason = 'success_mean_floor_not_met'
         else:
-            chosen = max(feasible, key=lambda c: (c['expected_utility'], c['configuration']))['configuration']
+            chosen = max(feasible, key=lambda c: (c['risk_adjusted_utility'], c['configuration']))['configuration']
     return {'policy_version': VERSION, 'policy': settings, 'task_family': task['family'],
             'task_instance': task['instance_id'], 'actual_configuration': actual_configuration,
             'recommended_configuration': chosen, 'abstention_reason': reason, 'candidates': candidates,

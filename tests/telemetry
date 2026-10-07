@@ -39,6 +39,38 @@ class Telemetry(unittest.TestCase):
         first=t.collect(); second=t.collect()
         self.assertEqual(first['tasks'],1); self.assertEqual(second['events_added'],0)
         self.assertEqual(self.rows('task')[0]['provenance'],'initial_observation')
+    def test_heartbeat_dedup_preserves_real_changes_and_timestamps(self):
+        self.write(self.task/'state.json', {'id':'task','status':'active','updated_at':'one',
+                   'roles':{'codex':{'state':'active','updated_at':'one'}}})
+        t.collect()
+        self.write(self.task/'state.json', {'id':'task','status':'active','updated_at':'two',
+                   'roles':{'codex':{'state':'active','updated_at':'two'}}})
+        t.collect()
+        self.assertEqual(len(self.rows('task')),1)
+        self.write(self.task/'state.json', {'id':'task','status':'completed','updated_at':'three'})
+        t.collect()
+        rows=self.rows('task');self.assertEqual(len(rows),2)
+        self.assertEqual(rows[-1]['payload']['updated_at'],'three')
+
+    def test_audit_counts_distinct_tasks_without_claiming_labels(self):
+        t.collect()
+        ledger=t.Ledger(self.directory)
+        obj=self.rows('task')[0]['payload']
+        ledger.append('task','legacy',dict(obj,updated_at='one'), 'project/workspace','task',key='legacy1')
+        ledger.append('task','legacy',dict(obj,updated_at='two'), 'project/workspace','task',key='legacy2')
+        ledger.db.commit()
+        result=t.audit(ledger);ledger.close()
+        self.assertEqual(result['distinct_tasks'],1)
+        self.assertEqual(result['timestamp_only_observations']['task'],1)
+        self.assertEqual(result['distinct_receipted_attempts'],0)
+        self.assertFalse(result['automatic_training'])
+
+    def test_audit_handles_persisted_nonstring_status(self):
+        self.write(self.task/'state.json', {'id':'task','status':['invalid']})
+        t.collect();ledger=t.Ledger(self.directory)
+        try:self.assertEqual(t.audit(ledger)['latest_task_statuses'],{'unknown':1})
+        finally:ledger.close()
+
     def test_a_b_a_state_changes_are_all_preserved(self):
         t.collect()
         self.write(self.task/'state.json', {'id':'task','status':'blocked'});t.collect()

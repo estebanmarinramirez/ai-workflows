@@ -112,6 +112,19 @@ expected utility = success_value × posterior mean(end-to-end success)
                  − latency_weight × mean observed end-to-end seconds
 ```
 
+The opt-in `uncertainty_weight` adds a risk penalty:
+
+```text
+risk-adjusted utility = expected utility
+                      − success_value × uncertainty_weight × posterior stddev
+```
+
+The default is zero, preserving existing decisions. A positive weight expresses
+aversion to uncertain success probabilities; it is not a learned coefficient or
+a calibrated credible bound. It does not change the probability used for Brier
+or log-loss evaluation. Cost/latency uncertainty is still unmodelled. Freeze the
+weight before held-out evaluation; do not tune it on held-out results.
+
 Costs include unsuccessful attempts. Weights express user utility units; the
 shipped defaults are explicit experimental preferences, not learned optimal
 weights. Cost and latency are empirical means, not Bayesian distributions in
@@ -122,7 +135,7 @@ The policy abstains if any eligible candidate lacks `min_tasks` distinct
 contributing issues or a required cost/latency measurement. It also abstains if
 no eligible candidate meets `minimum_success_mean`. This floor concerns a
 posterior **mean**, not a credible-bound or risk guarantee. Among remaining
-candidates, maximize expected utility; exact ties break by configuration ID.
+candidates, maximize risk-adjusted utility; exact ties break by configuration ID.
 There is no automatic exploration, within-task value-of-information calculation,
 or stop/review action in this initial policy.
 

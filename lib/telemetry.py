@@ -83,6 +83,54 @@ def quota_view(obj):
                 todayTokensByModel={k: v for k, v in obj.get('todayTokensByModel', {}).items() if type(v) in (int, float)},
                 limits=[pick(v, 'percent resetsAt') for v in obj.get('limits', []) if isinstance(v, dict)])
 
+def semantic_snapshot(kind, payload):
+    """Ignore task/role heartbeat timestamps, preserving evidence/transition times."""
+    if kind not in ('task', 'role'):
+        return payload
+    result = dict(payload)
+    result.pop('updated_at', None)
+    if kind == 'task':
+        result['roles'] = {key: {k: v for k, v in role.items() if k != 'updated_at'}
+                           for key, role in result.get('roles', {}).items()}
+    return result
+
+
+def audit(ledger):
+    """A consistent, aggregate-only evidence inventory; observations are not labels."""
+    counts, versions, latest, previous = Counter(), Counter(), {}, {}
+    duplicates = Counter()
+    tasks, attempts = set(), set()
+    cutoff = 0
+    # A single SELECT holds a consistent SQLite read snapshot throughout iteration.
+    for row in ledger.db.execute('SELECT * FROM events ORDER BY id'):
+        cutoff = row['id']
+        kind = row['kind']; counts[kind] += 1
+        obj = json.loads(row['payload'])
+        if kind in ('task', 'role'):
+            key = (kind, row['source'])
+            value = semantic_snapshot(kind, obj)
+            if key in previous and previous[key] == value:
+                duplicates[kind] += 1
+            previous[key] = value
+        if kind == 'task':
+            key = (row['workspace'], row['task'])
+            tasks.add(key); latest[key] = obj
+        if kind == 'collector':
+            versions[obj.get('version', 'unknown')] += 1
+        if kind.startswith('receipt.'):
+            attempts.add((row['workspace'], row['task'], obj.get('attempt_id')))
+    return {'schema_version': 1, 'evidence_cutoff_event': cutoff, 'counts': dict(counts),
+            'distinct_tasks': len(tasks), 'distinct_receipted_attempts': len(attempts),
+            'timestamp_only_observations': dict(duplicates),
+            'latest_task_statuses': dict(Counter(status if isinstance(status, str) else 'unknown'
+                for status in (v.get('status', 'unknown') for v in latest.values()))),
+            'collector_version_observations': dict(versions),
+            'automatic_training': False,
+            'limitations': ['Task completion is agent-reported, not independent acceptance.',
+                'Receipt counts include corrections and are not independent training samples.',
+                'Account quotas are not per-attempt costs.',
+                'Activity snapshots do not contain replayable discovery trees.']}
+
 class Ledger:
     def __init__(self, directory, timeout=30, readonly=False):
         self.path = directory / 'ledger.sqlite'
@@ -119,7 +167,7 @@ class Ledger:
     def snapshot(self, kind, source, payload, workspace=None, task=None):
         # Compare only to the last state: A -> B -> A is three observations.
         previous = self.db.execute('SELECT signature FROM snapshots WHERE source=?', (source,)).fetchone()
-        signature = digest(payload)
+        signature = digest(semantic_snapshot(kind, payload))
         if previous and previous['signature'] == signature:
             return
         sequence = self.db.execute('SELECT coalesce(max(id),0)+1 FROM events').fetchone()[0]
@@ -152,7 +200,8 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
             'model_policy': {k: pick(x, CHOICE) for k, x in v.get('model_policy', {}).items() if isinstance(x, dict)},
             'routing': pick(v.get('routing', {}), 'mode effort_mode allowed_models review_reserve'),
             **pick(v, 'default_profile default_layout orchestrator_provider orchestrator_model orchestrator_profile')})
-        ledger.snapshot('collector', 'agent-workspaces', {'schema_version': SCHEMA, 'version': (Path(__file__).resolve().parent.parent / 'VERSION').read_text().strip()})
+        version = (Path(__file__).resolve().parent.parent / 'VERSION').read_text().strip()
+        ledger.snapshot('collector', 'agent-workspaces:' + version, {'schema_version': SCHEMA, 'version': version})
         manifests = [Path(workspace) / 'workspace.json'] if workspace else sorted(data.glob('*/*/workspace.json'))
         for manifest in manifests:
             root = manifest.parent
@@ -279,6 +328,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     scan = sub.add_parser('collect'); scan.add_argument('--workspace', type=Path); scan.add_argument('--fast', action='store_true')
     sub.add_parser('status')
+    sub.add_parser('audit')
     export = sub.add_parser('export'); export.add_argument('--after', type=int, default=0)
     record = sub.add_parser('record'); record.add_argument('file', type=Path)
     args = parser.parse_args()
@@ -289,7 +339,7 @@ def main():
         print(json.dumps(result, indent=2))
         return 1 if result.get('errors') else 0
     if args.command != 'record' and not (directory / 'ledger.sqlite').exists():
-        if args.command == 'status': print(json.dumps({'ledger': str(directory / 'ledger.sqlite'), 'initialized': False}))
+        if args.command in ('status', 'audit'): print(json.dumps({'ledger': str(directory / 'ledger.sqlite'), 'initialized': False}))
         return 0
     ledger = Ledger(directory, readonly=args.command != 'record')
     try:
@@ -300,6 +350,8 @@ def main():
                 ledger.db.execute('BEGIN IMMEDIATE')
                 receipt(ledger, read(args.file))
             print('Receipt recorded (idempotent).')
+        elif args.command == 'audit':
+            print(json.dumps(audit(ledger), indent=2))
         elif args.command == 'export':
             for row in ledger.db.execute('SELECT * FROM events WHERE id>? ORDER BY id', (args.after,)):
                 obj = dict(row); obj['payload'] = json.loads(obj['payload']); print(encoded(obj))

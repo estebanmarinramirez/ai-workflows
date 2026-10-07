@@ -52,3 +52,19 @@ The successor reads that note and calls `agents WORKSPACE accept CHANGE_ID` befo
 continuing in the same role worktree and status file. Checkpointed tasks cannot
 advance until the successor acknowledges. Never interpret pending selection as
 ownership, and never let both outgoing and incoming agents work on the role.
+
+
+## Measured Dream-RSI discovery
+
+When assigned a frozen Dream capture dataset, use `agent-workspaces dream status
+DIRECTORY` to inspect recorded outcomes and suggested parents, and `dream attempt
+DIRECTORY WORLD --parent root|ATTEMPT` for an explicitly requested measured discovery
+step. This starts a fresh provider call in an isolated clone and automatically
+retains snapshots, lineage, independent verification and usage receipts. Do not
+substitute an existing interactive session, edit the frozen manifest, remove
+failed attempts, or label activity snapshots as verified outcomes. `dream export`
+checks artifacts and produces replay input; `dream replay` evaluates policies
+without provider calls. Synthetic pilots cannot support production promotion.
+Ordinary sessions continue observational telemetry and do not automatically run
+RSI discovery. Never infer authorization for background provider calls from the
+presence of a dataset or a suggested parent.

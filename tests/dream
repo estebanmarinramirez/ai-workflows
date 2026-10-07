@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+import copy
+import json
+from pathlib import Path
+import subprocess
+import sys
+import unittest
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'lib'))
+import dream
+
+
+def fixture():
+    nodes = []
+    for name, parent, score in [('a','root',.2),('b','root',.4),('aa','a',.8),('bb','b',.7)]:
+        nodes.append(dict(id=name, parent=parent, score=score, wall_seconds=2, cost_usd=.01,
+                          snapshot=name, attempt_id=name, configuration='codex/model/low',
+                          verifier_version='fixture-v1', evidence_sha256='a'*64))
+    return {'schema_version':1, 'data_kind':'synthetic', 'evaluation_protocol':'fixture-v1',
+            'objective':{'quality':1, 'cost_usd':1, 'wall_seconds':.01, 'attempts':.001},
+            'incumbent':'serial', 'policies':[
+                {'id':'serial','strategy':'breadth','workers':1,'rounds':2},
+                {'id':'parallel','strategy':'best_leaf','workers':2,'rounds':2}],
+            'worlds':[{'id':f'w{i}', 'instance_id':f'instance{i}',
+                       'split':'development' if i<3 else 'heldout',
+                       'root_score':0, 'root_snapshot':'root', 'nodes':copy.deepcopy(nodes)} for i in range(6)]}
+
+
+class Dream(unittest.TestCase):
+    def test_synthetic_replay_never_recommends(self):
+        result = dream.optimize(fixture())
+        self.assertIsNone(result['recommendation'])
+        self.assertEqual(result['abstention_reasons'], ['synthetic_data'])
+        self.assertEqual(result['development_winner'], 'parallel')
+        self.assertFalse(result['automatic_promotion'])
+
+    def test_real_supported_improvement_is_shadow_only(self):
+        doc=fixture();doc['data_kind']='real'
+        result=dream.optimize(doc)
+        self.assertEqual(result['recommendation'],'parallel')
+        self.assertFalse(result['automatic_promotion'])
+        self.assertEqual(result['abstention_reasons'],[])
+        doc['policies']=[doc['policies'][0]]
+        self.assertIn('no_development_improvement',dream.optimize(doc)['abstention_reasons'])
+
+    def test_parallel_latency_and_total_cost(self):
+        doc=fixture(); result=dream.replay(doc['worlds'][0],doc['policies'][1],doc['objective'])
+        self.assertEqual(result['trace'][0]['revealed'], ['a'])
+        self.assertEqual(set(result['trace'][1]['revealed']), {'aa','b'})
+        self.assertEqual(result['attempts'],3)
+        self.assertEqual(result['simulated_wall_seconds'],4)
+        self.assertAlmostEqual(result['cost_usd'],.03)
+        self.assertAlmostEqual(result['utility'],.727)
+
+    def test_future_outcomes_do_not_change_first_action(self):
+        doc=fixture(); world=doc['worlds'][0]; policy=doc['policies'][1]
+        before=dream.replay(world,policy,doc['objective'])
+        world['nodes'][3]['score']=1000
+        after=dream.replay(world,policy,doc['objective'])
+        self.assertEqual(before,after)  # bb is never revealed
+
+    def test_heldout_never_selects_winner(self):
+        doc=fixture(); before=dream.optimize(doc)
+        for world in doc['worlds'][3:]:
+            for node in world['nodes']: node['score']=0
+        after=dream.optimize(doc)
+        self.assertEqual(before['development'],after['development'])
+        self.assertEqual(before['development_winner'],after['development_winner'])
+        self.assertNotEqual(before['heldout'],after['heldout'])
+        self.assertIn('no_heldout_improvement',after['abstention_reasons'])
+        self.assertIsNone(after['recommendation'])
+
+    def test_missing_cost_is_not_free(self):
+        doc=fixture();doc['worlds'][0]['nodes'][0]['cost_usd']=None
+        with self.assertRaises(ValueError):dream.optimize(doc)
+        doc['objective']['cost_usd']=0
+        result=dream.optimize(doc)
+        self.assertIsNone(result['development'][0]['runs'][0]['cost_usd'])
+
+    def test_invalid_worlds_and_settings(self):
+        for change in ('cycle','duplicate_instance','fork','nan','bool','negative','hash','attempt'):
+            doc=fixture(); nodes=doc['worlds'][0]['nodes']
+            if change=='cycle':nodes[0]['parent']='aa'
+            if change=='duplicate_instance':doc['worlds'][3]['instance_id']='instance0'
+            if change=='fork':nodes[3]['parent']='a'
+            if change=='nan':nodes[0]['score']=float('nan')
+            if change=='bool':doc['policies'][0]['workers']=True
+            if change=='negative':doc['objective']['attempts']=-1
+            if change=='hash':nodes[0]['evidence_sha256']='bad'
+            if change=='attempt':nodes[1]['attempt_id']='a'
+            with self.subTest(change=change),self.assertRaises(ValueError):dream.optimize(doc)
+
+    def test_exhausted_continuations_abstain(self):
+        doc=fixture();doc['policies']=[dict(doc['policies'][0],rounds=20)]
+        result=dream.optimize(doc)
+        self.assertIn('unsupported_development_replay',result['abstention_reasons'])
+        self.assertIsNone(result['recommendation'])
+
+    def test_exhausting_tree_does_not_hide_unsupported_next_action(self):
+        doc=fixture();world=doc['worlds'][0];world['nodes']=world['nodes'][:1]
+        result=dream.replay(world,doc['policies'][0],doc['objective'])
+        self.assertEqual(result['unsupported_continuations'],1)
+        self.assertEqual(result['rounds'],2)
+
+    def test_non_objects_are_manifest_errors(self):
+        for value in (None,[],1):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'object'):
+                dream.validate(value)
+        for key in ('policies','worlds'):
+            doc=fixture();doc[key]=[None]
+            with self.assertRaisesRegex(ValueError,'object'):dream.validate(doc)
+        doc=fixture();doc['worlds'][0]['nodes']=[None]
+        with self.assertRaisesRegex(ValueError,'object'):dream.validate(doc)
+
+    def test_stop_uses_observed_score(self):
+        doc=fixture(); policy=dict(doc['policies'][1],stop_score=.1)
+        result=dream.replay(doc['worlds'][0],policy,doc['objective'])
+        self.assertEqual(result['attempts'],1)
+
+    def test_cli_example(self):
+        result=subprocess.run([sys.executable,str(ROOT/'lib/dream.py'),'replay',str(ROOT/'examples/dream/replay.json')],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['mode'],'offline_shadow')
+
+
+if __name__ == '__main__':unittest.main()
