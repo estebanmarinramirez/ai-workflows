@@ -5,8 +5,9 @@ import json
 import math
 from pathlib import Path
 import sys
+import subprocess
 
-VERSION = 'dream-replay-v1'
+VERSION = 'dream-replay-v2'
 
 
 def number(value, name, minimum=0):
@@ -27,22 +28,36 @@ def identifier(value, name):
     return value
 
 
+def object_value(value, name):
+    if not isinstance(value, dict):
+        raise ValueError(name + ' must be an object')
+    return value
+
+
+def array_value(value, name):
+    if not isinstance(value, list):
+        raise ValueError(name + ' must be an array')
+    return value
+
+
 def validate(document):
+    object_value(document, 'manifest')
     if document.get('schema_version') != 1 or document.get('data_kind') not in ('real', 'synthetic'):
         raise ValueError('expected schema_version 1 and real/synthetic data_kind')
     identifier(document.get('evaluation_protocol'), 'evaluation_protocol')
-    weights = document['objective']
+    weights = object_value(document['objective'], 'objective')
     if set(weights) != {'quality', 'cost_usd', 'wall_seconds', 'attempts'}:
         raise ValueError('objective requires quality, cost_usd, wall_seconds, attempts weights')
     for name, value in weights.items():
         number(value, name)
     if weights['quality'] == 0:
         raise ValueError('quality weight must be positive')
-    policies = document['policies']
+    policies = array_value(document['policies'], 'policies')
     if not policies:
         raise ValueError('at least one policy required')
     seen = set()
     for policy in policies:
+        object_value(policy, 'policy')
         name = identifier(policy.get('id'), 'policy.id')
         if name in seen:
             raise ValueError('duplicate policy ID')
@@ -57,7 +72,8 @@ def validate(document):
     seen, instances = set(), set()
     if not document['worlds']:
         raise ValueError('at least one discovery world required')
-    for world in document['worlds']:
+    for world in array_value(document['worlds'], 'worlds'):
+        object_value(world, 'world')
         name = identifier(world.get('id'), 'world.id')
         instance = identifier(world.get('instance_id'), 'instance_id')
         if name in seen or instance in instances:
@@ -70,7 +86,8 @@ def validate(document):
         nodes = {'root'}; children = set()
         if not world['nodes']:
             raise ValueError('world requires measured nodes')
-        for node in world['nodes']:
+        for node in array_value(world['nodes'], 'nodes'):
+            object_value(node, 'node')
             name = identifier(node.get('id'), 'node.id')
             parent = node.get('parent')
             if name in nodes or parent not in nodes:
@@ -130,8 +147,6 @@ def replay(world, policy, weights):
             attempts += 1
         wall += max(durations, default=0)
         trace.append({'selected_parents': batch, 'revealed': revealed})
-        if len(observed) == len(world['nodes']) + 1:
-            break
     best = max(n['score'] for n in observed.values())
     utility = weights['quality'] * best - weights['cost_usd'] * (cost or 0) - weights['wall_seconds'] * wall - weights['attempts'] * attempts
     return {'world': world['id'], 'policy': policy['id'], 'best_score': best,
@@ -190,14 +205,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('replay'); run.add_argument('file', type=Path)
+    init = sub.add_parser('init'); init.add_argument('spec', type=Path); init.add_argument('directory', type=Path)
+    attempt_parser = sub.add_parser('attempt'); attempt_parser.add_argument('directory', type=Path)
+    attempt_parser.add_argument('world'); attempt_parser.add_argument('--parent', default='root')
+    for name in ('export', 'ingest', 'status'):
+        command = sub.add_parser(name); command.add_argument('directory', type=Path)
     args = parser.parse_args()
-    print(json.dumps(optimize(json.loads(args.file.read_text())), indent=2, allow_nan=False))
+    if args.command == 'replay':
+        result = optimize(json.loads(args.file.read_text()))
+    else:
+        import dream_capture as capture
+        if args.command == 'init': result = capture.initialize(args.spec, args.directory)
+        elif args.command == 'attempt': result = capture.attempt(args.directory, args.world, args.parent)
+        elif args.command == 'status': result = capture.status(args.directory)
+        else: result = getattr(capture, args.command)(args.directory)
+    print(json.dumps(result, indent=2, allow_nan=False))
+
     return 0
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print('dream: ' + str(error), file=sys.stderr)
         sys.exit(1)

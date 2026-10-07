@@ -38,6 +38,11 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 ```text
 agent-workspaces doctor
 agent-workspaces telemetry audit
+agent-workspaces dream init CAPTURE_SPEC DIRECTORY
+agent-workspaces dream attempt DIRECTORY WORLD [--parent root|ATTEMPT]
+agent-workspaces dream status DIRECTORY
+agent-workspaces dream export DIRECTORY
+agent-workspaces dream ingest DIRECTORY
 agent-workspaces dream replay DISCOVERY_MANIFEST
 agent-workspaces benchmark demo DIRECTORY
 agent-workspaces benchmark init MANIFEST EXPERIMENT
@@ -314,6 +319,7 @@ fresh non-interactive sessions and refuse an already occupied managed role.
 ## Offline discovery replay
 
 The [Dream-RSI adaptation](docs/dream-replay.md) evaluates exploration policies on
-recorded discovery trees without provider calls. It reports unsupported actions,
+recorded discovery trees without provider calls. Its capture workflow records
+new measured attempts in isolated Git checkouts with automatic lineage and receipts. It reports unsupported actions,
 keeps held-out instances separate, and never changes live routing automatically.
 Use `agent-workspaces telemetry audit` to check what evidence exists first.

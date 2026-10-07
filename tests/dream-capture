@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Real Git snapshots and verifier subprocesses; mocked providers, no paid calls."""
+import copy
+import json
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'lib'))
+import dream
+import dream_capture as c
+import provider_adapter as a
+
+
+class Capture(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.base=Path(self.temp.name);self.source=self.base/'source';self.source.mkdir()
+        c.git(self.source,'init');(self.source/'answer.txt').write_text('wrong\n')
+        c.git(self.source,'add','.');c.git(self.source,'commit','-m','baseline')
+        self.before=c.git(self.source,'rev-parse','HEAD')
+        self.verifier=self.base/'verify.py'
+        self.verifier.write_text('import sys,json,pathlib\nr=json.load(open(sys.argv[1]))\np=pathlib.Path(r["worktree"])/"answer.txt"\nsys.exit(0 if p.read_text().strip()=="correct" else 1)\n')
+        (self.base/'prompt.txt').write_text('repair answer.txt')
+        self.spec=runpy.run_path(str(ROOT/'tests/dream'))['fixture']()
+        self.spec.update(agent={'provider':'codex','model':'test-model','effort':'low'},timeout_seconds=5,max_attempts_per_world=4)
+        self.spec['worlds']=[dict(id='w1',instance_id='issue1',split='development',repository='source',prompt_file='prompt.txt',verifier='verify.py')]
+        self.file=self.base/'spec.json';self.file.write_text(json.dumps(self.spec));self.data=self.base/'capture'
+        self.env=patch.dict(os.environ,XDG_DATA_HOME=str(self.base/'data'),XDG_STATE_HOME=str(self.base/'state'),XDG_CONFIG_HOME=str(self.base/'config'))
+        self.env.start();self.addCleanup(self.env.stop)
+
+    def init(self):
+        self.file.write_text(json.dumps(self.spec));return c.initialize(self.file,self.data)
+
+    def provider(self,settings,cwd,directory,prompt,timeout):
+        directory.mkdir();(cwd/'answer.txt').write_text('correct\n');(cwd/'new.txt').write_text('retained')
+        row=dict(settings,status='completed',model_version=None,cli_version='fixture-v1',input_tokens=12,output_tokens=2,cost_usd=.02)
+        a.write(directory/'receipt.json',row)
+        return row
+
+    def attempt(self,parent='root',provider=None):
+        with patch.object(a,'run_role',side_effect=provider or self.provider):
+            return c.attempt(self.data,'w1',parent)
+
+    def test_capture_export_replay_and_source_isolation(self):
+        self.init();result=self.attempt();self.assertTrue(result['accepted'])
+        exported=c.export(self.data);world=exported['worlds'][0];node=world['nodes'][0]
+        self.assertEqual(world['root_score'],0);self.assertEqual(node['score'],1)
+        self.assertEqual(node['parent_snapshot'],world['root_snapshot'])
+        self.assertEqual(node['cost_usd'],.02);self.assertIsNone(node['observed_model_version'])
+        self.assertEqual((self.source/'answer.txt').read_text(),'wrong\n')
+        self.assertEqual(c.git(self.source,'rev-parse','HEAD'),self.before)
+        self.assertEqual(c.git(self.source,'status','--porcelain'),'')
+        self.assertEqual(self.data.stat().st_mode & 0o777,0o700)
+        self.assertEqual(dream.optimize(exported)['abstention_reasons'][0],'synthetic_data')
+        self.assertFalse((self.base/'state').exists())
+
+    def test_refinement_starts_at_exact_parent_and_root_branch_resets(self):
+        self.init();first=self.attempt()['attempt']
+        seen=[]
+        def inspect(*args):
+            seen.append((args[1]/'answer.txt').read_text());return self.provider(*args)
+        self.attempt(first,inspect);self.attempt('root',inspect)
+        self.assertEqual(seen,['correct\n','wrong\n'])
+        with self.assertRaisesRegex(ValueError,'already has'):self.attempt(first)
+
+    def test_quality_and_operational_failures_retained_with_cost(self):
+        self.init()
+        def failed(settings,cwd,directory,prompt,timeout):
+            directory.mkdir();row=dict(settings,status='timeout',cost_usd=.03)
+            a.write(directory/'receipt.json',row);return row
+        result=self.attempt(provider=failed);self.assertEqual(result['failure_category'],'timeout')
+        def wrong(settings,cwd,directory,prompt,timeout):
+            directory.mkdir();row=dict(settings,status='completed',cost_usd=.01)
+            a.write(directory/'receipt.json',row);return row
+        self.assertEqual(self.attempt(provider=wrong)['failure_category'],'quality')
+        nodes=c.export(self.data)['worlds'][0]['nodes']
+        self.assertEqual([n['score'] for n in nodes],[0,0])
+        self.assertEqual([n['cost_usd'] for n in nodes],[.03,.01])
+
+    def test_crash_record_remains_visible(self):
+        self.init()
+        def crash(*args): raise RuntimeError('simulated crash')
+        with self.assertRaises(RuntimeError):self.attempt(provider=crash)
+        with self.assertRaisesRegex(ValueError,'incomplete attempt'):c.export(self.data)
+        with self.assertRaisesRegex(ValueError,'incomplete attempt'):self.attempt()
+        self.assertEqual(c.status(self.data)['worlds'][0]['incomplete_attempts'],['000001'])
+
+    def test_altered_input_receipt_and_snapshot_are_rejected(self):
+        self.init();self.attempt()
+        receipt=self.data/'worlds/w1/attempts/000001/provider/receipt.json'
+        text=receipt.read_text();receipt.write_text('{}')
+        with self.assertRaisesRegex(ValueError,'artifact changed'):c.export(self.data)
+        receipt.write_text(text)
+        prompt=self.data/'worlds/w1/prompt.txt';prompt.write_text('changed')
+        with self.assertRaisesRegex(ValueError,'frozen input changed'):self.attempt()
+
+    def test_budget_invalid_parent_and_dirty_sources_prevent_calls(self):
+        self.spec['max_attempts_per_world']=1;self.init();self.attempt()
+        with self.assertRaisesRegex(ValueError,'budget'):self.attempt()
+        self.data=self.base/'second';(self.source/'answer.txt').write_text('dirty')
+        with self.assertRaisesRegex(ValueError,'clean'):self.init()
+
+    def test_real_receipts_ingest_idempotently(self):
+        self.spec['data_kind']='real';self.init();self.attempt()
+        self.assertEqual(c.ingest(self.data)['recorded'],0)
+        ledger=c.telemetry.Ledger(self.base/'state/agent-workspaces/telemetry',readonly=True)
+        try:
+            kinds=dict(ledger.db.execute('SELECT kind,count(*) FROM events GROUP BY kind'))
+            self.assertEqual(kinds,{'receipt.usage':1,'receipt.verification':1})
+        finally:ledger.close()
+
+    def test_full_cli_adapter_capture_to_replay(self):
+        self.spec['objective']['cost_usd']=0
+        self.init()
+        executable=self.base/'codex'
+        events='{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'
+        executable.write_text('#!/usr/bin/env python3\nimport pathlib,sys\nif "--version" in sys.argv: print("fixture-cli-v1")\nelse:\n sys.stdin.read()\n pathlib.Path("answer.txt").write_text("correct\\n")\n print('+repr(events)+')\n')
+        executable.chmod(0o755)
+        with patch.dict(os.environ,PATH=str(self.base)+os.pathsep+os.environ['PATH']):
+            result=subprocess.run([sys.executable,str(ROOT/'lib/dream.py'),'attempt',str(self.data),'w1'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)['accepted'])
+        exported=c.export(self.data)
+        node=exported['worlds'][0]['nodes'][0]
+        self.assertIsNone(node['cost_usd'])
+        self.assertEqual(node['cli_version'],'fixture-cli-v1')
+        self.assertIsNone(dream.optimize(exported)['recommendation'])
+
+    def test_verifier_infrastructure_is_not_quality_rejection(self):
+        self.verifier.write_text('import sys,json\nr=json.load(open(sys.argv[1]))\nsys.exit(1 if r["attempt_id"]=="root" else 2)\n')
+        self.init();result=self.attempt()
+        self.assertEqual(result['failure_category'],'infrastructure')
+        rows=c.read(self.data/'worlds/w1/attempts/000001/receipts.json')
+        self.assertEqual([r['kind'] for r in rows],['usage','failure'])
+        self.assertEqual(c.export(self.data)['worlds'][0]['nodes'][0]['score'],0)
+
+    def test_baseline_infrastructure_error_and_manifest_changes_block(self):
+        self.verifier.write_text('import sys\nsys.exit(2)\n')
+        with self.assertRaisesRegex(ValueError,'baseline verifier'):self.init()
+        self.assertFalse((self.data/'capture.json').exists())
+
+    def test_world_lock_rejects_concurrent_attempt(self):
+        self.init()
+        with c.locked(self.data/'worlds/w1'),self.assertRaisesRegex(ValueError,'another capture'):
+            self.attempt()
+
+    def test_frozen_engine_cli_exports(self):
+        self.init();self.attempt()
+        result=subprocess.run([sys.executable,str(self.data/'engine/dream.py'),'export',str(self.data)],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['worlds'][0]['nodes'][0]['score'],1)
+
+
+if __name__=='__main__':unittest.main()

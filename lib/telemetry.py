@@ -122,7 +122,8 @@ def audit(ledger):
     return {'schema_version': 1, 'evidence_cutoff_event': cutoff, 'counts': dict(counts),
             'distinct_tasks': len(tasks), 'distinct_receipted_attempts': len(attempts),
             'timestamp_only_observations': dict(duplicates),
-            'latest_task_statuses': dict(Counter(v.get('status', 'unknown') for v in latest.values())),
+            'latest_task_statuses': dict(Counter(status if isinstance(status, str) else 'unknown'
+                for status in (v.get('status', 'unknown') for v in latest.values()))),
             'collector_version_observations': dict(versions),
             'automatic_training': False,
             'limitations': ['Task completion is agent-reported, not independent acceptance.',

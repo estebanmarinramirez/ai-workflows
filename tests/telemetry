@@ -65,6 +65,12 @@ class Telemetry(unittest.TestCase):
         self.assertEqual(result['distinct_receipted_attempts'],0)
         self.assertFalse(result['automatic_training'])
 
+    def test_audit_handles_persisted_nonstring_status(self):
+        self.write(self.task/'state.json', {'id':'task','status':['invalid']})
+        t.collect();ledger=t.Ledger(self.directory)
+        try:self.assertEqual(t.audit(ledger)['latest_task_statuses'],{'unknown':1})
+        finally:ledger.close()
+
     def test_a_b_a_state_changes_are_all_preserved(self):
         t.collect()
         self.write(self.task/'state.json', {'id':'task','status':'blocked'});t.collect()

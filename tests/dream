@@ -97,6 +97,22 @@ class Dream(unittest.TestCase):
         self.assertIn('unsupported_development_replay',result['abstention_reasons'])
         self.assertIsNone(result['recommendation'])
 
+    def test_exhausting_tree_does_not_hide_unsupported_next_action(self):
+        doc=fixture();world=doc['worlds'][0];world['nodes']=world['nodes'][:1]
+        result=dream.replay(world,doc['policies'][0],doc['objective'])
+        self.assertEqual(result['unsupported_continuations'],1)
+        self.assertEqual(result['rounds'],2)
+
+    def test_non_objects_are_manifest_errors(self):
+        for value in (None,[],1):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'object'):
+                dream.validate(value)
+        for key in ('policies','worlds'):
+            doc=fixture();doc[key]=[None]
+            with self.assertRaisesRegex(ValueError,'object'):dream.validate(doc)
+        doc=fixture();doc['worlds'][0]['nodes']=[None]
+        with self.assertRaisesRegex(ValueError,'object'):dream.validate(doc)
+
     def test_stop_uses_observed_score(self):
         doc=fixture(); policy=dict(doc['policies'][1],stop_score=.1)
         result=dream.replay(doc['worlds'][0],policy,doc['objective'])
