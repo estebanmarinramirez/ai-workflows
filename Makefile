@@ -10,6 +10,7 @@ install-macos:
 	./packaging/install-macos
 
 test:
+	python3 tests/dream
 	python3 tests/provider-slots
 	python3 tests/monitor-lock
 	python3 tests/provider-adapters

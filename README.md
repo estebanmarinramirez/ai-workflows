@@ -37,6 +37,8 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 
 ```text
 agent-workspaces doctor
+agent-workspaces telemetry audit
+agent-workspaces dream replay DISCOVERY_MANIFEST
 agent-workspaces benchmark demo DIRECTORY
 agent-workspaces benchmark init MANIFEST EXPERIMENT
 agent-workspaces benchmark run EXPERIMENT [--all] [--split development|heldout]
@@ -308,3 +310,10 @@ This observational data does not automatically train the Bayesian shadow policy.
 Measured [provider attempts](docs/provider-adapters.md) produce per-task usage
 and independent verifier receipts with `agent-workspaces attempts run`. They use
 fresh non-interactive sessions and refuse an already occupied managed role.
+
+## Offline discovery replay
+
+The [Dream-RSI adaptation](docs/dream-replay.md) evaluates exploration policies on
+recorded discovery trees without provider calls. It reports unsupported actions,
+keeps held-out instances separate, and never changes live routing automatically.
+Use `agent-workspaces telemetry audit` to check what evidence exists first.
