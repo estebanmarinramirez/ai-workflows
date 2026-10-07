@@ -70,6 +70,21 @@ class Capture(unittest.TestCase):
         self.assertEqual(seen,['correct\n','wrong\n'])
         with self.assertRaisesRegex(ValueError,'already has'):self.attempt(first)
 
+    def test_prompt_includes_only_selected_ancestors(self):
+        self.init()
+        def writer(settings,cwd,directory,prompt,timeout):
+            row=self.provider(settings,cwd,directory,prompt,timeout)
+            (directory/'final.txt').write_text('ancestor-only-marker')
+            return row
+        first=self.attempt(provider=writer)['attempt']
+        seen=[]
+        def observe(settings,cwd,directory,prompt,timeout):
+            seen.append(prompt);return self.provider(settings,cwd,directory,prompt,timeout)
+        self.attempt(first,observe);self.attempt('root',observe)
+        self.assertIn('ancestor-only-marker',seen[0])
+        self.assertNotIn('ancestor-only-marker',seen[1])
+        self.assertTrue((self.data/'worlds/w1/attempts/000002/prompt.txt').is_file())
+
     def test_quality_and_operational_failures_retained_with_cost(self):
         self.init()
         def failed(settings,cwd,directory,prompt,timeout):

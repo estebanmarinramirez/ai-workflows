@@ -122,7 +122,9 @@ agent-workspaces dream export /tmp/dream-capture > /tmp/dream-replay.json
 agent-workspaces dream replay /tmp/dream-replay.json
 ```
 
-Only `dream attempt` invokes a model and consumes provider quota. `init` runs the
+Only `dream attempt` invokes a model and consumes provider quota. Its successful
+CLI exit means the attempt was recorded; inspect `accepted` and `failure_category`
+to determine its result. `init` runs the
 user-supplied independent verifier on the baseline. `status` suggests parents
 using the frozen incumbent and already observed scores. A suggested parent is
 not a launch request. The pilot stays synthetic even though its provider calls
@@ -157,7 +159,10 @@ same-user processes are not an adversarial security boundary.
   ignored files are not copied, submodules are rejected, and dependencies must
   already be available to the verifier. New non-ignored files, tracked changes,
   modes, symlinks and deletions are retained in result Git snapshots.
-- Each attempt clones its recorded parent. Root branches reset to the baseline;
+- Each attempt clones its recorded parent and receives only baseline and selected
+  ancestor diagnostics/output as explicitly untrusted context (last 4,096 characters
+  per artifact); the exact sent prompt is retained. Sibling and future outcomes
+  are excluded. Root branches reset to the baseline;
   a non-root parent can have only one continuation. Existing workspace sessions,
   provider assignments and source branches are never resumed or edited.
 - A nonblocking world lock prevents two collectors from racing on its lineage.
