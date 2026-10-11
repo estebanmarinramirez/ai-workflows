@@ -25,7 +25,11 @@ until explicitly enabled. All other limits are available as `budget` keys:
 
 Account-pool aliases use `routing.account_pools`. Fresh authoritative quota is
 required when enabled; missing, stale or incomplete observations defer new work.
-Reserves are admission thresholds, not guaranteed balances after a long turn.
+When enabled on Omarchy, the existing two-minute usage timer also refreshes native
+Codex/Claude account limits, so admission does not depend on opening the desktop
+panel. These are quota queries, not model turns. Failed refreshes never authorize
+spending from guessed capacity. Reserves are admission thresholds, not guaranteed
+balances after a long turn.
 
 The gate covers managed fresh/resume/recovery launches, handover launches,
 explicit `attempts run`, automated orchestrator wakeups, and new Dream capture

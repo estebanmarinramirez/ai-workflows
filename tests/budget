@@ -110,6 +110,20 @@ class Budget(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'concurrency'):
                 with b.admission(self.config,'claude','managed'):pass
 
+    def test_usage_timer_refreshes_native_limits_only_when_enabled(self):
+        binaries=self.base/'bin';binaries.mkdir()
+        native=binaries/'omarchy';native.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$AW_TEST_NATIVE_LOG"\n');native.chmod(0o755)
+        collector=binaries/'fixture';collector.write_text('#!/usr/bin/env python3\nprint('+repr(json.dumps({'schemaVersion':1,'id':'fixture','name':'Fixture','ready':True,'limits':[],'updatedAt':'2026-10-11T00:00:00Z'}))+')\n');collector.chmod(0o755)
+        logfile=self.base/'native.log'
+        env={**os.environ,'PATH':str(binaries)+os.pathsep+os.environ['PATH'],'AW_TEST_NATIVE_LOG':str(logfile),
+             'AW_USAGE_LIB':str(ROOT/'lib/usage.sh'),'AW_USAGE_COLLECTORS':'fixture='+str(collector)}
+        result=subprocess.run([str(ROOT/'compat/bin/agent-workspaces-usage-update')],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(logfile.read_text().strip(),'agent usage-update --limits-only codex claude')
+        logfile.unlink();self.config['budget']['enabled']=False;self.save()
+        result=subprocess.run([str(ROOT/'compat/bin/agent-workspaces-usage-update')],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(logfile.exists())
+
     def test_invalid_limits_rejected(self):
         for key,value in [('external_reserve_fraction',float('nan')),('experiment_attempts_24h',True),('experiment_reserve_fraction',.1)]:
             config=copy.deepcopy(self.config);config['budget'][key]=value

@@ -25,6 +25,15 @@ source "$usage_lib"
 usage_dir="$(aw_usage_state_root)/usage"
 mkdir -p "$usage_dir"
 status=0
+# Budget admission must not depend on the desktop panel being open. Native
+# collectors query account limits only here; they do not generate model turns.
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces/config.json"
+if jq -e '.budget.enabled == true' "$config_file" >/dev/null 2>&1 && command -v omarchy >/dev/null 2>&1; then
+  if ! omarchy agent usage-update --limits-only codex claude; then
+    aw_usage_log ERROR quota 'native quota refresh failed; budget admission stays conservative'
+    status=1
+  fi
+fi
 collectors=${AW_USAGE_COLLECTORS:-grok=$HOME/.local/bin/omarchy-agent-usage-grok:agent-workspaces=$HOME/.local/bin/omarchy-agent-usage-workspaces}
 IFS=: read -r -a entries <<<"$collectors"
 for entry in "${entries[@]}"; do
