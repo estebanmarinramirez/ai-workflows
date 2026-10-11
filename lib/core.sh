@@ -2,7 +2,7 @@
 
 set -o pipefail
 
-AW_VERSION=1.8.3
+AW_VERSION=1.8.4
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
@@ -280,13 +280,16 @@ aw_orchestrator_prompt_idle() {
   content=${content//$'\u00a0'/ }
   # Providers can keep an empty composer visible during an active turn.
   if tail -8 <<<"$content" | grep -qi 'esc to interrupt'; then return 1; fi
+  if [[ $provider == grok ]]; then
+    content=$(sed -E 's/^[[:space:]]*│[[:space:]]?/ /; s/[[:space:]]*│[[:space:]]*$//' <<<"$content")
+  fi
   # An earlier empty composer must never override the user's current draft.
   case "$provider" in
     codex) content=$(awk '/^[[:space:]]*›/ {last=$0} END {print last}' <<<"$content") ;;
     claude|grok) content=$(awk '/^[[:space:]]*❯/ {last=$0} END {print last}' <<<"$content") ;;
   esac
   case "$provider" in
-    codex) grep -Eq '^[[:space:]]*›[[:space:]]+Ask Codex to do anything[[:space:]]*$' <<<"$content" ;;
+    codex) grep -Eq '^[[:space:]]*›([[:space:]]+Ask Codex to do anything)?[[:space:]]*$' <<<"$content" ;;
     claude|grok) grep -Eq '^[[:space:]]*❯[[:space:]]*$' <<<"$content" ;;
     *) return 1 ;;
   esac
