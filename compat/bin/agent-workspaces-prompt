@@ -164,7 +164,7 @@ while IFS= read -r active_state; do
   [[ -n $existing_seam ]] || continue
   # A seam is a write lease, not a permanent reservation. Once agents stop
   # executing, their reports remain auditable without blocking new work.
-  [[ $existing_status == active ]] || continue
+  [[ $existing_status == active || $existing_status == awaiting_configuration || $existing_status == dispatching ]] || continue
   [[ ${AW_PARENT_TASK_ID:-} == "$existing_id" ]] && continue
   if [[ $seam == general || $seam == shared || $existing_seam == general || $existing_seam == shared || $seam == "$existing_seam" ]]; then
     notify-send 'Agent Dispatcher' "Ownership conflict: '$seam' overlaps active task $existing_id ($existing_seam)."
@@ -275,64 +275,12 @@ jq -n \
   --argjson roles "$roles_json" \
   '{schema_version: 2, id: $id, workspace_id: $workspace_id, repository: $repository, set: $set,
     objective: $objective, seam: $seam, allowed_paths: $allowed_paths, stage: $stage, template_id: $template_id, template_version: $template_version,
-    profile: $profile, status: "active", parent_id: $parent_id, issue: $issue, pr: {}, lead: $lead,
+    profile: $profile, status: "awaiting_configuration", parent_id: $parent_id, issue: $issue, pr: {}, lead: $lead,
     delivery: {mode:"quota-aware",continue_while_capacity_remains:true,repair_round:$repair_round}, routing:{difficulty:$difficulty},
     created_at: $created_at, updated_at: $created_at, roles: $roles,
     gates: {triage_approved: false, execution_approved: false, integration_approved: false, pr_prepared: false, pr_approved: false},
-    transitions: [{from: null, to: "active", at: $created_at, actor: "dispatcher"}]}' >"$task_root/state.json"
+    transitions: [{from: null, to: "awaiting_configuration", at: $created_at, actor: "dispatcher"}]}' >"$task_root/state.json"
 
-if [[ -n ${AW_PARENT_TASK_ID:-} ]]; then
-  parent_state="$(dirname "$task_root")/$AW_PARENT_TASK_ID/state.json"
-  if [[ -f $parent_state ]]; then
-    now=$(date --iso-8601=seconds)
-    temporary=$(mktemp "$(dirname "$parent_state")/.state.json.XXXXXX")
-    if [[ $stage == execute ]]; then
-      jq --arg child "$task_id" --arg at "$now" \
-        '.gates.triage_approved=true | .status="completed" | .child_id=$child | .updated_at=$at |
-         .transitions += [{from:"awaiting_triage",to:"completed",at:$at,actor:"user:approved-execution"}]' \
-        "$parent_state" >"$temporary"
-    else
-      jq --arg child "$task_id" --arg at "$now" \
-        '.gates.execution_approved=true | .status="completed" | .child_id=$child | .updated_at=$at |
-         .transitions += [{from:"awaiting_integration",to:"completed",at:$at,actor:"user:requested-follow-up"}]' \
-        "$parent_state" >"$temporary"
-    fi
-    mv "$temporary" "$parent_state"
-  fi
-fi
-
-target_names=()
-for role in "${active_roles[@]}"; do
-  if [[ $(jq -r '.state' "$task_root/$role.status.json") == deferred ]]; then
-    continue
-  fi
-  case "${role_providers[$role]}" in
-    claude) agent_instructions="$task_root/instructions/CLAUDE.md" ;;
-    codex) agent_instructions="$task_root/instructions/AGENTS.md" ;;
-    grok) agent_instructions="$task_root/instructions/GROK.md" ;;
-    *) agent_instructions="$task_root/PROTOCOL.md" ;;
-  esac
-  instruction="Read $task_root/PROTOCOL.md, $agent_instructions, and $task_root/task.md, then follow your ${role^} assignment and the $template_id template. Work only in ${role_paths[$role]}. Record machine state with: agent-workspaces status --task '$task_root' --role '$role' --state in_progress --summary 'started'. Add command evidence with --command and --exit-code; finish with completed or blocked. Keep $task_root/$role.status.md as the detailed human report. Do not modify shared task files or any other agent's status."
-  buffer="aw-prompt-$$-$role"
-  tmux set-buffer -b "$buffer" -- "$instruction"
-  tmux paste-buffer -b "$buffer" -t "${role_panes[$role]}"
-  # Full-screen TUIs need one render cycle to finish bracketed-paste handling
-  # before Enter is interpreted as submit. Codex can occasionally consume the
-  # first Enter only as "finish paste", leaving a complete dispatch waiting in
-  # its composer. A delayed second Enter is harmless after submission and
-  # removes that unattended-workflow stall.
-  sleep 0.35
-  tmux send-keys -t "${role_panes[$role]}" Enter
-  if [[ $role == codex ]]; then
-    sleep 0.65
-    tmux send-keys -t "${role_panes[$role]}" Enter
-  fi
-  tmux delete-buffer -b "$buffer"
-  target_names+=("${role^}")
-done
-
-joined=$(IFS=', '; printf '%s' "${target_names[*]}")
-agent-workspaces refresh "$task_root" >/dev/null
 workspace_manifest="$workspace_root/workspace.json"
 if [[ ! -f $workspace_manifest ]]; then
   configured_providers=$(jq -c '.providers' "$HOME/.config/agent-workspaces/config.json")
@@ -340,7 +288,9 @@ if [[ ! -f $workspace_manifest ]]; then
     --argjson providers "$configured_providers" \
     '{schema_version:2,workspace_id:$id,repository:$repository,set:$set,profile:$profile,layout:"adaptive-grid",providers:$providers,created_at:$at,updated_at:$at}' >"$workspace_manifest"
 fi
+agent-workspaces dispatch-ready "$task_root" || true
+joined='queued or dispatched according to configuration readiness'
 source "$HOME/.local/share/agent-workspaces-app/$(cat "$HOME/.local/share/agent-workspaces-app/current-version")/lib/core.sh" 2>/dev/null || true
-if declare -F aw_audit >/dev/null; then aw_audit "$workspace_root" task.dispatched "$(jq -cn --arg id "$task_id" --arg template "$template_id" --arg profile "$profile" '{task_id:$id,template:$template,profile:$profile}')" user; fi
-notify-send 'Coordinated task dispatched' "$joined · $task_id · ${workspace_labels[$workspace_id]}"
+if declare -F aw_audit >/dev/null; then aw_audit "$workspace_root" task.queued "$(jq -cn --arg id "$task_id" --arg template "$template_id" --arg profile "$profile" '{task_id:$id,template:$template,profile:$profile}')" user; fi
+notify-send 'Coordinated task prepared' "$joined · $task_id · ${workspace_labels[$workspace_id]}"
 printf '%s\n' "$task_root"

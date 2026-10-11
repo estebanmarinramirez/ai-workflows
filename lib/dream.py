@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import subprocess
 
-VERSION = 'dream-replay-v2'
+VERSION = 'dream-replay-v3'
 
 
 def number(value, name, minimum=0):
@@ -121,7 +121,15 @@ def choose(observed, blocked, policy):
         eligible.sort(key=lambda key: (key != 'root', observed[key]['depth'], key))
     else:
         eligible.sort(key=lambda key: (-observed[key]['score'], key == 'root', key))
-    return eligible[:policy['workers']]
+    # Independent root launches can occupy multiple workers. A refinement
+    # leaf can be used only once per batch; choices see no unseen topology.
+    selected=[]
+    for key in eligible:
+        if key=='root':
+            selected.extend([key]*(policy['workers']-len(selected)))
+        else:selected.append(key)
+        if len(selected)>=policy['workers']:break
+    return selected
 
 
 def replay(world, policy, weights):
@@ -205,13 +213,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('replay'); run.add_argument('file', type=Path)
+    comparison=sub.add_parser('compare');comparison.add_argument('file',type=Path)
     init = sub.add_parser('init'); init.add_argument('spec', type=Path); init.add_argument('directory', type=Path)
     attempt_parser = sub.add_parser('attempt'); attempt_parser.add_argument('directory', type=Path)
     attempt_parser.add_argument('world'); attempt_parser.add_argument('--parent', default='root')
     for name in ('export', 'ingest', 'status'):
         command = sub.add_parser(name); command.add_argument('directory', type=Path)
     args = parser.parse_args()
-    if args.command == 'replay':
+    if args.command=='compare':
+        from dream_compare import compare
+        result=compare(args.file)
+    elif args.command == 'replay':
         result = optimize(json.loads(args.file.read_text()))
     else:
         import dream_capture as capture

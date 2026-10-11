@@ -130,6 +130,20 @@ class Routing(unittest.TestCase):
         with patch.object(assignments.Assignments, 'sessions', session), patch.object(assignments, 'run', return_value='saved'):
             return self.router().reconcile()
 
+    def test_new_task_waits_for_configuration_acknowledgement(self):
+        self.config['routing']['effort_mode']='balanced';self.save_config()
+        self.state['status']='awaiting_configuration';self.state['routing']['difficulty']='standard';self.save_task()
+        cheap=dict(provider='codex',model='gpt-6-luna',effort='low',source='routing')
+        atomic(self.root/'.coordination/agents.json',{'active':{'codex':cheap},'requests':{}})
+        with patch.object(assignments.Assignments,'sessions',return_value=('s-codex','codex')),patch.object(assignments,'run',return_value='saved'):
+            router=self.router();self.assertTrue(router.readiness(self.task,['codex']))
+            state=router.store.load();request=next(r for r in state['requests'].values() if r['slot']=='codex')
+            self.assertEqual(request['target']['model'],'gpt-6.1-sol')
+            self.assertEqual(request['target']['effort'],'medium')
+            request['phase']='active';request['accepted_at']=self.now.isoformat()
+            state['active']['codex']=dict(request['target'],source='routing');router.store.save(state)
+            self.assertEqual(router.readiness(self.task,['codex']),[])
+
     def test_simple_and_complex_profiles_and_quality_floor(self):
         self.assertEqual(self.decision()['target'], {'provider':'codex','model':'gpt-6-luna','effort':'medium'})
         self.state['routing']['difficulty']='complex'; self.save_task()

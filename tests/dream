@@ -46,19 +46,20 @@ class Dream(unittest.TestCase):
 
     def test_parallel_latency_and_total_cost(self):
         doc=fixture(); result=dream.replay(doc['worlds'][0],doc['policies'][1],doc['objective'])
-        self.assertEqual(result['trace'][0]['revealed'], ['a'])
-        self.assertEqual(set(result['trace'][1]['revealed']), {'aa','b'})
-        self.assertEqual(result['attempts'],3)
+        self.assertEqual(result['trace'][0]['revealed'], ['a','b'])
+        self.assertEqual(set(result['trace'][1]['revealed']), {'aa','bb'})
+        self.assertEqual(result['attempts'],4)
         self.assertEqual(result['simulated_wall_seconds'],4)
-        self.assertAlmostEqual(result['cost_usd'],.03)
-        self.assertAlmostEqual(result['utility'],.727)
+        self.assertAlmostEqual(result['cost_usd'],.04)
+        self.assertAlmostEqual(result['utility'],.716)
 
     def test_future_outcomes_do_not_change_first_action(self):
         doc=fixture(); world=doc['worlds'][0]; policy=doc['policies'][1]
         before=dream.replay(world,policy,doc['objective'])
         world['nodes'][3]['score']=1000
         after=dream.replay(world,policy,doc['objective'])
-        self.assertEqual(before,after)  # bb is never revealed
+        self.assertEqual(before['trace'][0],after['trace'][0])
+        self.assertEqual(before['trace'][1]['selected_parents'],after['trace'][1]['selected_parents'])
 
     def test_heldout_never_selects_winner(self):
         doc=fixture(); before=dream.optimize(doc)
@@ -116,7 +117,18 @@ class Dream(unittest.TestCase):
     def test_stop_uses_observed_score(self):
         doc=fixture(); policy=dict(doc['policies'][1],stop_score=.1)
         result=dream.replay(doc['worlds'][0],policy,doc['objective'])
-        self.assertEqual(result['attempts'],1)
+        self.assertEqual(result['attempts'],2)
+
+    def test_four_workers_open_four_independent_roots_in_one_round(self):
+        doc=fixture();world=doc['worlds'][0]
+        world['nodes']=[dict(world['nodes'][0],id=str(i),attempt_id=str(i),parent='root',wall_seconds=i+1) for i in range(4)]
+        result=dream.replay(world,dict(doc['policies'][0],workers=4,rounds=1),doc['objective'])
+        self.assertEqual(result['attempts'],4);self.assertEqual(result['simulated_wall_seconds'],4)
+        self.assertEqual(result['unsupported_continuations'],0)
+        self.assertAlmostEqual(result['cost_usd'],.04)
+        world['nodes']=world['nodes'][:1]
+        result=dream.replay(world,dict(doc['policies'][0],workers=4,rounds=1),doc['objective'])
+        self.assertEqual(result['attempts'],1);self.assertEqual(result['unsupported_continuations'],3)
 
     def test_cli_example(self):
         result=subprocess.run([sys.executable,str(ROOT/'lib/dream.py'),'replay',str(ROOT/'examples/dream/replay.json')],capture_output=True,text=True)

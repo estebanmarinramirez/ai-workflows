@@ -196,6 +196,15 @@ def grant(config,workspace,provider,model,effort,minutes):
 
 def target(config,provider,difficulty,pressure=False,workspace=None,lead=False,now=None):
     model,effort=PROFILES[provider][difficulty]
+    profiles=config.get('budget',{}).get('profiles',{})
+    if not isinstance(profiles,dict):raise ValueError('budget profiles must be an object')
+    provider_profiles=profiles.get(provider,{})
+    if not isinstance(provider_profiles,dict):raise ValueError('provider profiles must be an object')
+    override=provider_profiles.get(difficulty,{})
+    if not isinstance(override,dict) or set(override)-{'model','effort'}:raise ValueError('invalid budget profile')
+    model,effort=override.get('model',model),override.get('effort',effort)
+    if override:
+        _,root=configuration();validate(provider,model,effort,root)
     if pressure:effort={'medium':'low','high':'medium'}.get(effort,effort)
     temporary=boost(config,workspace,provider,now) if lead and workspace and not pressure else None
     if temporary:model,effort=temporary['model'],temporary['effort']
