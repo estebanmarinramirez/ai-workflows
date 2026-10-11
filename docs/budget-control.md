@@ -118,3 +118,17 @@ configuration at each admission. Original prompt/model/evaluator settings and
 source evidence stay frozen. `dream status` reads the dataset; `budget status`
 shows current quota and allowances. Neither makes provider calls. Run experiments
 when foreground sessions have released the shared account.
+
+## First-run isolation and cancellation
+
+Measured Claude calls disable configured MCP servers explicitly in addition to
+restricted file tools. Experiments count their invoking managed pane for account
+occupancy; only interactive CLI replacement excludes its own launching pane.
+Malformed existing budget configuration fails closed rather than reverting to
+disabled defaults. A missing configuration still supports an unconfigured install.
+
+Normal termination (SIGTERM) cleans up an isolated measured provider process
+group before releasing the budget claim. Interrupted captures can remain
+incomplete and must be inspected, not automatically retried. SIGKILL or machine
+failure cannot run this cleanup; inspect surviving processes before another run.
+A new frozen dataset is required to use these adapter and admission fixes.

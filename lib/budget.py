@@ -25,7 +25,12 @@ PROFILES = {'codex':{'simple':('gpt-6-luna','low'),'standard':('gpt-6.1-sol','me
 
 def configuration():
     root=Path(os.environ.get('XDG_CONFIG_HOME',str(Path.home()/'.config')))/'agent-workspaces'
-    return read_object(root/'config.json'), root
+    path=root/'config.json'
+    try: config=json.loads(path.read_text())
+    except FileNotFoundError: config={}
+    except (OSError,ValueError) as error: raise ValueError('cannot read budget configuration') from error
+    if not isinstance(config,dict): raise ValueError('budget configuration must be an object')
+    return config, root
 
 
 def settings(config):
@@ -71,7 +76,7 @@ def check_experiment(config,agent,timeout):
         raise ValueError('budget: frozen experiment timeout exceeds the experiment allowance')
 
 
-def observed_sessions(config,pool,claimed=()):
+def observed_sessions(config,pool,claimed=(),exclude_pane=None):
     """Count busy managed tmux panes, including providers launched before this release."""
     data=Path(os.environ.get('XDG_DATA_HOME',str(Path.home()/'.local/share')))/'agent-workspaces'
     workspaces={read_object(p).get('workspace_id') for p in data.glob('*/*/workspace.json')}
@@ -85,7 +90,7 @@ def observed_sessions(config,pool,claimed=()):
         if len(parts)!=5:continue
         workspace,provider,command,pane,claim=parts
         if claim in claimed:continue
-        if workspace not in workspaces or not provider or pane==os.environ.get('TMUX_PANE'):continue
+        if workspace not in workspaces or not provider or pane==exclude_pane:continue
         if Path(command).name in ('bash','sh','zsh','fish','nu','tmux',''):continue
         if pool_id(provider,config.get('routing',{}))==pool:count+=1
     return count
@@ -108,7 +113,7 @@ def alive(pid):
 
 
 @contextmanager
-def admission(config,provider,purpose):
+def admission(config,provider,purpose,exclude_pane=None):
     if purpose not in ('managed','experiment'):raise ValueError('invalid budget purpose')
     p=settings(config)
     if not p['enabled']:
@@ -123,7 +128,7 @@ def admission(config,provider,purpose):
             check(config,provider,purpose)
             pool=pool_id(provider,config.get('routing',{}))
             claimed={r[0] for r in db.execute('SELECT id FROM claims WHERE finished IS NULL')}
-            observed=observed_sessions(config,pool,claimed)
+            observed=observed_sessions(config,pool,claimed,exclude_pane)
             if purpose=='experiment':
                 count=db.execute("SELECT count(*) FROM claims WHERE purpose='experiment' AND started>?",(now-86400,)).fetchone()[0]
                 if count>=p['experiment_attempts_24h']:raise ValueError('budget: rolling 24-hour RSI attempt allowance exhausted')
@@ -211,7 +216,7 @@ def main():
     elif args.action=='launch':
         command=args.command[1:] if args.command[:1]==['--'] else args.command
         if not command:raise ValueError('missing provider command')
-        with admission(config,args.provider,'managed') as claim:
+        with admission(config,args.provider,'managed',exclude_pane=os.environ.get('TMUX_PANE')) as claim:
             if claim and os.environ.get('TMUX_PANE'):
                 try:subprocess.run(['tmux','set-option','-p','-t',os.environ['TMUX_PANE'],'@aw_budget_claim',claim],capture_output=True,timeout=3)
                 except (OSError,subprocess.SubprocessError):pass

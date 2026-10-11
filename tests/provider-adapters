@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import signal
+import time
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,34 @@ class Adapters(unittest.TestCase):
             cmd=a.command({'provider':provider,'model':'m','effort':'high'},self.base,False)
             self.assertNotIn('--resume',cmd);self.assertFalse(any('bypass' in x for x in cmd))
         with self.assertRaises(ValueError):a.command({'provider':'grok','model':'m','effort':'high'},self.base,False)
+    def test_claude_has_no_external_mcp_servers(self):
+        cmd=a.command({'provider':'claude','model':'sonnet','effort':'low'},self.base,False)
+        self.assertIn('--strict-mcp-config',cmd)
+        self.assertEqual(json.loads(cmd[cmd.index('--mcp-config')+1]),{'mcpServers':{}})
+
+    def test_termination_records_cancelled_receipt(self):
+        with patch.object(a.subprocess,'check_output',return_value='fixture'),patch.object(a,'bounded',side_effect=SystemExit(143)):
+            with self.assertRaises(SystemExit):
+                a.run_role({'provider':'claude','model':'sonnet','effort':'low'},self.base,self.base/'run','prompt',5)
+        receipt=json.loads((self.base/'run/receipt.json').read_text())
+        self.assertEqual(receipt['status'],'cancelled');self.assertIn('finished_at',receipt)
+
+    def test_sigterm_cleans_up_isolated_provider(self):
+        pidfile=self.base/'provider.pid'
+        child='import os,time;open('+repr(str(pidfile))+',"w").write(str(os.getpid()));time.sleep(60)'
+        code='import provider_adapter as a;from pathlib import Path;import sys;a.bounded([sys.executable,"-c",'+repr(child)+'],Path('+repr(str(self.base))+'),Path('+repr(str(self.base/'out'))+'),Path('+repr(str(self.base/'err'))+'),60)'
+        parent=subprocess.Popen([sys.executable,'-c',code],env={**os.environ,'PYTHONPATH':str(ROOT/'lib')})
+        try:
+            deadline=time.monotonic()+5
+            while not pidfile.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(pidfile.exists())
+            pid=int(pidfile.read_text())
+            parent.send_signal(signal.SIGTERM)
+            self.assertEqual(parent.wait(timeout=5),143)
+            with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+        finally:
+            if parent.poll() is None:parent.kill();parent.wait()
+
     def test_provider_receipt_and_version_attestation_failure(self):
         executable=self.base/'codex';executable.write_text('#!/usr/bin/env python3\nimport sys\nif "--version" in sys.argv: print("fixture 1")\nelse: print('+repr(self.codex())+')\n');executable.chmod(0o755)
         with patch.dict(os.environ,PATH=str(self.base)+os.pathsep+os.environ['PATH']):
