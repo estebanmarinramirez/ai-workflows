@@ -15,7 +15,7 @@ from capacity import capacities, pool_id, read_object
 from models import validate
 from assignments import ChangeError
 
-DEFAULTS = {'enabled':False, 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
+DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
             'experiment_attempts_24h':2, 'experiment_concurrency':1,
             'managed_concurrency_per_pool':2, 'boost_minutes_24h':20, 'boost_max_minutes':10, 'experiment_timeout_seconds':120}
 PROFILES = {'codex':{'simple':('gpt-6-luna','low'),'standard':('gpt-6.1-sol','medium'),'complex':('gpt-6.1-sol','high')},
@@ -36,6 +36,7 @@ def configuration():
 def settings(config):
     value=dict(DEFAULTS,**config.get('budget',{}))
     if type(value['enabled']) is not bool: raise ValueError('budget.enabled must be boolean')
+    if value['unknown_interactive'] not in ('warn','block'): raise ValueError('invalid budget.unknown_interactive')
     for key in ('external_reserve_fraction','experiment_reserve_fraction','effort_pressure_fraction'):
         if type(value[key]) not in (int,float) or not 0<=value[key]<1: raise ValueError('invalid budget.'+key)
     if value['effort_pressure_fraction'] >= 1-value['external_reserve_fraction']:
@@ -58,13 +59,21 @@ def under_pressure(config,pool):
     return pool.get('used') is not None and pool['used']>=threshold
 
 
-def check(config, provider, purpose='managed'):
+def check(config, provider, purpose='managed', interactive=False):
     if not settings(config)['enabled']: return
     _, pools=capacities(config)
     pool=pools.get(pool_id(provider,config.get('routing',{})),{})
-    if pool.get('state')!='available': raise ValueError('budget: fresh authoritative quota is required for '+provider)
-    if pool['remaining']<=reserve(config,purpose):
+    # Partial authoritative evidence can forbid spending even when another
+    # account alias has unknown limits. Never turn exhaustion into a warning.
+    if pool.get('remaining') is not None and pool['remaining']<=reserve(config,purpose):
         raise ValueError('budget: '+purpose+' would use protected quota; wait for reset or use another account')
+    if pool.get('state')!='available':
+        if (interactive and purpose=='managed' and pool.get('state')=='unknown'
+                and settings(config)['unknown_interactive']=='warn'):
+            print('budget: quota unknown for '+provider+'; opening interactive CLI with concurrency limits. '
+                  'Reserve cannot be verified; automated work and RSI remain blocked.',file=sys.stderr)
+            return
+        raise ValueError('budget: fresh authoritative quota is required for '+provider)
 
 
 def check_experiment(config,agent,timeout):
@@ -113,7 +122,7 @@ def alive(pid):
 
 
 @contextmanager
-def admission(config,provider,purpose,exclude_pane=None):
+def admission(config,provider,purpose,exclude_pane=None,interactive=False):
     if purpose not in ('managed','experiment'):raise ValueError('invalid budget purpose')
     p=settings(config)
     if not p['enabled']:
@@ -125,7 +134,7 @@ def admission(config,provider,purpose,exclude_pane=None):
             now=time.time()
             for row in db.execute('SELECT id,pid FROM claims WHERE finished IS NULL').fetchall():
                 if not alive(row['pid']):db.execute('UPDATE claims SET finished=? WHERE id=?',(now,row['id']))
-            check(config,provider,purpose)
+            check(config,provider,purpose,interactive=interactive)
             pool=pool_id(provider,config.get('routing',{}))
             claimed={r[0] for r in db.execute('SELECT id FROM claims WHERE finished IS NULL')}
             observed=observed_sessions(config,pool,claimed,exclude_pane)
@@ -216,7 +225,7 @@ def main():
     elif args.action=='launch':
         command=args.command[1:] if args.command[:1]==['--'] else args.command
         if not command:raise ValueError('missing provider command')
-        with admission(config,args.provider,'managed',exclude_pane=os.environ.get('TMUX_PANE')) as claim:
+        with admission(config,args.provider,'managed',exclude_pane=os.environ.get('TMUX_PANE'),interactive=True) as claim:
             if claim and os.environ.get('TMUX_PANE'):
                 try:subprocess.run(['tmux','set-option','-p','-t',os.environ['TMUX_PANE'],'@aw_budget_claim',claim],capture_output=True,timeout=3)
                 except (OSError,subprocess.SubprocessError):pass
@@ -237,4 +246,4 @@ def main():
 if __name__=='__main__':
     try:sys.exit(main())
     except (ValueError,OSError,sqlite3.Error,KeyError,ChangeError) as error:
-        print('budget: '+str(error),file=sys.stderr);sys.exit(2)
+        print(str(error) if str(error).startswith('budget:') else 'budget: '+str(error),file=sys.stderr);sys.exit(2)
