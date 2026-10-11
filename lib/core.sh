@@ -2,7 +2,7 @@
 
 set -o pipefail
 
-AW_VERSION=1.7.1
+AW_VERSION=1.8.0
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
@@ -232,6 +232,13 @@ aw_provider_command() {
   policy=$(jq -c --argjson selection "$selection" '. + $selection' <<<"$policy") || return 1
   model=${model_override:-$(jq -r '.model // empty' <<<"$policy")}
   effort=$(jq -r '.effort // empty' <<<"$policy")
+  local budget_helper="$(dirname "${BASH_SOURCE[0]}")/budget.py" budget_enabled=false
+  budget_enabled=$(jq -r '.budget.enabled // false' "$AW_CONFIG_FILE")
+  if [[ $budget_enabled == true && -n $workspace_id && -z $model_override ]]; then
+    policy=$(python3 "$budget_helper" resolve "$provider" "$model" "$effort" "$workspace_id" "$role") || return 1
+    model=$(jq -r '.model' <<<"$policy")
+    effort=$(jq -r '.effort' <<<"$policy")
+  fi
   case "$provider" in
     codex) effort_flag=config ;;
     claude) effort_flag=--effort ;;
@@ -254,6 +261,9 @@ aw_provider_command() {
        elif $effort == "default" then []
        elif $flag == "config" then ["-c", "model_reasoning_effort=" + ($effort | tojson)]
        else [$flag,$effort] end)' <<<"$command_json") || return 1
+  if [[ $budget_enabled == true ]]; then
+    command_json=$(jq -c --arg helper "$budget_helper" --arg provider "$provider" '["python3",$helper,"launch",$provider,"--"] + .' <<<"$command_json") || return 1
+  fi
   jq -r '.[] | @sh' <<<"$command_json" | paste -sd' ' -
 }
 

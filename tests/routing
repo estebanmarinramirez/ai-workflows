@@ -79,6 +79,53 @@ class Routing(unittest.TestCase):
         self.assertEqual(self.decision()['target']['effort'], 'high')
         self.assertEqual(self.decision()['target']['model'], self.config['model_policy']['codex']['model'])
 
+    def test_balanced_auto_and_fixed_are_separate(self):
+        self.config['routing']['effort_mode']='balanced';self.save_config()
+        self.assertEqual(self.decision()['target'],{'provider':'codex','model':'gpt-6-luna','effort':'low'})
+        self.state['routing']['difficulty']='standard';self.save_task()
+        self.assertEqual(self.decision()['target']['effort'],'medium')
+        self.config['routing']['effort_mode']='fixed';self.config['model_policy']['codex']['effort']='xhigh';self.save_config()
+        self.assertEqual(self.decision()['target']['effort'],'xhigh')
+
+    def test_external_reserve_is_protected_even_for_review(self):
+        self.config['budget']['enabled']=True;self.save_config()
+        for provider in self.config['providers']:self.quota(provider,.75)
+        self.assertTrue(all(r['action']=='wait' for r in self.router().plan()['decisions']))
+        self.assertTrue(self.router().guard(['claude'],review=True))
+        self.quota('codex',.1,ready=False)
+        self.assertTrue(self.router().guard(['codex']))
+
+    def test_balanced_cli_releases_pin_and_launches_economical_default(self):
+        result=self.cli('effort-mode','--mode','balanced')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.config['budget']['enabled']=True;self.save_config()
+        result=subprocess.run([str(ROOT/'bin/agent-workspaces'),'provider-command','codex','fresh','safe','','','codex','w:set'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('budget.py',result.stdout)
+        self.assertIn('gpt-6.1-sol',result.stdout)
+        self.assertIn('medium',result.stdout)
+        self.assertNotIn('xhigh',result.stdout)
+
+    def test_expired_unlaunched_boost_is_cancelled_without_user_veto(self):
+        self.config['budget']['enabled']=True;self.config['routing']['effort_mode']='balanced';self.save_config()
+        store=self.router().store
+        state=store.load();state['requests']['expired']={'id':'expired','slot':'codex','role':'lead','source':'routing','phase':'requested',
+            'target':{'provider':'codex','model':'gpt-6-astra','effort':'high'},'requested_at':self.now.isoformat(),
+            'routing':{'boost_expires':self.now.timestamp()-1,'task':str(self.task)}}
+        atomic(store.file,state)
+        self.reconcile()
+        request=store.load()['requests']['expired']
+        self.assertEqual(request['phase'],'cancelled')
+        self.assertEqual(request['cancel_reason'],'boost_expired')
+
+    def test_budget_reduces_effort_before_reserve_blocks_launch(self):
+        self.config['budget']['enabled']=True;self.config['routing']['effort_mode']='balanced';self.save_config()
+        self.state['routing']['difficulty']='standard';self.save_task()
+        self.quota('codex',.6)
+        row=self.decision()
+        self.assertEqual(row['target'],{'provider':'codex','model':'gpt-6.1-sol','effort':'low'})
+        self.assertFalse(self.router().guard(['codex'],str(self.task)))
+
     def test_fixed_mode_preserves_configured_effort_and_model_under_pressure(self):
         self.config['routing']['effort_mode']='fixed'
         self.config['model_policy']['codex']['effort']='xhigh'; self.save_config()

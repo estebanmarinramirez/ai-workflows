@@ -199,6 +199,7 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
         capture(config, 'configuration', lambda v: {
             'model_policy': {k: pick(x, CHOICE) for k, x in v.get('model_policy', {}).items() if isinstance(x, dict)},
             'routing': pick(v.get('routing', {}), 'mode effort_mode allowed_models review_reserve'),
+            'budget': pick(v.get('budget', {}), 'enabled external_reserve_fraction effort_pressure_fraction experiment_reserve_fraction experiment_attempts_24h experiment_concurrency managed_concurrency_per_pool boost_minutes_24h boost_max_minutes'),
             **pick(v, 'default_profile default_layout orchestrator_provider orchestrator_model orchestrator_profile')})
         version = (Path(__file__).resolve().parent.parent / 'VERSION').read_text().strip()
         ledger.snapshot('collector', 'agent-workspaces:' + version, {'schema_version': SCHEMA, 'version': version})

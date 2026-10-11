@@ -11,6 +11,7 @@ import sys
 import uuid
 import provider_adapter as adapter
 import telemetry
+import budget
 
 def ingest(directory):
     data,ledger_dir,config=telemetry.roots()
@@ -105,7 +106,9 @@ def run(args):
                     # not guess from its screen or inject another turn into it.
                     raise ValueError('role already has a managed session; use an idle workspace role')
         except FileNotFoundError: pass
-        return run_locked(args)
+        config, _ = budget.configuration()
+        with budget.admission(config,args.provider,'managed'):
+            return run_locked(args)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)

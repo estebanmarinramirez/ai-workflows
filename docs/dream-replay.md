@@ -194,3 +194,11 @@ same-user processes are not an adversarial security boundary.
 The foundation now covers **frozen baseline → measured attempt → retained result
 and lineage → checked export → policy replay**. Production policy promotion still
 requires real validation and an explicit integration decision.
+
+## Budget admission (1.8)
+
+New capture engines enforce the current [shared budget policy](budget-control.md)
+before creating an attempt. Use an economical model and low/medium effort when
+budget control is enabled. Denial leaves no incomplete attempt. Older frozen
+engines predate these controls: initialize a fresh pilot instead of using them
+for the first budget-controlled run.

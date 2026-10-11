@@ -10,6 +10,9 @@ usage() {
 
 cmd=${1:-help}; shift || true
 case "$cmd" in
+  budget)
+    exec python3 "$(dirname "$catalog_script")/budget.py" "$@"
+    ;;
   dream)
     exec python3 "$(dirname "$catalog_script")/dream.py" "$@"
     ;;
@@ -363,6 +366,7 @@ case "$cmd" in
     [[ -n $pane ]] || exit 75
     capture=$(tmux capture-pane -p -t "$pane" -S -30 2>/dev/null) || exit 75
     aw_orchestrator_prompt_idle "$provider" <<<"$capture" || exit 75
+    "$0" budget check "$provider" || exit 75
     prompt='Workspace state changed. Read briefing.md, snapshot.md, and attention.md now. Continue routine coordination autonomously under AGENTS.md. Advance non-human gates; stop and report only when a genuine human decision is required.'
     buffer="aw-orchestrator-wake-$$"
     tmux set-buffer -b "$buffer" -- "$prompt"
@@ -446,6 +450,8 @@ PLIST
     fi
     ;;
   event-review)
+    # Optional model reviews must not compete with foreground work under budget control.
+    [[ $(jq -r '.budget.enabled // false' "$AW_CONFIG_FILE") != true ]] || exit 0
     workspace_id=${1:?workspace id}
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
     orchestrator_root="$workspace_root/.orchestrator"

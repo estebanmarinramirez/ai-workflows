@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import budget
 
 from assignments import Assignments, ChangeError, PENDING, atomic, locked, root_for
 from capacity import TERMINAL, capacities, pool_id, provider_for_slot, read_object, timestamp
@@ -39,6 +40,7 @@ class Router:
         self.config = read_object(self.store.config_root / 'config.json')
         self.policy = self.config.get('routing', {'mode': 'off'})
         self.now = now or datetime.now(timezone.utc)
+        budget.settings(self.config)
         if self.policy.get('mode', 'off') != 'off': validate_policy(self.policy)
         self.providers, self.pools = capacities(self.config, now=self.now)
 
@@ -96,7 +98,7 @@ class Router:
                       pools=self.pools, decisions=[], warnings=[])
         workspace_policy = read_object(self.root / 'workspace.json').get('routing', {})
         effort_mode = workspace_policy.get('effort_mode', self.policy.get('effort_mode', 'fixed'))
-        if effort_mode not in ('auto', 'fixed'): raise ChangeError('Effort mode must be auto or fixed')
+        if effort_mode not in ('auto', 'balanced', 'fixed'): raise ChangeError('Effort mode must be auto, balanced or fixed')
         report['effort_mode'] = effort_mode
         report['intent_revision'] = workspace_policy.get('revision', 0)
         report['task_revision'] = (task or {}).get('routing', {}).get('revision', 0)
@@ -141,7 +143,7 @@ class Router:
                 latest = max(recent, key=lambda r: r.get('requested_at', ''))
                 changed = timestamp(latest.get('accepted_at') or latest.get('cancelled_at') or latest.get('requested_at'))
                 same_policy = latest.get('routing', {}).get('difficulty') == difficulty and latest.get('routing', {}).get('effort_mode') == effort_mode
-                if same_policy and changed and (self.now-changed).total_seconds() < self.policy['cooldown_seconds'] and current_capacity.get('remaining', 0) > self.policy['reserve_fraction']:
+                if same_policy and changed and (self.now-changed).total_seconds() < self.policy['cooldown_seconds'] and current_capacity.get('remaining', 0) > max(self.policy['reserve_fraction'],budget.reserve(self.config)) and (effort_mode != 'balanced' or current == budget.target(self.config,current['provider'],difficulty,budget.under_pressure(self.config,current_capacity),self.store.workspace,role=='lead',self.now.timestamp())):
                     row.update(action='cooldown', reason='recent routing change; avoid switching churn')
                     continue
             candidates = []
@@ -149,20 +151,23 @@ class Router:
                 pool = pool_id(provider, self.policy)
                 capacity = self.pools[pool]
                 if capacity['state'] != 'available': continue
-                reserve = 0 if review else self.policy['reserve_fraction']
+                reserve = max(0 if review else self.policy['reserve_fraction'],budget.reserve(self.config))
                 usable = capacity['remaining'] - reserve
                 if usable <= 0: continue
                 profile = self.policy.get('profiles', {}).get(difficulty, {}).get(provider)
                 if not isinstance(profile, dict): continue
                 model = profile.get('model') or self.config.get('model_policy', {}).get(provider, {}).get('model')
                 effort = profile.get('effort', 'high')
-                pressure = capacity['used'] >= self.policy['pressure_fraction']
+                pressure = budget.under_pressure(self.config,capacity) if effort_mode=='balanced' else capacity['used'] >= self.policy['pressure_fraction']
                 if pressure: effort = profile.get('pressure_effort', effort)
                 target = dict(provider=provider, model=model, effort=effort)
                 if effort_mode == 'fixed':
                     settings = self.config.get('model_policy', {}).get(provider, {})
                     target = dict(provider=provider, model=settings.get('model'), effort=settings.get('effort', 'default'))
                     if provider == current['provider']: target = current.copy()
+                    model, effort = target['model'], target['effort']
+                if effort_mode == 'balanced':
+                    target = budget.target(self.config,provider,difficulty,pressure,self.store.workspace,role=='lead',self.now.timestamp())
                     model, effort = target['model'], target['effort']
                 allowed = self.policy.get('allowed_models', {}).get(provider)
                 if allowed is not None and model not in allowed: continue
@@ -183,9 +188,9 @@ class Router:
                 best = incumbent
             row.update(target=best['target'], pool=best['pool'],
                        action='keep' if current == best['target'] else 'handover',
-                       reason=f'{difficulty} task; {"fixed settings" if effort_mode == "fixed" else "pressure effort" if best["pressure"] else "quality profile"}; fresh capacity weighted by shared slot load')
+                       reason=f'{difficulty} task; {"fixed settings" if effort_mode == "fixed" else "balanced budget profile" if effort_mode == "balanced" else "pressure effort" if best["pressure"] else "quality profile"}; fresh capacity weighted by shared slot load')
             if row['action'] == 'handover' and any(r['slot'] == slot and r['phase'] == 'cancelled' and
-                    r.get('source') == 'routing' and r['target'] == row['target'] and
+                    r.get('source') == 'routing' and r.get('cancel_reason') != 'boost_expired' and r['target'] == row['target'] and
                     r.get('routing', {}).get('task') == report['task'] and
                     r.get('routing', {}).get('difficulty') == difficulty and
                     r.get('routing', {}).get('task_revision', 0) == report['task_revision'] and
@@ -201,6 +206,13 @@ class Router:
     def reconcile(self, path=None):
         # Same lock as manual selection, so automatic/manual requests cannot race.
         with locked(self.store.file.parent / '.agents.lock'):
+            state = self.store.load()
+            changed = False
+            for request in state['requests'].values():
+                expiry = request.get('routing',{}).get('boost_expires')
+                if expiry and expiry <= self.now.timestamp() and request['phase'] in ('requested','ready'):
+                    request.update(phase='cancelled',cancelled_at=self.now.isoformat(),cancel_reason='boost_expired'); changed=True
+            if changed: self.store.save(state)
             report = self.plan(path)
             if report['mode'] != 'automatic': return report
             state = self.store.load()
@@ -217,6 +229,8 @@ class Router:
                                   pool=row['pool'], task=report['task'], review_reserve=row['review_reserve'],
                                   task_revision=report['task_revision'],
                                   effort_mode=report['effort_mode'], intent_revision=report['intent_revision']))
+                    temporary = budget.boost(self.config,self.store.workspace,row['target']['provider'],self.now.timestamp()) if row['role']=='lead' and report['effort_mode']=='balanced' else None
+                    if temporary and all(row['target'][k] == temporary[k] for k in ('provider','model','effort')): record['routing']['boost_expires'] = temporary['expires']
                     self.store.save(state)
                     row.update(action='pending', change_id=record['id'])
                 except ChangeError as error:
@@ -243,7 +257,9 @@ class Router:
             provider = provider_for_slot(self.root, slot, task, self.config)
             pool = self.pools.get(pool_id(provider, self.policy), {})
             is_review = review or bool(task and (slot != task.get('lead') or task.get('stage') in ('review', 'verify')))
-            reserve = 0 if is_review else self.policy['reserve_fraction']
+            reserve = max(0 if is_review else self.policy['reserve_fraction'],budget.reserve(self.config))
+            if budget.settings(self.config)['enabled'] and pool.get('state') != 'available':
+                reasons.append(f'{slot}: budget requires fresh authoritative quota')
             if pool.get('remaining') is not None and pool['remaining'] <= reserve:
                 reasons.append(f'{slot}: account quota is exhausted or reserved for review; wait for fresh capacity or route to another account')
         return reasons
@@ -271,7 +287,7 @@ def main():
     parser.add_argument('workspace')
     parser.add_argument('--cli', required=True)
     parser.add_argument('action', choices=('show', 'reconcile', 'guard', 'difficulty', 'effort-mode'), nargs='?', default='show')
-    parser.add_argument('--mode', choices=('auto', 'fixed'))
+    parser.add_argument('--mode', choices=('auto', 'balanced', 'fixed'))
     parser.add_argument('--task')
     parser.add_argument('--difficulty', choices=DIFFICULTIES)
     parser.add_argument('--roles', nargs='+')
@@ -283,7 +299,7 @@ def main():
     try:
         router = Router(root_for(args.workspace), args.cli)
         if args.action == 'effort-mode':
-            if not args.mode: raise ChangeError('Specify --mode auto or fixed')
+            if not args.mode: raise ChangeError('Specify --mode auto, balanced or fixed')
             with locked(router.store.file.parent / '.agents.lock'):
                 state = router.store.load()
                 if any(r.get('source') == 'routing' and r['phase'] in ('launching', 'awaiting_ack') for r in state['requests'].values()):
@@ -297,7 +313,7 @@ def main():
                 for record in state['requests'].values():
                     if record.get('source') == 'routing' and record['phase'] in ('requested', 'ready'):
                         record.update(phase='cancelled', cancelled_at=router.now.isoformat())
-                if args.mode == 'auto':
+                if args.mode in ('auto','balanced'):
                     # Choosing Auto explicitly releases existing manual settings
                     # to policy control without changing ownership or processes.
                     for value in state['active'].values(): value['source'] = 'routing'

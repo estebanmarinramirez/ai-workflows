@@ -68,3 +68,15 @@ without provider calls. Synthetic pilots cannot support production promotion.
 Ordinary sessions continue observational telemetry and do not automatically run
 RSI discovery. Never infer authorization for background provider calls from the
 presence of a dataset or a suggested parent.
+
+
+## Shared usage allowance
+
+Read `agent-workspaces budget status` before starting measured discovery. Prefer
+Balanced Auto for routine managed work and retain Fixed only when explicitly
+selected. Budget reserves protect the user's other coding/research activity;
+do not disable them, rewrite the ledger, invoke an old frozen engine, or run a
+provider directly to bypass a denial. Wait or report the missing capacity.
+Temporary lead boosts require a diagnosed difficult blocker and must remain
+inside the shared time allowance; expiry returns to the ordinary profile at a
+safe checkpoint. Never interrupt an active command just to change model/effort.
