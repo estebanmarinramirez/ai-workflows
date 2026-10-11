@@ -85,3 +85,11 @@ Interactive startup may warn and open when quota telemetry is unknown, so accoun
 status can be inspected. This is not evidence of available capacity: automated
 wakeups, handovers, measured attempts and RSI must still pass their strict gates.
 Do not use terminal typing or retry loops to bypass a denied automated task.
+
+Reviewers can be activated separately with `activate-reviewers TASK_DIR --roles
+ROLE ...`. Check capacity for those roles; an unavailable deferred reviewer must
+not prevent an eligible reviewer from starting. Unselected reviewers remain
+deferred and still prevent final completion. Partial activation does not waive
+verification or authorize implementation of a different task. Do not repeatedly
+retry an unchanged all-reviewer capacity denial; select eligible roles or report
+which required verification is still pending.
