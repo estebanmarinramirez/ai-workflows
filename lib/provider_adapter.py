@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 
 VERSION = 'cli-receipts-v1'
 
@@ -73,7 +74,7 @@ def command(settings, cwd, read_only):
     if provider == 'claude':
         # Restricted mode and explicit tools; never bypass permissions or resume.
         return ['claude','--print','--output-format','json','--no-session-persistence',
-                '--restricted','--model',model,'--effort',effort,'--permission-mode','dontAsk',
+                '--restricted','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--model',model,'--effort',effort,'--permission-mode','dontAsk',
                 '--tools','Read,Glob,Grep' if read_only else 'Read,Glob,Grep,Edit,Write',
                 '--allowedTools','Read,Glob,Grep' if read_only else 'Read,Glob,Grep,Edit,Write']
     raise ValueError('unsupported provider: '+provider)
@@ -84,6 +85,12 @@ def bounded(argv, cwd, stdout, stderr, timeout, prompt=None, isolated_group=True
     with stdout.open('wb') as out, stderr.open('wb') as err:
         process = subprocess.Popen(argv,cwd=cwd,env=env,stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
                                    stdout=out,stderr=err,start_new_session=isolated_group)
+        previous_term = None
+        if threading.current_thread() is threading.main_thread():
+            previous_term = signal.getsignal(signal.SIGTERM)
+            def terminate(signum, frame):
+                raise SystemExit(128 + signum)
+            signal.signal(signal.SIGTERM, terminate)
         try:
             process.communicate(None if prompt is None else prompt.encode(),timeout=timeout)
             return process.returncode,False,time.monotonic()-started
@@ -95,6 +102,7 @@ def bounded(argv, cwd, stdout, stderr, timeout, prompt=None, isolated_group=True
                 else: process.kill()
             except ProcessLookupError: pass
             process.wait()
+            if previous_term is not None: signal.signal(signal.SIGTERM, previous_term)
 
 def run_role(settings, cwd, directory, prompt, timeout, read_only=False, isolated_group=True):
     directory.mkdir(parents=True,exist_ok=False,mode=0o700)
@@ -121,6 +129,9 @@ def run_role(settings, cwd, directory, prompt, timeout, read_only=False, isolate
         except (ValueError,TypeError,AttributeError):
             if result['status']=='completed': raise
             result['usage_incomplete']=True
+    except SystemExit:
+        result.update(status='cancelled')
+        raise
     except KeyboardInterrupt:
         result.update(status='cancelled')
     except (OSError,ValueError,TypeError,AttributeError,subprocess.SubprocessError) as error:
