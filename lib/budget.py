@@ -15,7 +15,7 @@ from capacity import capacities, pool_id, read_object
 from models import validate
 from assignments import ChangeError
 
-DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
+DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'unknown_managed_providers':[], 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
             'experiment_attempts_24h':2, 'experiment_concurrency':1,
             'managed_concurrency_per_pool':2, 'boost_minutes_24h':20, 'boost_max_minutes':10, 'experiment_timeout_seconds':120}
 PROFILES = {'codex':{'simple':('gpt-6-luna','low'),'standard':('gpt-6.1-sol','medium'),'complex':('gpt-6.1-sol','high')},
@@ -36,6 +36,7 @@ def configuration():
 def settings(config):
     value=dict(DEFAULTS,**config.get('budget',{}))
     if type(value['enabled']) is not bool: raise ValueError('budget.enabled must be boolean')
+    if not isinstance(value['unknown_managed_providers'],list) or any(x not in PROFILES for x in value['unknown_managed_providers']): raise ValueError('invalid budget.unknown_managed_providers')
     if value['unknown_interactive'] not in ('warn','block'): raise ValueError('invalid budget.unknown_interactive')
     for key in ('external_reserve_fraction','experiment_reserve_fraction','effort_pressure_fraction'):
         if type(value[key]) not in (int,float) or not 0<=value[key]<1: raise ValueError('invalid budget.'+key)
@@ -59,6 +60,12 @@ def under_pressure(config,pool):
     return pool.get('used') is not None and pool['used']>=threshold
 
 
+def allows_unknown_managed(config,provider,pool,purpose='managed'):
+    return (purpose=='managed' and pool.get('state')=='unknown'
+            and provider in settings(config)['unknown_managed_providers']
+            and (pool.get('remaining') is None or pool['remaining']>reserve(config)))
+
+
 def check(config, provider, purpose='managed', interactive=False):
     if not settings(config)['enabled']: return
     _, pools=capacities(config)
@@ -68,6 +75,9 @@ def check(config, provider, purpose='managed', interactive=False):
     if pool.get('remaining') is not None and pool['remaining']<=reserve(config,purpose):
         raise ValueError('budget: '+purpose+' would use protected quota; wait for reset or use another account')
     if pool.get('state')!='available':
+        if allows_unknown_managed(config,provider,pool,purpose):
+            print('budget: '+provider+' quota unknown; user-authorized managed-work exception active. Reserve is unverified.',file=sys.stderr)
+            return
         if (interactive and purpose=='managed' and pool.get('state')=='unknown'
                 and settings(config)['unknown_interactive']=='warn'):
             print('budget: quota unknown for '+provider+'; opening interactive CLI with concurrency limits. '
@@ -170,7 +180,7 @@ def grant(config,workspace,provider,model,effort,minutes):
     if type(minutes) is not int or not 1<=minutes<=p['boost_max_minutes']:raise ValueError('boost exceeds per-boost time limit')
     _,root=configuration();validate(provider,model,effort,root)
     if effort not in ('low','medium','high'):raise ValueError('temporary boosts are capped at high effort')
-    check(config,provider)
+    check(config,provider,purpose='boost')
     db=database()
     try:
         with db:

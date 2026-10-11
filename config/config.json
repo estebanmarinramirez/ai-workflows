@@ -193,6 +193,7 @@
     "boost_max_minutes": 10,
     "experiment_timeout_seconds": 120,
     "effort_pressure_fraction": 0.5,
-    "unknown_interactive": "warn"
+    "unknown_interactive": "warn",
+    "unknown_managed_providers": []
   }
 }

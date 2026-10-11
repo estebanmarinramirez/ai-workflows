@@ -99,3 +99,8 @@ local poll; the default activate-reviewers command does the same. Explicit
 --roles remains strict for the named set. Blocked roles remain deferred with
 reasons in review_activation.deferred and workspace snapshots. Repeated polls
 never resend already dispatched reviews. Do not run separate retry loops.
+
+A user may explicitly authorize unknown quota for a named provider through
+budget.unknown_managed_providers. Respect this narrow managed-work exception;
+do not ask to disable the whole budget gate. Keep the quota labeled unknown,
+and do not extend the exception to experiments, boosts or other providers.
