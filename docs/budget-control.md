@@ -146,3 +146,14 @@ returns unknown capacity. It reads app-server responses with an explicit byte
 buffer so batched notifications cannot hide the account response. It publishes
 only successfully validated limits and makes no inference calls. A working
 native reading skips this additional query. Omarchy package files are unchanged.
+
+## Explicit exception for unavailable quota feeds
+
+`budget.unknown_managed_providers` defaults to an empty list. A user can opt a
+specific provider into ordinary managed work despite unknown quota, for example
+`["grok"]`. This permits existing-provider review activation and automated
+wakeups; it does not mark quota as available or enable automatic routing into
+an unverified pool. The controller warns that reserve protection cannot be
+verified. Known low quota (including partial pool evidence) and process
+concurrency still apply. Experiments and temporary boosts never use this
+exception. Remove the provider from the list to restore strict admission.

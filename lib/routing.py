@@ -258,7 +258,7 @@ class Router:
             pool = self.pools.get(pool_id(provider, self.policy), {})
             is_review = review or bool(task and (slot != task.get('lead') or task.get('stage') in ('review', 'verify')))
             reserve = max(0 if is_review else self.policy['reserve_fraction'],budget.reserve(self.config))
-            if budget.settings(self.config)['enabled'] and pool.get('state') != 'available':
+            if budget.settings(self.config)['enabled'] and pool.get('state') != 'available' and not budget.allows_unknown_managed(self.config,provider,pool):
                 reasons.append(f'{slot}: budget requires fresh authoritative quota')
             if pool.get('remaining') is not None and pool['remaining'] <= reserve:
                 reasons.append(f'{slot}: account quota is exhausted or reserved for review; wait for fresh capacity or route to another account')

@@ -189,6 +189,20 @@ class Budget(unittest.TestCase):
             codex_quota.refresh();codex_quota.refresh();query.assert_called_once()
         self.assertEqual(json.loads(path.read_text())['limits'],[{'percent':.37}])
 
+    def test_managed_exception_is_scoped_and_never_authorizes_experiments_or_boosts(self):
+        self.config['budget']['unknown_managed_providers']=['codex']
+        self.quota(.1,limits=[])
+        with b.admission(self.config,'codex','managed'):pass
+        for purpose in ('experiment','boost'):
+            with self.assertRaisesRegex(ValueError,'fresh'):b.check(self.config,'codex',purpose)
+        with self.assertRaisesRegex(ValueError,'fresh'):b.check(self.config,'grok')
+        self.quota(.9)
+        with self.assertRaisesRegex(ValueError,'protected'):b.check(self.config,'codex')
+        self.quota(.1,limits=[]);self.config['budget']['managed_concurrency_per_pool']=1
+        with b.admission(self.config,'codex','managed'):
+            with self.assertRaisesRegex(ValueError,'concurrency'):
+                with b.admission(self.config,'codex','managed'):pass
+
     def test_invalid_limits_rejected(self):
         for key,value in [('external_reserve_fraction',float('nan')),('experiment_attempts_24h',True),('experiment_reserve_fraction',.1)]:
             config=copy.deepcopy(self.config);config['budget'][key]=value
