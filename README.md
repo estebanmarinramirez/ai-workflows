@@ -64,7 +64,7 @@ agent-workspaces attention WORKSPACE_ID
 agent-workspaces event-review WORKSPACE_ID
 agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --seam SEAM --objective TEXT
 agent-workspaces sync WORKSPACE_ID [--confirmed-by-user]
-agent-workspaces activate-reviewers TASK_DIR
+agent-workspaces activate-reviewers TASK_DIR [--roles ROLE ...]
 agent-workspaces next TASK_DIR
 agent-workspaces advance TASK_DIR ACTION --confirmed-by-user [--title TITLE] [--evidence TEXT]
 agent-workspaces integrate TASK_DIR --commit SHA [--commit SHA...] --confirmed-by-user

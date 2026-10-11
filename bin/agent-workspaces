@@ -540,11 +540,17 @@ PLIST
     aw_audit "$workspace_root" workspace.synced "$(jq -cn --arg base "$base" --arg machine "$(jq -r '.machine_id // "legacy"' "$manifest")" '{base:$base,machine_id:$machine}')" user:confirmed-via-orchestrator
     ;;
   activate-reviewers)
-    task=${1:?task directory}; state="$task/state.json"
+    task=${1:?task directory}; shift; state="$task/state.json"
+    selected_reviewers=()
+    if (($#)); then
+      [[ $1 == --roles ]] || aw_die 'usage: activate-reviewers TASK_DIR [--roles ROLE ...]'
+      shift; (($#)) || aw_die '--roles requires at least one reviewer'
+      selected_reviewers=("$@")
+    fi
     aw_require_no_handover "$task"
     [[ -f $state ]] || aw_die 'missing state.json'
     "$0" refresh "$task" >/dev/null
-    [[ $(jq -r '.status' "$state") == awaiting_review ]] || aw_die 'task is not awaiting reviewer activation'
+    [[ $(jq -r '.status' "$state") =~ ^(awaiting_review|active)$ ]] || aw_die 'task is not awaiting reviewer activation'
     lead=$(jq -r '.lead // empty' "$state"); [[ -n $lead ]] || aw_die 'task has no recorded lead'
     lead_status=$(jq -r --arg lead "$lead" '.roles[$lead].status_json' "$state")
     [[ $(jq -r '.state' "$lead_status") == completed ]] || aw_die 'lead has not completed'
@@ -554,6 +560,14 @@ PLIST
     workspace_id=$(jq -r '.workspace_id' "$state"); template_id=$(jq -r '.template_id' "$state")
     deferred=()
     while IFS= read -r role; do deferred+=("$role"); done < <(jq -r '.roles | to_entries[] | select(.value.state=="deferred") | .key' "$state")
+    if ((${#selected_reviewers[@]})); then
+      deferred=(); declare -A seen_reviewers=()
+      for role in "${selected_reviewers[@]}"; do
+        [[ -z ${seen_reviewers[$role]:-} ]] || aw_die "duplicate reviewer: $role"
+        [[ $role != "$lead" ]] && jq -e --arg role "$role" '.roles[$role].state == "deferred"' "$state" >/dev/null || aw_die "reviewer is not deferred: $role"
+        seen_reviewers[$role]=1; deferred+=("$role")
+      done
+    fi
     ((${#deferred[@]})) || aw_die 'no deferred reviewers'
     "$0" routing "$workspace_id" guard --task "$task" --roles "${deferred[@]}" || aw_die 'reviewers are waiting for routing/capacity'
     declare -A reviewer_sessions=()
@@ -567,7 +581,7 @@ PLIST
       aw_atomic_jq "$task/$role.status.json" --arg at "$(aw_now)" '.state="dispatched" | .updated_at=$at'
     done
     aw_atomic_jq "$state" --arg at "$(aw_now)" --argjson roles "$roles_json" \
-      '.status="active" | .updated_at=$at | .roles |= reduce $roles[] as $role (. ; .[$role].state="dispatched") | .transitions += [{from:"awaiting_review",to:"active",at:$at,actor:"dispatcher:reviewers-activated"}]'
+      '.status as $previous | .status="active" | .updated_at=$at | .roles |= reduce $roles[] as $role (. ; .[$role].state="dispatched") | .transitions += [{from:$previous,to:"active",at:$at,actor:"dispatcher:reviewers-activated"}]'
     for role in "${deferred[@]}"; do
       session=${reviewer_sessions[$role]}
       pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)

@@ -55,6 +55,35 @@ class Routing(unittest.TestCase):
                          AW_LIB=str(ROOT/'lib/core.sh'), PATH=f'{binaries}:{os.environ["PATH"]}')
         env.start(); self.addCleanup(env.stop)
 
+    def test_selective_reviewer_activation_preserves_deferred_verification(self):
+        self.config['budget']['enabled']=True;self.config['routing']['mode']='automatic';self.save_config()
+        self.quota('grok',.2,limits=[])
+        self.state.update(lead='claude',status='active',transitions=[],template_id='docs')
+        for role,row in self.state['roles'].items():
+            row['state']='completed' if role=='claude' else 'deferred'
+            row['status_json']=str(self.task/(role+'.status.json'))
+            atomic(Path(row['status_json']),dict(role=role,state=row['state'],commits=['abc'] if role=='claude' else []))
+        self.save_task()
+        tmux=self.base/'bin/tmux'
+        tmux.write_text('#!/bin/sh\ncase "$1" in\nlist-sessions) printf "s-codex\\tcodex\\tw:set\\ns-grok\\tgrok\\tw:set\\n";;\nlist-panes) echo %1;;\nesac\n')
+        tmux.chmod(0o755)
+        def activate(*args):
+            return subprocess.run([str(ROOT/'bin/agent-workspaces'),'activate-reviewers',str(self.task),*args],capture_output=True,text=True)
+        denied=activate();self.assertNotEqual(denied.returncode,0);self.assertIn('grok',denied.stderr)
+        for args in (('--roles','claude'),('--roles','codex','codex'),('--roles','missing')):
+            self.assertNotEqual(activate(*args).returncode,0)
+        result=activate('--roles','codex');self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.task/'state.json').read_text())
+        self.assertEqual(state['roles']['codex']['state'],'dispatched')
+        self.assertEqual(state['roles']['grok']['state'],'deferred')
+        self.assertNotEqual(activate('--roles','codex').returncode,0)
+        # Completing Codex does not silently waive Grok's verification.
+        atomic(Path(self.state['roles']['codex']['status_json']),dict(role='codex',state='completed',commits=[]))
+        subprocess.run([str(ROOT/'bin/agent-workspaces'),'refresh',str(self.task)],check=True,capture_output=True)
+        self.assertEqual(json.loads((self.task/'state.json').read_text())['status'],'awaiting_review')
+        self.quota('grok',.2)
+        result=activate('--roles','grok');self.assertEqual(result.returncode,0,result.stderr)
+
     def save_config(self): atomic(self.config_root/'config.json', self.config)
     def save_task(self): atomic(self.task/'state.json', self.state)
     def quota(self, provider, used, **changes):
