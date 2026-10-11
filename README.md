@@ -37,6 +37,7 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 
 ```text
 agent-workspaces doctor
+agent-workspaces budget status
 agent-workspaces telemetry audit
 agent-workspaces dream init CAPTURE_SPEC DIRECTORY
 agent-workspaces dream attempt DIRECTORY WORLD [--parent root|ATTEMPT]
@@ -323,3 +324,10 @@ recorded discovery trees without provider calls. Its capture workflow records
 new measured attempts in isolated Git checkouts with automatic lineage and receipts. It reports unsupported actions,
 keeps held-out instances separate, and never changes live routing automatically.
 Use `agent-workspaces telemetry audit` to check what evidence exists first.
+
+## Shared usage budgets
+
+[Budget control](docs/budget-control.md) adds Balanced Auto, external quota reserves,
+shared RSI attempt/concurrency limits, and temporary lead boosts. Admission checks
+cover managed launches and automated wakeups; they are not per-turn billing caps.
+Fixed model/effort choices remain available.

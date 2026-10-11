@@ -16,9 +16,10 @@ import uuid
 import dream
 import provider_adapter as adapter
 import telemetry
+import budget
 
 VERSION = 'dream-capture-v1'
-ENGINE = ('dream.py', 'dream_capture.py', 'provider_adapter.py', 'telemetry.py')
+ENGINE = ('dream.py', 'dream_capture.py', 'provider_adapter.py', 'telemetry.py', 'budget.py', 'capacity.py', 'models.py', 'assignments.py')
 
 
 def write(path, value):
@@ -241,54 +242,57 @@ def attempt(directory, world_id, parent):
             raise ValueError('non-root parent already has a continuation')
         source = base / 'root' if parent == 'root' else base / 'attempts' / parent / 'worktree'
         commit = world['root_snapshot'] if prior is None else prior['snapshot']
-        identifier = f'{len(history)+1:06d}'
-        output = base / 'attempts' / identifier; output.mkdir(mode=0o700)
-        write(output / 'started.json', {'id':identifier,'parent':parent,'snapshot':commit,'at':adapter.stamp()})
-        clone(source, output / 'worktree', commit)
-        prompt = prompt_for(base, history, parent)
-        (output / 'prompt.txt').write_text(prompt)
-        started = time.monotonic()
-        receipt = adapter.run_role(manifest['agent'], output / 'worktree', output / 'provider', prompt, manifest['timeout_seconds'])
-        wall = time.monotonic() - started
-        # Freeze the candidate BEFORE running the independent verifier on another clone.
-        git(output / 'worktree', 'add', '-A')
-        tree = git(output / 'worktree', 'write-tree')
-        snapshot = git(output / 'worktree', 'commit-tree', tree, '-p', commit, '-m', 'Measured candidate ' + identifier)
-        git(output / 'worktree', 'update-ref', 'refs/heads/dream-snapshot', snapshot)
-        check = None
-        failure = {'timeout':'timeout','cancelled':'cancelled','protocol_or_launch_error':'protocol'}.get(receipt['status'], 'unknown')
-        if receipt['status'] == 'completed':
-            clone(output / 'worktree', output / 'verification-worktree', snapshot)
-            check = verify(output / 'verification-worktree', output / 'verification', base / 'verifier.py',
-                manifest['timeout_seconds'], {'schema_version':1,'task':{'id':world_id},'attempt_id':identifier})
-            wall += check['wall_seconds']
-            failure = (None if check['accepted'] else 'quality') if check['valid'] else ('timeout' if check['timed_out'] else 'infrastructure')
-        accepted = failure is None
-        at = adapter.stamp()
-        common = {'workspace':'dream:' + manifest['dataset_id'], 'task':world_id, 'attempt_id':identifier,
-                  'source':VERSION, 'at':at}
-        usage = {k:receipt.get(k) for k in ('input_tokens','output_tokens','cached_input_tokens','cost_usd','model_version')}
-        records = [dict(common, receipt_id=identifier+'-usage', kind='usage', role='discovery',
-                        provider=manifest['agent']['provider'], model=manifest['agent']['model'],
-                        effort=manifest['agent']['effort'], wall_seconds=wall, **usage)]
-        if check and check['valid']:
-            records.append(dict(common, receipt_id=identifier+'-verification', kind='verification', accepted=accepted,
-                verifier_id='binary-acceptance', verifier_version=world['files']['verifier.py'],
-                evidence_sha256=adapter.sha(output / 'verification/result.json')))
-        if failure:
-            records.append(dict(common, receipt_id=identifier+'-failure', kind='failure', failure_category=failure))
-        write(output / 'receipts.json', records)
-        node = {'id':identifier,'parent':parent,'parent_snapshot':commit,'snapshot':snapshot,
-                'attempt_id':identifier,'configuration':telemetry.digest({'requested':manifest['agent'],
-                    'model_version':receipt.get('model_version'),'cli_version':receipt.get('cli_version')}),
-                'requested_agent':manifest['agent'], 'observed_model_version':receipt.get('model_version'),
-                'cli_version':receipt.get('cli_version'), 'verifier_version':world['files']['verifier.py'],
-                'score':float(accepted), 'accepted':accepted, 'failure_category':failure,
-                'wall_seconds':wall, 'cost_usd':receipt.get('cost_usd')}
-        files = {str(p.relative_to(output)):adapter.sha(p) for p in output.rglob('*')
-                 if p.is_file() and p.relative_to(output).parts[0] in ('provider','verification','receipts.json','started.json','prompt.txt')}
-        write(output / 'evidence.json', {'node':node,'files':files})
-        write(output / 'node.json', dict(node, evidence_sha256=adapter.sha(output / 'evidence.json')))
+        config, _ = budget.configuration()
+        budget.check_experiment(config,manifest['agent'],manifest['timeout_seconds'])
+        with budget.admission(config,manifest['agent']['provider'],'experiment'):
+            identifier = f'{len(history)+1:06d}'
+            output = base / 'attempts' / identifier; output.mkdir(mode=0o700)
+            write(output / 'started.json', {'id':identifier,'parent':parent,'snapshot':commit,'at':adapter.stamp()})
+            clone(source, output / 'worktree', commit)
+            prompt = prompt_for(base, history, parent)
+            (output / 'prompt.txt').write_text(prompt)
+            started = time.monotonic()
+            receipt = adapter.run_role(manifest['agent'], output / 'worktree', output / 'provider', prompt, manifest['timeout_seconds'])
+            wall = time.monotonic() - started
+            # Freeze the candidate BEFORE running the independent verifier on another clone.
+            git(output / 'worktree', 'add', '-A')
+            tree = git(output / 'worktree', 'write-tree')
+            snapshot = git(output / 'worktree', 'commit-tree', tree, '-p', commit, '-m', 'Measured candidate ' + identifier)
+            git(output / 'worktree', 'update-ref', 'refs/heads/dream-snapshot', snapshot)
+            check = None
+            failure = {'timeout':'timeout','cancelled':'cancelled','protocol_or_launch_error':'protocol'}.get(receipt['status'], 'unknown')
+            if receipt['status'] == 'completed':
+                clone(output / 'worktree', output / 'verification-worktree', snapshot)
+                check = verify(output / 'verification-worktree', output / 'verification', base / 'verifier.py',
+                    manifest['timeout_seconds'], {'schema_version':1,'task':{'id':world_id},'attempt_id':identifier})
+                wall += check['wall_seconds']
+                failure = (None if check['accepted'] else 'quality') if check['valid'] else ('timeout' if check['timed_out'] else 'infrastructure')
+            accepted = failure is None
+            at = adapter.stamp()
+            common = {'workspace':'dream:' + manifest['dataset_id'], 'task':world_id, 'attempt_id':identifier,
+                      'source':VERSION, 'at':at}
+            usage = {k:receipt.get(k) for k in ('input_tokens','output_tokens','cached_input_tokens','cost_usd','model_version')}
+            records = [dict(common, receipt_id=identifier+'-usage', kind='usage', role='discovery',
+                            provider=manifest['agent']['provider'], model=manifest['agent']['model'],
+                            effort=manifest['agent']['effort'], wall_seconds=wall, **usage)]
+            if check and check['valid']:
+                records.append(dict(common, receipt_id=identifier+'-verification', kind='verification', accepted=accepted,
+                    verifier_id='binary-acceptance', verifier_version=world['files']['verifier.py'],
+                    evidence_sha256=adapter.sha(output / 'verification/result.json')))
+            if failure:
+                records.append(dict(common, receipt_id=identifier+'-failure', kind='failure', failure_category=failure))
+            write(output / 'receipts.json', records)
+            node = {'id':identifier,'parent':parent,'parent_snapshot':commit,'snapshot':snapshot,
+                    'attempt_id':identifier,'configuration':telemetry.digest({'requested':manifest['agent'],
+                        'model_version':receipt.get('model_version'),'cli_version':receipt.get('cli_version')}),
+                    'requested_agent':manifest['agent'], 'observed_model_version':receipt.get('model_version'),
+                    'cli_version':receipt.get('cli_version'), 'verifier_version':world['files']['verifier.py'],
+                    'score':float(accepted), 'accepted':accepted, 'failure_category':failure,
+                    'wall_seconds':wall, 'cost_usd':receipt.get('cost_usd')}
+            files = {str(p.relative_to(output)):adapter.sha(p) for p in output.rglob('*')
+                     if p.is_file() and p.relative_to(output).parts[0] in ('provider','verification','receipts.json','started.json','prompt.txt')}
+            write(output / 'evidence.json', {'node':node,'files':files})
+            write(output / 'node.json', dict(node, evidence_sha256=adapter.sha(output / 'evidence.json')))
     try: ingestion = ingest(directory)
     except (OSError, ValueError, sqlite3.Error) as error:
         ingestion = {'recorded':0,'error':str(error),'retry':'dream ingest DIRECTORY'}

@@ -166,6 +166,15 @@ class Capture(unittest.TestCase):
         with c.locked(self.data/'worlds/w1'),self.assertRaisesRegex(ValueError,'another capture'):
             self.attempt()
 
+    def test_budget_denial_creates_no_attempt_or_provider_call(self):
+        self.init()
+        config=self.base/'config/agent-workspaces';config.mkdir(parents=True)
+        (config/'config.json').write_text(json.dumps({'budget':{'enabled':True}}))
+        with patch.object(a,'run_role') as call,self.assertRaisesRegex(ValueError,'economical'):
+            c.attempt(self.data,'w1','root')
+        call.assert_not_called()
+        self.assertEqual(list((self.data/'worlds/w1/attempts').iterdir()),[])
+
     def test_frozen_engine_cli_exports(self):
         self.init();self.attempt()
         result=subprocess.run([sys.executable,str(self.data/'engine/dream.py'),'export',str(self.data)],capture_output=True,text=True)

@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Budget decisions, atomic leases and expiry, without paid provider calls."""
+import copy
+from datetime import datetime,timedelta,timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode=True
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'lib'))
+import budget as b
+
+
+class Budget(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.base=Path(self.temp.name)
+        env=patch.dict(os.environ,XDG_STATE_HOME=str(self.base/'state'),XDG_CONFIG_HOME=str(self.base/'config'),XDG_DATA_HOME=str(self.base/'data'))
+        env.start();self.addCleanup(env.stop)
+        self.config=json.loads((ROOT/'config/config.json').read_text());self.config['budget']['enabled']=True
+        folder=self.base/'config/agent-workspaces';folder.mkdir(parents=True)
+        import shutil
+        shutil.copytree(ROOT/'config/providers',folder/'providers')
+        self.save();self.quota(.2)
+
+    def save(self):
+        (self.base/'config/agent-workspaces/config.json').write_text(json.dumps(self.config))
+    def quota(self,used,**changes):
+        now=datetime.now(timezone.utc)
+        obj={'id':'codex','ready':True,'updatedAt':now.isoformat(),'limits':[{'percent':used,'resetsAt':(now+timedelta(hours=3)).isoformat()}]}
+        obj.update(changes)
+        path=self.base/'state/omarchy/agents/usage';path.mkdir(parents=True,exist_ok=True)
+        (path/'codex.json').write_text(json.dumps(obj))
+
+    def test_separate_reserve_and_unknown_fail_closed(self):
+        self.quota(.6);b.check(self.config,'codex')
+        with self.assertRaisesRegex(ValueError,'protected'):b.check(self.config,'codex','experiment')
+        self.quota(.8)
+        with self.assertRaisesRegex(ValueError,'protected'):b.check(self.config,'codex')
+        self.quota(.1,ready=False)
+        with self.assertRaisesRegex(ValueError,'fresh'):b.check(self.config,'codex')
+
+    def test_attempts_shared_across_runs_and_failures_are_charged(self):
+        with self.assertRaises(RuntimeError):
+            with b.admission(self.config,'codex','experiment'):raise RuntimeError('provider failed')
+        with b.admission(self.config,'codex','experiment'):pass
+        with self.assertRaisesRegex(ValueError,'24-hour'):
+            with b.admission(self.config,'codex','experiment'):pass
+
+    def test_experiments_wait_behind_managed_work(self):
+        with b.admission(self.config,'codex','managed'):
+            with self.assertRaisesRegex(ValueError,'waits behind'):
+                with b.admission(self.config,'codex','experiment'):pass
+        with b.admission(self.config,'codex','experiment'):pass
+
+    def test_cross_process_concurrency_is_atomic(self):
+        code='import budget; c,_=budget.configuration();\nwith budget.admission(c,"codex","experiment"): pass'
+        with b.admission(self.config,'codex','experiment'):
+            result=subprocess.run([sys.executable,'-c',code],env={**os.environ,'PYTHONPATH':str(ROOT/'lib')},capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0);self.assertIn('another measured experiment',result.stderr)
+        db=b.database()
+        try:self.assertEqual(db.execute("select count(*) from claims where purpose='experiment'").fetchone()[0],1)
+        finally:db.close()
+
+    def test_boost_expiry_and_global_time_allowance(self):
+        with patch('budget.time.time',return_value=1000):
+            grant=b.grant(self.config,'w','codex','gpt-6-astra','high',10)
+            self.assertEqual(b.target(self.config,'codex','standard',workspace='w',lead=True)['model'],'gpt-6-astra')
+            with self.assertRaisesRegex(ValueError,'another'):b.grant(self.config,'other','codex','gpt-6-astra','high',10)
+        self.assertEqual(b.target(self.config,'codex','standard',workspace='w',lead=True,now=grant['expires']+1)['model'],'gpt-6.1-sol')
+        with patch('budget.time.time',return_value=1700):b.grant(self.config,'w','codex','gpt-6-astra','high',10)
+        with patch('budget.time.time',return_value=2400),self.assertRaisesRegex(ValueError,'allowance'):b.grant(self.config,'w','codex','gpt-6-astra','high',10)
+
+    def test_pressure_suppresses_boost_and_balances_effort(self):
+        b.grant(self.config,'w','codex','gpt-6-astra','high',10)
+        self.assertEqual(b.target(self.config,'codex','complex',True,'w',True),{'provider':'codex','model':'gpt-6.1-sol','effort':'medium'})
+        self.assertEqual(b.target(self.config,'codex','simple')['model'],'gpt-6-luna')
+
+    def test_expensive_experiments_and_long_timeouts_rejected(self):
+        with self.assertRaises(ValueError):b.check_experiment(self.config,{'provider':'codex','model':'gpt-6-astra','effort':'high'},30)
+        with self.assertRaises(ValueError):b.check_experiment(self.config,{'provider':'codex','model':'gpt-6-luna','effort':'low'},121)
+        b.check_experiment(self.config,{'provider':'codex','model':'gpt-6-luna','effort':'low'},120)
+
+    def test_disabled_preserves_existing_behavior(self):
+        self.config['budget']['enabled']=False;self.quota(.99)
+        with b.admission(self.config,'codex','managed'):pass
+        self.assertEqual(b.reserve(self.config),0)
+        self.assertIsNone(b.boost(self.config,'w','codex'))
+
+    def test_launch_denial_never_executes_child(self):
+        self.quota(.9)
+        marker=self.base/'should-not-exist'
+        result=subprocess.run([sys.executable,str(ROOT/'lib/budget.py'),'launch','codex','--',sys.executable,'-c',f'open({str(marker)!r},"w").write("bad")'],capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0);self.assertFalse(marker.exists())
+
+    def test_preexisting_managed_panes_take_priority(self):
+        with patch.object(b,'observed_sessions',return_value=1),self.assertRaisesRegex(ValueError,'waits behind'):
+            with b.admission(self.config,'codex','experiment'):pass
+
+    def test_account_aliases_share_concurrency(self):
+        self.config['routing']['account_pools']={'codex':'shared','claude':'shared'}
+        self.config['budget']['managed_concurrency_per_pool']=1
+        self.config['providers']=['codex']
+        with b.admission(self.config,'codex','managed'):
+            with self.assertRaisesRegex(ValueError,'concurrency'):
+                with b.admission(self.config,'claude','managed'):pass
+
+    def test_invalid_limits_rejected(self):
+        for key,value in [('external_reserve_fraction',float('nan')),('experiment_attempts_24h',True),('experiment_reserve_fraction',.1)]:
+            config=copy.deepcopy(self.config);config['budget'][key]=value
+            with self.assertRaises(ValueError):b.settings(config)
+
+if __name__=='__main__':unittest.main()

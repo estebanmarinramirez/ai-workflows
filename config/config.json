@@ -181,5 +181,17 @@
   },
   "telemetry": {
     "enabled": true
+  },
+  "budget": {
+    "enabled": false,
+    "external_reserve_fraction": 0.3,
+    "experiment_reserve_fraction": 0.5,
+    "experiment_attempts_24h": 2,
+    "experiment_concurrency": 1,
+    "managed_concurrency_per_pool": 2,
+    "boost_minutes_24h": 20,
+    "boost_max_minutes": 10,
+    "experiment_timeout_seconds": 120,
+    "effort_pressure_fraction": 0.5
   }
 }

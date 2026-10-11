@@ -245,6 +245,9 @@ class Assignments:
             validate(target['provider'], target['model'], target['effort'], self.config_root)
         except ValueError as error:
             raise ChangeError(str(error)) from error
+        import budget
+        try: budget.check(policy,target['provider'])
+        except ValueError as error: raise ChangeError(str(error)) from error
         if record.get('source') == 'routing':
             from capacity import capacities, pool_id, read_object
             routing = policy.get('routing', {})
@@ -267,7 +270,10 @@ class Assignments:
                 raise ChangeError('Routing preferences changed; cancel and replan this handover')
             _, pools = capacities(policy)
             pool = pools.get(pool_id(target['provider'], routing), {})
-            reserve = 0 if record['routing'].get('review_reserve') else routing.get('reserve_fraction', 0.15)
+            reserve = max(0 if record['routing'].get('review_reserve') else routing.get('reserve_fraction', 0.15),budget.reserve(policy))
+            expiry = record['routing'].get('boost_expires')
+            if expiry and expiry <= datetime.now(timezone.utc).timestamp():
+                raise ChangeError('Temporary boost expired; cancel and replan')
             if pool.get('state') != 'available' or pool['remaining'] <= reserve:
                 raise ChangeError('Target account no longer has fresh available capacity; cancel and replan')
         # Resolve explicitly against the selected settings without publishing
