@@ -202,3 +202,53 @@ before creating an attempt. Use an economical model and low/medium effort when
 budget control is enabled. Denial leaves no incomplete attempt. Older frozen
 engines predate these controls: initialize a fresh pilot instead of using them
 for the first budget-controlled run.
+
+## Configuration comparison (1.9)
+
+Replay v3 can start independent root attempts in every available worker slot in
+one round. Missing recorded branches are unsupported, never fabricated. Batch
+latency still assumes independent workers; real account contention is excluded.
+
+`agent-workspaces dream compare comparison.json` compares checked capture exports
+for different model/effort configurations on the same task instances. Each export
+must retain requested agent settings, prompt/verifier hashes and node provenance.
+Use the same baseline, evaluation protocol, objective and replay policy for every
+candidate. Tasks must initially fail a binary independent acceptance check.
+
+```json
+{
+  "schema_version": 1,
+  "difficulty": "standard",
+  "min_instances": 3,
+  "uncertainty_weight": 1,
+  "incumbent": "low",
+  "candidates": [
+    {"id": "low", "export": "low.json", "sha256": "EXPORT_SHA256", "policy": "breadth"},
+    {"id": "medium", "export": "medium.json", "sha256": "EXPORT_SHA256", "policy": "breadth"}
+  ]
+}
+```
+
+Freeze the comparison specification before evaluation. Development successes
+update a Beta(1,1) prior. Selection maximizes quality weight times posterior mean
+minus uncertainty weight times posterior standard deviation, then subtracts
+weighted mean cost, batch time and attempts. Weights are explicit preferences;
+activity counts do not learn them. Held-out evaluation compares only the selected
+candidate and incumbent, after selection. At least three independent instances
+in each split, complete supported replay and improvement in both splits are
+required. This minimum is not a statistical significance guarantee. Use fresh
+held-out tasks after inspecting results or revising the specification.
+
+Synthetic or insufficient evidence produces an abstention. Missing monetary cost
+is rejected when its objective weight is nonzero; zero cost weight excludes cost
+from optimization and makes no savings claim. Provider dollar figures can be
+list-price equivalents, not actual subscription credit charges. Export hashes
+pin evidence; they do not authenticate arbitrary hand-written traces.
+
+A supported result emits an offline `budget.profiles` configuration proposal,
+never an automatic deployment. After prospective validation, a reviewed profile
+can override a provider's simple/standard/complex model and effort in Balanced
+Auto. Fixed effort and manual assignments retain their existing semantics.
+Pressure reductions, protected reserves and economical experiment limits remain
+in force. Historical observations without attempt receipts cannot be converted
+into measured results; collect fresh attempts with the capture commands above.

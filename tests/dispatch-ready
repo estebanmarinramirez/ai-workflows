@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""No provider calls: queued work cannot pass an unacknowledged configuration."""
+import json,os,sys,tempfile,unittest
+from pathlib import Path
+from unittest.mock import patch
+sys.dont_write_bytecode=True
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'lib'))
+import dispatch
+from assignments import atomic
+class Queue(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  self.task=Path(self.tmp.name)/'.coordination/t';self.task.mkdir(parents=True)
+  self.state=dict(id='t',status='awaiting_configuration',workspace_id='w:s',stage='execute',lead='codex',roles={'codex':{'state':'dispatched','worktree':'/fixture'},'grok':{'state':'deferred'}},transitions=[])
+  atomic(self.task/'state.json',self.state)
+ def test_wait_ack_then_send_once(self):
+  calls=[]
+  def command(args):
+   calls.append(args)
+   if args[1]=='list-sessions':return 's\tw:s\tcodex'
+   if args[1]=='capture-pane':return '›'
+   return ''
+  with patch.object(dispatch,'Router') as Router,patch.object(dispatch,'command',side_effect=command),patch.object(dispatch.subprocess,'run') as run,patch('budget.check'),patch('time.sleep'):
+   router=Router.return_value;router.config={};router.current.return_value={'provider':'codex'};run.return_value.returncode=0
+   router.readiness.return_value=['codex: pending model acknowledgement']
+   self.assertEqual(dispatch.deliver(self.task,'cli')['status'],'awaiting_configuration')
+   self.assertFalse(any(c[1]=='paste-buffer' for c in calls))
+   router.readiness.return_value=[]
+   self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],['codex'])
+   self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],[])
+   self.assertEqual(sum(c[1]=='paste-buffer' for c in calls),1)
+ def test_pending_handover_still_blocks_when_routing_does_not_manage_it(self):
+  with patch.object(dispatch,'Router') as Router,patch.object(dispatch,'command',return_value='s\tw:s\tcodex') as command,patch.object(dispatch.subprocess,'run') as run,patch('budget.check'):
+   router=Router.return_value;router.config={};router.current.return_value={'provider':'codex'};router.readiness.return_value=[]
+   router.store.load.return_value={'requests':{'r':{'slot':'codex','phase':'awaiting_ack'}}};run.return_value.returncode=0
+   result=dispatch.deliver(self.task,'cli');self.assertEqual(result['status'],'awaiting_configuration')
+   self.assertIn('codex: pending handover',result['waiting'])
+   self.assertFalse(any(c.args[0][1]=='paste-buffer' for c in command.call_args_list))
+ def test_draft_and_interrupted_delivery_do_not_send_or_retry(self):
+  with patch.object(dispatch,'Router') as Router,patch.object(dispatch,'command',return_value='s\tw:s\tcodex'),patch.object(dispatch.subprocess,'run') as run,patch('budget.check'):
+   Router.return_value.config={};Router.return_value.current.return_value={'provider':'codex'};Router.return_value.readiness.return_value=[]
+   run.side_effect=[type('Result',(),{'returncode':0})(),type('Result',(),{'returncode':1})()]
+   self.assertEqual(dispatch.deliver(self.task,'cli')['status'],'awaiting_configuration')
+  self.state['status']='dispatching';atomic(self.task/'state.json',self.state)
+  with patch.object(dispatch,'command') as command:
+   self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],[]);command.assert_not_called()
+if __name__=='__main__':unittest.main()

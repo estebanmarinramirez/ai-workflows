@@ -2,7 +2,7 @@
 
 set -o pipefail
 
-AW_VERSION=1.8.5
+AW_VERSION=1.9.0
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
@@ -339,6 +339,8 @@ aw_next_actions_json() {
   fi
   case "$status" in
     active) jq -cn '[{id:"wait",label:"Agents are still working",mutating:false}]' ;;
+    awaiting_configuration) jq -cn '[{id:"configuration-pending",label:"Waiting for task configuration acknowledgement; monitor resumes automatically",mutating:false}]' ;;
+    dispatching) jq -cn '[{id:"inspect-dispatch",label:"Inspect interrupted prompt delivery before retrying",mutating:false}]' ;;
     awaiting_review) jq -cn '[{id:"activate-reviewers",label:"Release the immutable lead artifact to reviewers",mutating:true}]' ;;
     blocked) jq -cn '[{id:"resolve-blocker",label:"Review blockers and dispatch a focused follow-up",mutating:false}]' ;;
     awaiting_triage) jq -cn '[{id:"dispatch-execution",label:"Approve scope and dispatch an execution cycle",mutating:true},{id:"complete-review",label:"Close the review without implementation",mutating:true}]' ;;

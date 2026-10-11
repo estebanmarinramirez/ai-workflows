@@ -157,3 +157,16 @@ an unverified pool. The controller warns that reserve protection cannot be
 verified. Known low quota (including partial pool evidence) and process
 concurrency still apply. Experiments and temporary boosts never use this
 exception. Remove the provider from the list to restore strict admission.
+
+New workflow tasks are persisted as `awaiting_configuration`. The dispatcher
+reconciles routing using that task's difficulty and sends work only after the
+required handover is acknowledged, budget admission succeeds and each selected
+CLI has an empty idle composer. The monitor resumes this queue automatically.
+`dispatching` means delivery began: after interruption inspect the panes and
+recorded sent slots before manual recovery; the monitor never blindly resends.
+This preserves existing in-flight work, user drafts, Fixed mode and manual pins.
+
+Reviewed Dream comparison proposals may set
+`budget.profiles.PROVIDER.DIFFICULTY` to a model/effort object for Balanced Auto.
+These overrides do not widen the measured-experiment model allowance or disable
+quota protection. See [configuration comparison](dream-replay.md).

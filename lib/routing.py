@@ -246,6 +246,16 @@ class Router:
                     stream.write(json.dumps(record, sort_keys=True)+'\n')
             return report
 
+    def readiness(self, path, slots):
+        report=self.reconcile(path)
+        reasons=self.guard(slots,path)
+        decisions={row['slot']:row for row in report['decisions']}
+        for slot in slots:
+            row=decisions.get(slot)
+            if report['mode']=='automatic' and row and row['action'] not in ('keep','cooldown','pinned','unknown','cancelled'):
+                reasons.append(slot+': '+row['reason'])
+        return reasons
+
     def guard(self, slots, path=None, review=False):
         task_path, task = self.task(path) if path else (None, None)
         if self.policy.get('mode', 'off') != 'automatic': return []
@@ -286,7 +296,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workspace')
     parser.add_argument('--cli', required=True)
-    parser.add_argument('action', choices=('show', 'reconcile', 'guard', 'difficulty', 'effort-mode'), nargs='?', default='show')
+    parser.add_argument('action', choices=('show', 'reconcile', 'guard', 'ready', 'difficulty', 'effort-mode'), nargs='?', default='show')
     parser.add_argument('--mode', choices=('auto', 'balanced', 'fixed'))
     parser.add_argument('--task')
     parser.add_argument('--difficulty', choices=DIFFICULTIES)
@@ -338,9 +348,10 @@ def main():
                         if record['phase'] in ('requested', 'ready'):
                             record.update(phase='cancelled', cancelled_at=router.now.isoformat())
                     router.store.save(state)
-        if args.action == 'guard':
+        if args.action in ('guard','ready'):
             if not args.roles: raise ChangeError('Specify --roles')
-            errors = router.guard(args.roles, args.task, args.review)
+            if args.action=='ready' and not args.task:raise ChangeError('Readiness requires a task')
+            errors = router.readiness(args.task,args.roles) if args.action=='ready' else router.guard(args.roles, args.task, args.review)
             if errors: parser.exit(2, '\n'.join(errors)+'\n')
             return
         result = router.reconcile(args.task) if args.action == 'reconcile' else router.plan(args.task)

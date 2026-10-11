@@ -259,6 +259,7 @@ case "$cmd" in
         aw_task_refresh "$task" >/dev/null || true
         jq -r '"- `" + .id + "` · **" + .status + "** · " + .stage + " · " + .objective,
           (.roles | to_entries[] | "  - " + .key + ": " + (.value.state // "dispatched")),
+          ((.dispatch.waiting // [])[] | "  - Configuration: " + .),
           ((.review_activation.deferred // {}) | to_entries[] | "  - Waiting: " + .key + " · " + .value)' "$state"
         next_label=$(aw_next_actions_json "$task" | jq -r '.[0].label // "No further action"')
         printf '  - Next: %s\n' "$next_label"
@@ -314,6 +315,16 @@ case "$cmd" in
         done)
     done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
     ;;
+  dispatch-ready)
+    exec python3 "$(dirname "$catalog_script")/dispatch.py" "${1:?task directory}" "$0"
+    ;;
+  reconcile-dispatch)
+    workspace_root=$(aw_workspace_root "${1:?workspace id}") || aw_die 'unknown workspace'
+    while IFS= read -r state; do
+      [[ $(jq -r '.status' "$state") == awaiting_configuration ]] || continue
+      "$0" dispatch-ready "$(dirname "$state")" || true
+    done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
+    ;;
   reconcile-reviewers)
     workspace_id=${1:?workspace id}
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
@@ -336,6 +347,7 @@ case "$cmd" in
     while :; do
       "$0" routing "$workspace_id" reconcile >/dev/null 2>&1 || true
       "$0" agents "$workspace_id" reconcile >/dev/null 2>&1 || true
+      "$0" reconcile-dispatch "$workspace_id" >/dev/null 2>&1 || true
       "$0" reconcile-reviewers "$workspace_id" >/dev/null 2>&1 || true
       snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
       if [[ -s $snapshot_file ]]; then

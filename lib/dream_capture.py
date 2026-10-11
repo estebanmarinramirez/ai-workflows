@@ -19,7 +19,7 @@ import telemetry
 import budget
 
 VERSION = 'dream-capture-v1'
-ENGINE = ('dream.py', 'dream_capture.py', 'provider_adapter.py', 'telemetry.py', 'budget.py', 'capacity.py', 'models.py', 'assignments.py')
+ENGINE = ('dream.py', 'dream_capture.py', 'provider_adapter.py', 'telemetry.py', 'budget.py', 'capacity.py', 'models.py', 'assignments.py', 'dream_compare.py')
 
 
 def write(path, value):
@@ -302,6 +302,7 @@ def attempt(directory, world_id, parent):
 def export(directory):
     directory, manifest = load(directory)
     result = {key:manifest[key] for key in ('schema_version','data_kind','evaluation_protocol','objective','incumbent','policies')}
+    result['agent']=manifest['agent']
     result['capture_dataset_id'] = manifest['dataset_id']; result['worlds'] = []
     for world in manifest['worlds']:
         base = directory / 'worlds' / world['id']
@@ -310,7 +311,7 @@ def export(directory):
             for node in history:
                 expected = world['root_snapshot'] if node['parent'] == 'root' else next(n['snapshot'] for n in history if n['id'] == node['parent'])
                 if expected != node['parent_snapshot']: raise ValueError('parent snapshot mismatch')
-            result['worlds'].append({**{k:world[k] for k in ('id','instance_id','split','root_score','root_snapshot')},'nodes':history})
+            result['worlds'].append({**{k:world[k] for k in ('id','instance_id','split','root_score','root_snapshot')},'prompt_sha256':world['files']['prompt.txt'],'verifier_sha256':world['files']['verifier.py'],'nodes':history})
     dream.validate(result)
     return result
 

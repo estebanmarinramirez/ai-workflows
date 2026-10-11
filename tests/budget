@@ -37,6 +37,15 @@ class Budget(unittest.TestCase):
         path=self.base/'state/omarchy/agents/usage';path.mkdir(parents=True,exist_ok=True)
         (path/'codex.json').write_text(json.dumps(obj))
 
+    def test_validated_profile_override_and_pressure(self):
+        self.config['budget']['profiles']={'codex':{'standard':{'model':'gpt-6.1-sol','effort':'high'}}}
+        self.assertEqual(b.target(self.config,'codex','standard')['effort'],'high')
+        self.assertEqual(b.target(self.config,'codex','standard',pressure=True)['effort'],'medium')
+        self.config['budget']['profiles']['codex']['standard']['effort']='invalid-effort'
+        with self.assertRaises(ValueError):b.target(self.config,'codex','standard')
+        self.config['budget']['profiles']=[]
+        with self.assertRaises(ValueError):b.target(self.config,'codex','standard')
+
     def test_separate_reserve_and_unknown_fail_closed(self):
         self.quota(.6);b.check(self.config,'codex')
         with self.assertRaisesRegex(ValueError,'protected'):b.check(self.config,'codex','experiment')
