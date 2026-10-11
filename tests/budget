@@ -112,6 +112,7 @@ class Budget(unittest.TestCase):
 
     def test_usage_timer_refreshes_native_limits_only_when_enabled(self):
         binaries=self.base/'bin';binaries.mkdir()
+        codex=binaries/'codex';codex.write_text('#!/bin/sh\nexit 1\n');codex.chmod(0o755)
         native=binaries/'omarchy';native.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$AW_TEST_NATIVE_LOG"\n');native.chmod(0o755)
         collector=binaries/'fixture';collector.write_text('#!/usr/bin/env python3\nprint('+repr(json.dumps({'schemaVersion':1,'id':'fixture','name':'Fixture','ready':True,'limits':[],'updatedAt':'2026-10-11T00:00:00Z'}))+')\n');collector.chmod(0o755)
         logfile=self.base/'native.log'
@@ -142,6 +143,51 @@ class Budget(unittest.TestCase):
         db=b.database()
         try:self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0],0)
         finally:db.close()
+
+    def test_unknown_interactive_launch_opens_but_automated_work_blocks(self):
+        self.quota(.1,limits=[])
+        for purpose in ('managed','experiment'):
+            with self.assertRaisesRegex(ValueError,'fresh'):
+                with b.admission(self.config,'codex',purpose):pass
+        marker=self.base/'opened'
+        command=[sys.executable,str(ROOT/'lib/budget.py'),'launch','codex','--',sys.executable,'-c',f'open({str(marker)!r},"w").write("opened")']
+        result=subprocess.run(command,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertTrue(marker.exists())
+        self.assertIn('quota unknown',result.stderr)
+        self.config['budget']['unknown_interactive']='block';self.save();marker.unlink()
+        result=subprocess.run(command,capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0);self.assertFalse(marker.exists())
+
+    def test_unknown_interactive_still_enforces_concurrency_and_partial_reserve(self):
+        self.quota(.1,limits=[])
+        self.config['budget']['managed_concurrency_per_pool']=1
+        with b.admission(self.config,'codex','managed',interactive=True):
+            with self.assertRaisesRegex(ValueError,'concurrency'):
+                with b.admission(self.config,'codex','managed',interactive=True):pass
+        self.config['providers']=['codex','claude']
+        self.config['routing']['account_pools']={'codex':'shared','claude':'shared'}
+        self.quota(.9)
+        with self.assertRaisesRegex(ValueError,'protected'):
+            b.check(self.config,'claude',interactive=True)
+
+    def test_quota_rpc_handles_batched_notifications_and_response(self):
+        import codex_quota
+        child=subprocess.Popen([sys.executable,'-c',
+            'import sys,time;sys.stdin.readline();sys.stdout.write(\'{'+'"method":"notice"}\\n{"id":1,"result":{"ok":true}}\\n'+"\');sys.stdout.flush();time.sleep(10)"],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+        try:self.assertEqual(codex_quota.RPC(child).request(1,'probe',timeout=2),{'ok':True})
+        finally:child.terminate();child.wait();child.stdin.close();child.stdout.close()
+
+    def test_quota_refresh_failure_does_not_publish_fresh_capacity(self):
+        import codex_quota
+        self.quota(.1,limits=[])
+        path=self.base/'state/omarchy/agents/usage/codex.json';before=path.read_bytes()
+        with patch.object(codex_quota,'query',side_effect=TimeoutError('fixture')):
+            with self.assertRaises(TimeoutError):codex_quota.refresh()
+        self.assertEqual(path.read_bytes(),before)
+        with patch.object(codex_quota,'query',return_value=[{'percent':.37}]) as query:
+            codex_quota.refresh();codex_quota.refresh();query.assert_called_once()
+        self.assertEqual(json.loads(path.read_text())['limits'],[{'percent':.37}])
 
     def test_invalid_limits_rejected(self):
         for key,value in [('external_reserve_fraction',float('nan')),('experiment_attempts_24h',True),('experiment_reserve_fraction',.1)]:

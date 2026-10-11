@@ -80,3 +80,8 @@ provider directly to bypass a denial. Wait or report the missing capacity.
 Temporary lead boosts require a diagnosed difficult blocker and must remain
 inside the shared time allowance; expiry returns to the ordinary profile at a
 safe checkpoint. Never interrupt an active command just to change model/effort.
+
+Interactive startup may warn and open when quota telemetry is unknown, so account
+status can be inspected. This is not evidence of available capacity: automated
+wakeups, handovers, measured attempts and RSI must still pass their strict gates.
+Do not use terminal typing or retry loops to bypass a denied automated task.

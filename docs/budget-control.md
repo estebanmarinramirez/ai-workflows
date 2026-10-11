@@ -24,7 +24,15 @@ until explicitly enabled. All other limits are available as `budget` keys:
 | experiment_timeout_seconds | 120 | Maximum permitted frozen timeout for an RSI attempt. |
 
 Account-pool aliases use `routing.account_pools`. Fresh authoritative quota is
-required when enabled; missing, stale or incomplete observations defer new work.
+required for automated wakeups, handovers, measured work and experiments.
+Interactive CLI startup uses `budget.unknown_interactive: "warn"` by default:
+missing/stale telemetry displays a warning and opens the CLI, so users can
+inspect account status and obtain fresh observations. Set this to `"block"`
+for strict startup admission. Known low quota and shared concurrency limits
+still block interactive startup, including restrictive partial account-pool
+evidence. Unknown capacity is never reported as available. Direct interaction
+can spend quota whose reserve cannot be verified; this exception is not a
+billing guarantee and does not authorize automated work.
 When enabled on Omarchy, the existing two-minute usage timer also refreshes native
 Codex/Claude account limits, so admission does not depend on opening the desktop
 panel. These are quota queries, not model turns. Failed refreshes never authorize
@@ -132,3 +140,9 @@ group before releasing the budget claim. Interrupted captures can remain
 incomplete and must be inspected, not automatically retried. SIGKILL or machine
 failure cannot run this cleanup; inspect surviving processes before another run.
 A new frozen dataset is required to use these adapter and admission fixes.
+
+The usage timer includes a Codex quota-only fallback when the native collector
+returns unknown capacity. It reads app-server responses with an explicit byte
+buffer so batched notifications cannot hide the account response. It publishes
+only successfully validated limits and makes no inference calls. A working
+native reading skips this additional query. Omarchy package files are unchanged.

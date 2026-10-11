@@ -33,6 +33,7 @@ if jq -e '.budget.enabled == true' "$config_file" >/dev/null 2>&1 && command -v 
     aw_usage_log ERROR quota 'native quota refresh failed; budget admission stays conservative'
     status=1
   fi
+  python3 "$(dirname "$usage_lib")/codex_quota.py" || status=1
 fi
 collectors=${AW_USAGE_COLLECTORS:-grok=$HOME/.local/bin/omarchy-agent-usage-grok:agent-workspaces=$HOME/.local/bin/omarchy-agent-usage-workspaces}
 IFS=: read -r -a entries <<<"$collectors"
