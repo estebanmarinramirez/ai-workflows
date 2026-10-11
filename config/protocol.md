@@ -93,3 +93,9 @@ deferred and still prevent final completion. Partial activation does not waive
 verification or authorize implementation of a different task. Do not repeatedly
 retry an unchanged all-reviewer capacity denial; select eligible roles or report
 which required verification is still pending.
+
+The monitor automatically activates eligible deferred reviewers on its regular
+local poll; the default activate-reviewers command does the same. Explicit
+--roles remains strict for the named set. Blocked roles remain deferred with
+reasons in review_activation.deferred and workspace snapshots. Repeated polls
+never resend already dispatched reviews. Do not run separate retry loops.

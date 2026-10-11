@@ -258,7 +258,8 @@ case "$cmd" in
         task=$(dirname "$state")
         aw_task_refresh "$task" >/dev/null || true
         jq -r '"- `" + .id + "` · **" + .status + "** · " + .stage + " · " + .objective,
-          (.roles | to_entries[] | "  - " + .key + ": " + (.value.state // "dispatched"))' "$state"
+          (.roles | to_entries[] | "  - " + .key + ": " + (.value.state // "dispatched")),
+          ((.review_activation.deferred // {}) | to_entries[] | "  - Waiting: " + .key + " · " + .value)' "$state"
         next_label=$(aw_next_actions_json "$task" | jq -r '.[0].label // "No further action"')
         printf '  - Next: %s\n' "$next_label"
       done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null | sort -r)
@@ -313,6 +314,14 @@ case "$cmd" in
         done)
     done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
     ;;
+  reconcile-reviewers)
+    workspace_id=${1:?workspace id}
+    workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
+    while IFS= read -r state; do
+      jq -e '(.status=="awaiting_review" or .status=="active") and any(.roles[]; .state=="deferred")' "$state" >/dev/null || continue
+      "$0" activate-reviewers "$(dirname "$state")" || true
+    done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
+    ;;
   monitor)
     workspace_id=${1:?workspace id}
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
@@ -327,6 +336,7 @@ case "$cmd" in
     while :; do
       "$0" routing "$workspace_id" reconcile >/dev/null 2>&1 || true
       "$0" agents "$workspace_id" reconcile >/dev/null 2>&1 || true
+      "$0" reconcile-reviewers "$workspace_id" >/dev/null 2>&1 || true
       snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
       if [[ -s $snapshot_file ]]; then
         signature=$(sed '/^Updated:/d' "$snapshot_file" | sha256sum | awk '{print $1}')
@@ -540,15 +550,17 @@ PLIST
     aw_audit "$workspace_root" workspace.synced "$(jq -cn --arg base "$base" --arg machine "$(jq -r '.machine_id // "legacy"' "$manifest")" '{base:$base,machine_id:$machine}')" user:confirmed-via-orchestrator
     ;;
   activate-reviewers)
-    task=${1:?task directory}; shift; state="$task/state.json"
+    task=$(realpath "${1:?task directory}"); shift; state="$task/state.json"
     selected_reviewers=()
     if (($#)); then
       [[ $1 == --roles ]] || aw_die 'usage: activate-reviewers TASK_DIR [--roles ROLE ...]'
       shift; (($#)) || aw_die '--roles requires at least one reviewer'
       selected_reviewers=("$@")
     fi
-    aw_require_no_handover "$task"
     [[ -f $state ]] || aw_die 'missing state.json'
+    exec {review_lock}>"${task%/.coordination/*}/.coordination/.review-dispatch.lock"
+    flock "$review_lock"
+    aw_require_no_handover "$task"
     "$0" refresh "$task" >/dev/null
     [[ $(jq -r '.status' "$state") =~ ^(awaiting_review|active)$ ]] || aw_die 'task is not awaiting reviewer activation'
     lead=$(jq -r '.lead // empty' "$state"); [[ -n $lead ]] || aw_die 'task has no recorded lead'
@@ -569,13 +581,44 @@ PLIST
       done
     fi
     ((${#deferred[@]})) || aw_die 'no deferred reviewers'
-    "$0" routing "$workspace_id" guard --task "$task" --roles "${deferred[@]}" || aw_die 'reviewers are waiting for routing/capacity'
     declare -A reviewer_sessions=()
+    eligible=(); waiting='{}'
     for role in "${deferred[@]}"; do
-      session=$(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}' 2>/dev/null | awk -F '\t' -v role="$role" -v id="$workspace_id" '$2==role && $3==id {print $1; exit}')
-      [[ -n $session ]] || aw_die "no live tmux session for reviewer: $role"
-      reviewer_sessions[$role]=$session
+      reason=''
+      provider=$(aw_role_provider "$(jq -r --arg role "$role" '.roles[$role].provider // $role' "$state")" "$role" "$workspace_id")
+      if ! reason=$("$0" budget check "$provider" 2>&1); then
+        reason=${reason:-'capacity unavailable'}
+      elif [[ -f ${task%/.coordination/*}/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]?; .slot==$role and (.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "${task%/.coordination/*}/.coordination/agents.json" >/dev/null; then
+        reason='pending handover'
+      elif ! reason=$("$0" routing "$workspace_id" guard --task "$task" --roles "$role" 2>&1); then
+        reason=${reason:-'capacity unavailable'}
+      else
+        reason=''
+        session=$(tmux list-sessions -F $'#{session_name}\t#{@aw_role}\t#{@aw_workspace_id}' 2>/dev/null | awk -F '\t' -v role="$role" -v id="$workspace_id" '$2==role && $3==id {print $1; exit}')
+        provider=$(aw_role_provider "$(jq -r --arg role "$role" '.roles[$role].provider // $role' "$state")" "$role" "$workspace_id")
+        if [[ -z $session ]] || ! agent-workspaces-pane-active "$provider" "$session"; then
+          reason='reviewer CLI is not running'
+        elif ! capture=$(tmux capture-pane -p -t "$session" -S -30 2>/dev/null) || ! aw_orchestrator_prompt_idle "$provider" <<<"$capture"; then
+          reason='reviewer is not at an idle prompt'
+        elif find "${task%/.coordination/*}/.coordination" -mindepth 2 -maxdepth 2 -name state.json ! -path "$state" -exec jq -e --arg role "$role" '(.status=="active" or .status=="blocked") and (.roles[$role].state=="dispatched" or .roles[$role].state=="in_progress")' {} \; 2>/dev/null | grep '^true$' >/dev/null; then
+          reason='reviewer belongs to another active task'
+        fi
+      fi
+      if [[ -n $reason ]]; then
+        waiting=$(jq -c --arg role "$role" --arg reason "$reason" '. + {($role):$reason}' <<<"$waiting")
+      else
+        eligible+=("$role"); reviewer_sessions[$role]=$session
+      fi
     done
+    if ((${#selected_reviewers[@]})) && [[ $waiting != '{}' ]]; then
+      printf '%s\n' "$waiting" >&2; aw_die 'selected reviewers are not ready'
+    fi
+    previous_waiting=$(jq -cS '.review_activation.deferred // {}' "$state")
+    if [[ $previous_waiting != "$(jq -cS . <<<"$waiting")" ]]; then
+      aw_atomic_jq "$state" --argjson waiting "$waiting" '.review_activation.deferred=$waiting'
+    fi
+    ((${#eligible[@]})) || { printf 'Reviewers deferred: %s\n' "$waiting"; exit 0; }
+    deferred=("${eligible[@]}")
     roles_json=$(printf '%s\n' "${deferred[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')
     for role in "${deferred[@]}"; do
       aw_atomic_jq "$task/$role.status.json" --arg at "$(aw_now)" '.state="dispatched" | .updated_at=$at'

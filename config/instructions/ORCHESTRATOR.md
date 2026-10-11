@@ -130,3 +130,11 @@ Pending selections can be cancelled before launch, or after an unacknowledged su
 pending and can be retried with apply after the pane is stopped; it never grants
 ownership automatically. A selection alone never authorizes merging, pushing,
 publishing, broader permissions, or new task scope.
+
+Deferred reviews are activated automatically by the workspace monitor when the
+lead artifact is committed, capacity is verified, and the reviewer CLI is idle.
+The default `activate-reviewers TASK_DIR` also starts only eligible reviewers.
+Read `review_activation.deferred` or the snapshot's Waiting lines for reasons.
+Do not ask the user to disable a provider or the budget gate merely because one
+reviewer is unavailable, and do not start retry loops. Remaining deferred roles
+are still required; do not silently waive verification or broaden task scope.

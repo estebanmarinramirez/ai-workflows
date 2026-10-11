@@ -331,3 +331,9 @@ Use `agent-workspaces telemetry audit` to check what evidence exists first.
 shared RSI attempt/concurrency limits, and temporary lead boosts. Admission checks
 cover managed launches and automated wakeups; they are not per-turn billing caps.
 Fixed model/effort choices remain available.
+
+Deferred reviewers start automatically once the lead has a committed artifact,
+quota is verified, and their CLI is idle. Unavailable reviewers remain required
+and appear as Waiting entries in the workspace snapshot. The monitor retries
+locally; no model calls are used to poll readiness. Explicit `--roles` activation
+is still available for selecting a strict reviewer set.

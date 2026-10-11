@@ -56,6 +56,11 @@ AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" orchestrator-set codex t
 [[ $(jq -r '.orchestrator_provider + ":" + .orchestrator_model + ":" + .model_policy.codex.model' "$fixture/config/agent-workspaces/config.json") == codex:test-model:worker-model ]] || { printf 'not ok - explicit orchestrator selection\n'; failures=$((failures+1)); }
 jq 'del(.provider_overrides)' "$fixture/config/agent-workspaces/config.json" >"$fixture/config/agent-workspaces/config.tmp" && mv "$fixture/config/agent-workspaces/config.tmp" "$fixture/config/agent-workspaces/config.json"
 
+printf '%s\n' '›' | aw_orchestrator_prompt_idle codex || { printf 'not ok - empty Codex composer\n'; failures=$((failures+1)); }
+printf '%s\n' '│ ❯                 │' | aw_orchestrator_prompt_idle grok || { printf 'not ok - bordered Grok composer\n'; failures=$((failures+1)); }
+if printf '%s\n' '│ ❯ keep this draft │' | aw_orchestrator_prompt_idle grok; then
+  printf 'not ok - Grok draft must survive\n'; failures=$((failures+1))
+fi
 printf '%s\n' '› Ask Codex to do anything' | aw_orchestrator_prompt_idle codex || { printf 'not ok - idle Codex prompt detection\n'; failures=$((failures+1)); }
 if printf '%s\n' '› user draft must survive' | aw_orchestrator_prompt_idle codex; then
   printf 'not ok - typed Codex prompt protection\n'; failures=$((failures+1))
