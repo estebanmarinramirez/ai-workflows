@@ -10,6 +10,7 @@ install-macos:
 	./packaging/install-macos
 
 test:
+	python3 tests/dispatcher-readiness
 	python3 tests/dream-compare
 	python3 tests/dispatch-ready
 	python3 tests/budget

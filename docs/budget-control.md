@@ -170,3 +170,14 @@ Reviewed Dream comparison proposals may set
 `budget.profiles.PROVIDER.DIFFICULTY` to a model/effort object for Balanced Auto.
 These overrides do not widen the measured-experiment model allowance or disable
 quota protection. See [configuration comparison](dream-replay.md).
+
+Unattended dispatch reports unavailable agents and pending handovers on stderr
+with a nonzero exit status instead of opening a desktop chooser. Provider discovery
+reads the complete list once, and readiness uses each slot's current provider.
+Slot names do not pin providers or models. Automatic capacity routing remains
+subject to configured capabilities, preferences and account reserves.
+
+For lead-first execution and integration, only the selected lead must be running;
+unavailable reviewers remain recorded as deferred assignments for later activation.
+A pending lead handover on another slot does not prevent this dispatch. Review and
+verification batches still require their participating agents to be ready.
