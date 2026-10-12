@@ -57,6 +57,9 @@ elif name in ('omarchy','gum','omarchy-agent-pane-active'):sys.exit(99)
   self.assertEqual(state['lead'],'grok');self.assertEqual(state['roles']['codex']['state'],'deferred')
   self.assertEqual(state['roles']['claude']['provider'],'grok')
   self.assertEqual(state['roles']['grok']['state'],'dispatched')
+ def test_disabled_lead_first_requires_all_agents(self):
+  p=self.base/'.config/agent-workspaces/config.json';config=json.loads(p.read_text());config['delivery_policy']['lead_first']=False;p.write_text(json.dumps(config))
+  self.assertIn('2/3 agents ready',self.run_dispatch(MISSING_SESSION='s-codex',AW_LEAD='grok').stderr)
  def test_budget_guard_still_blocks(self):
   self.assertIn('protected quota',self.run_dispatch(AW_LEAD='claude').stderr)
 if __name__=='__main__':unittest.main()

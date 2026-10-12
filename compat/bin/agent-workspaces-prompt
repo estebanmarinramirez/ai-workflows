@@ -25,7 +25,7 @@ while IFS=$'\t' read -r session workspace_id role repository set_slug; do
 done < <(tmux list-sessions -F $'#{session_name}\t#{@aw_workspace_id}\t#{@aw_role}\t#{@aw_repository}\t#{@aw_set}' 2>/dev/null)
 
 if ((${#workspace_labels[@]} == 0)); then
-  notify-send 'Agent Workspaces' 'No live managed sessions. Open a workspace first.'
+  dispatch_error 'No live managed sessions. Open a workspace first.'
   exit 1
 fi
 
@@ -125,7 +125,7 @@ difficulty=${AW_DIFFICULTY:-standard}
 [[ $difficulty =~ ^(simple|standard|complex)$ ]] || { dispatch_error 'Invalid routing difficulty'; exit 1; }
 case "$stage" in review|execute|verify|integrate) ;; *) dispatch_error "Unsupported workflow stage: $stage"; exit 1 ;; esac
 
-lead_first=$(jq -r '.delivery_policy.lead_first // true' "$HOME/.config/agent-workspaces/config.json")
+lead_first=$(jq -r '.delivery_policy.lead_first | if . == null then true else . end' "$HOME/.config/agent-workspaces/config.json")
 lead_only=false
 [[ $lead_first == true && ( $stage == execute || $stage == integrate ) ]] && lead_only=true
 
