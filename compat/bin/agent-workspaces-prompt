@@ -5,6 +5,12 @@
 
 set -o pipefail
 
+# CLI callers must receive a diagnostic even without a desktop notification daemon.
+dispatch_error() {
+  printf 'agent-workspaces dispatch: %s\n' "$1" >&2
+  notify-send 'Agent Dispatcher' "$1" 2>/dev/null || true
+}
+
 declare -A workspace_labels=()
 declare -A workspace_sessions=()
 declare -A workspace_repositories=()
@@ -29,16 +35,22 @@ for workspace_id in "${!workspace_labels[@]}"; do
 done
 if [[ -n ${AW_WORKSPACE_ID:-} ]]; then
   workspace_id=$AW_WORKSPACE_ID
-  [[ -n ${workspace_labels[$workspace_id]:-} ]] || { notify-send 'Agent Dispatcher' 'The requested workspace has no live managed sessions.'; exit 1; }
+  [[ -n ${workspace_labels[$workspace_id]:-} ]] || { dispatch_error 'The requested workspace has no live managed sessions.'; exit 1; }
 elif ((${#workspace_labels[@]} == 1)); then
   # A chooser with one row looks like a dead end and adds no information.
   # Continue directly to the development-template step.
   workspace_id=${!workspace_labels[@]}
 else
+  if [[ ${AW_AUTO_CONFIRM:-0} == 1 ]]; then
+    dispatch_error 'Select a workspace with --workspace.'; exit 1
+  fi
   workspace_selection=$(printf '%s\n' "${workspace_options[@]}" | omarchy menu select 'Choose workspace' -- --width 420) || exit 0
   workspace_id=${workspace_selection##*$'\t'}
 fi
 
+if [[ ${AW_AUTO_CONFIRM:-0} == 1 && ( -z ${AW_TEMPLATE:-} || -z ${AW_OBJECTIVE:-} ) ]]; then
+  dispatch_error 'Unattended dispatch requires a template and objective.'; exit 1
+fi
 if [[ -z ${AW_TEMPLATE:-} ]]; then
   operation=$(printf '%s\n' 'Start workflow' 'Change agents' | gum choose --header="${workspace_labels[$workspace_id]}") || exit 0
   [[ $operation != 'Change agents' ]] || exec agent-workspaces-agents "$workspace_id"
@@ -48,39 +60,40 @@ declare -A role_sessions=()
 declare -A role_panes=()
 declare -A role_paths=()
 declare -A role_providers=()
+configured_roles=()
 active_roles=()
 active_count=0
 expected_count=0
+unavailable_roles=()
+# Capture the producer completely: grep -q in a pipe can SIGPIPE it under pipefail.
+available_providers=$(agent-workspaces available-providers) || {
+  dispatch_error 'Cannot determine available providers.'; exit 1;
+}
 
 while IFS= read -r session; do
   [[ -n $session ]] || continue
   role=$(tmux show-option -qv -t "$session" @aw_role)
   provider=$(tmux show-option -qv -t "$session" @aw_provider); provider=${provider:-$role}
-  agent-workspaces available-providers | grep -qx "$provider" || continue
+  grep -Fxq -- "$provider" <<<"$available_providers" || continue
   ((expected_count++))
   pane=$(tmux list-panes -t "$session" -F '#{pane_id}' | head -1)
-  if omarchy-agent-pane-active "$role" "$session"; then
+  configured_roles+=("$role")
+  role_paths["$role"]=$(tmux display-message -p -t "$pane" '#{pane_current_path}')
+  role_providers["$role"]=$provider
+  if agent-workspaces-pane-active "$provider" "$session"; then
     role_sessions["$role"]=$session
     role_panes["$role"]=$pane
     role_paths["$role"]=$(tmux display-message -p -t "$pane" '#{pane_current_path}')
     role_providers["$role"]=$provider
     active_roles+=("$role")
     ((active_count++))
+  else
+    unavailable_roles+=("$role ($provider)")
   fi
 done <<<"${workspace_sessions[$workspace_id]}"
 
-((expected_count > 0)) || { notify-send 'Agent Dispatcher' 'No enabled provider is available for this workspace.'; exit 1; }
+((expected_count > 0)) || { dispatch_error 'No enabled provider is available for this workspace.'; exit 1; }
 
-if ((active_count < expected_count)); then
-  readiness=$(omarchy menu select "$active_count/$expected_count agents ready" \
-    ""$'\t'"Open workspace and restore agents"$'\t'"open" \
-    "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 460) || exit 0
-  if [[ ${readiness#*$'\t'} == open ]]; then
-    exec env OMARCHY_AGENT_REPOSITORY="${workspace_repositories[$workspace_id]}" \
-      OMARCHY_AGENT_SET="${workspace_sets[$workspace_id]}" omarchy-agent-grid
-  fi
-  exit 0
-fi
 
 template_root="$HOME/.config/agent-workspaces/templates"
 if [[ -n ${AW_TEMPLATE:-} ]]; then
@@ -90,13 +103,13 @@ else
   while IFS= read -r template_file; do
     template_rows+=("$(jq -r '[.id, .label, .description] | @tsv' "$template_file")")
   done < <(find "$template_root" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort)
-  ((${#template_rows[@]} > 0)) || { notify-send 'Agent Dispatcher' 'No development templates are installed.'; exit 1; }
+  ((${#template_rows[@]} > 0)) || { dispatch_error 'No development templates are installed.'; exit 1; }
   template_selection=$(printf '%s\n' "${template_rows[@]}" | omarchy menu select 'Development template' -- --width 560) || exit 0
   template_id=${template_selection%%$'\t'*}
 fi
 template_file="$template_root/$template_id.json"
 jq -e '.schema_version == 1 and (.id | type == "string")' "$template_file" >/dev/null 2>&1 || {
-  notify-send 'Agent Dispatcher' "Invalid development template: $template_id"
+  dispatch_error "Invalid development template: $template_id"
   exit 1
 }
 
@@ -109,35 +122,61 @@ fi
 
 stage=${AW_STAGE:-$(jq -r '.stage' "$template_file")}
 difficulty=${AW_DIFFICULTY:-standard}
-[[ $difficulty =~ ^(simple|standard|complex)$ ]] || { notify-send 'Agent Dispatcher' 'Invalid routing difficulty'; exit 1; }
-case "$stage" in review|execute|verify|integrate) ;; *) notify-send 'Agent Dispatcher' "Unsupported workflow stage: $stage"; exit 1 ;; esac
+[[ $difficulty =~ ^(simple|standard|complex)$ ]] || { dispatch_error 'Invalid routing difficulty'; exit 1; }
+case "$stage" in review|execute|verify|integrate) ;; *) dispatch_error "Unsupported workflow stage: $stage"; exit 1 ;; esac
+
+lead_first=$(jq -r '.delivery_policy.lead_first // true' "$HOME/.config/agent-workspaces/config.json")
+lead_only=false
+[[ $lead_first == true && ( $stage == execute || $stage == integrate ) ]] && lead_only=true
 
 assignment_root=$(agent-workspaces workspace-root "$workspace_id")
 saved_lead=$(jq -r '.default_lead // empty' "$assignment_root/.coordination/agents.json" 2>/dev/null || true)
 if [[ -n ${AW_LEAD:-} ]]; then
   lead=$AW_LEAD
-  [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' "Requested lead is not active: $lead"; exit 1; }
+  [[ -n ${role_sessions[$lead]:-} ]] || { dispatch_error "Requested lead is not active: $lead"; exit 1; }
 elif [[ -n $saved_lead ]]; then
   lead=$saved_lead
-  [[ -n ${role_sessions[$lead]:-} ]] || { notify-send 'Agent Dispatcher' 'Selected lead is not running; open Change agents to complete the handover.'; exit 1; }
+  [[ -n ${role_sessions[$lead]:-} ]] || { dispatch_error 'Selected lead is not running; open Change agents to complete the handover.'; exit 1; }
 elif ((active_count > 1)); then
+  if [[ ${AW_AUTO_CONFIRM:-0} == 1 ]]; then
+    dispatch_error 'No lead selected. Pass --lead SLOT or save a workspace lead.'; exit 1
+  fi
   lead_options=()
   for role in "${active_roles[@]}"; do lead_options+=("󰒓"$'\t'"${role^}"$'\t'"$role"); done
   lead_selection=$(printf '%s\n' "${lead_options[@]}" | omarchy menu select "${stage^} lead" -- --width 380) || exit 0
   lead=${lead_selection#*$'\t'}
 else
+  ((active_count > 0)) || { dispatch_error "No agents are running; inspect quota and handovers."; exit 1; }
   lead=${active_roles[0]}
 fi
 
-if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e 'any(.requests[]; .role=="lead" and (.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
-  notify-send 'Agent Dispatcher' 'A lead change is pending. Complete or cancel it in Change agents before dispatching another task.'
+if [[ $lead_only != true ]] && ((active_count < expected_count)); then
+  if [[ ${AW_AUTO_CONFIRM:-0} == 1 ]]; then
+    dispatch_error "$active_count/$expected_count agents ready; unavailable: ${unavailable_roles[*]}. Inspect quota and handover status; no task was dispatched."
+    exit 1
+  fi
+  readiness=$(omarchy menu select "$active_count/$expected_count agents ready" \
+    ""$'\t'"Open workspace and restore agents"$'\t'"open" \
+    "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 460) || exit 0
+  if [[ ${readiness#*$'\t'} == open ]]; then
+    exec env OMARCHY_AGENT_REPOSITORY="${workspace_repositories[$workspace_id]}" \
+      OMARCHY_AGENT_SET="${workspace_sets[$workspace_id]}" omarchy-agent-grid
+  fi
+  exit 0
+fi
+
+# Retain unavailable reviewers as deferred assignments for later activation.
+[[ $lead_only != true ]] || active_roles=("${configured_roles[@]}")
+
+if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e --arg lead "$lead" 'any(.requests[]; .slot==$lead and .role=="lead" and (.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  dispatch_error 'A lead change is pending. Complete or cancel it in Change agents before dispatching another task.'
   exit 1
 fi
 
 repository=${workspace_repositories[$workspace_id]}
 routing_guard=(--roles "$lead")
 [[ $stage != review && $stage != verify ]] || routing_guard=(--review --roles "${active_roles[@]}")
-agent-workspaces routing "$workspace_id" guard "${routing_guard[@]}" || { notify-send 'Agent Dispatcher' 'Capacity or handover prevents new work. Check workspace routing.'; exit 1; }
+agent-workspaces routing "$workspace_id" guard "${routing_guard[@]}" || { dispatch_error 'Capacity or handover prevents new work. Check workspace routing.'; exit 1; }
 set_slug=${workspace_sets[$workspace_id]}
 repo_name=$(basename "$repository")
 repo_hash=${workspace_id%%:*}
@@ -145,7 +184,6 @@ task_id=$(date '+%Y%m%d-%H%M%S-%3N')
 task_root="$HOME/.local/share/agent-workspaces/$repo_name-$repo_hash/$set_slug/.coordination/$task_id"
 workspace_root=${task_root%/.coordination/*}
 profile=$(jq -r '.profile // "trusted"' "$workspace_root/workspace.json" 2>/dev/null || printf trusted)
-lead_first=$(jq -r '.delivery_policy.lead_first // true' "$HOME/.config/agent-workspaces/config.json")
 repair_round=0
 if [[ -n ${AW_PARENT_TASK_ID:-} ]]; then
   parent_delivery_state="$workspace_root/.coordination/$AW_PARENT_TASK_ID/state.json"
@@ -156,7 +194,7 @@ if [[ -n ${AW_PARENT_TASK_ID:-} ]]; then
 fi
 seam=${AW_SEAM:-general}
 allowed_paths=$(jq -c --arg seam "$seam" '.seams[$seam].paths // empty' "$HOME/.config/agent-workspaces/config.json")
-[[ -n $allowed_paths ]] || { notify-send 'Agent Dispatcher' "Unknown ownership seam: $seam"; exit 1; }
+[[ -n $allowed_paths ]] || { dispatch_error "Unknown ownership seam: $seam"; exit 1; }
 while IFS= read -r active_state; do
   existing_id=$(jq -r '.id' "$active_state")
   existing_status=$(jq -r '.status' "$active_state")
@@ -167,7 +205,7 @@ while IFS= read -r active_state; do
   [[ $existing_status == active || $existing_status == awaiting_configuration || $existing_status == dispatching ]] || continue
   [[ ${AW_PARENT_TASK_ID:-} == "$existing_id" ]] && continue
   if [[ $seam == general || $seam == shared || $existing_seam == general || $existing_seam == shared || $seam == "$existing_seam" ]]; then
-    notify-send 'Agent Dispatcher' "Ownership conflict: '$seam' overlaps active task $existing_id ($existing_seam)."
+    dispatch_error "Ownership conflict: '$seam' overlaps active task $existing_id ($existing_seam)."
     exit 1
   fi
 done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null)
@@ -187,7 +225,7 @@ done
 
 if [[ ${AW_AUTO_CONFIRM:-0} != 1 ]]; then
   confirmation=$(omarchy menu select 'Dispatch coordinated task?' \
-    "󰄬"$'\t'"Send to $active_count active agents"$'\t'"send" \
+    "󰄬"$'\t'"Prepare workflow with $lead leading"$'\t'"send" \
     "󰜺"$'\t'"Cancel"$'\t'"cancel" -- --width 440) || exit 0
   [[ ${confirmation#*$'\t'} == send ]] || exit 0
 fi
@@ -217,7 +255,7 @@ cp "$template_file" "$task_root/template.json"
   if ((active_count == 1)); then
     printf -- '- Solo-provider mode: implementation and self-review use one provider. Report this reduced assurance explicitly; do not claim independent cross-provider verification.\n\n'
   fi
-  if [[ $stage != review && $lead_first == true ]]; then
+  if [[ $lead_only == true ]]; then
     printf -- '- Lead-first delivery: reviewers remain deferred until the lead publishes an immutable commit.\n'
     printf -- '- Delivery capacity follows the participating providers’ available quota. Continue making useful progress while capacity remains; consolidate findings rather than spawning one workflow per finding.\n\n'
     printf -- '- Build economy: use focused debug-profile checks while implementing. Do not run release/LTO or full-workspace gates until the final candidate unless the defect is release-specific.\n'
@@ -237,7 +275,7 @@ cp "$template_file" "$task_root/template.json"
 
 for role in "${active_roles[@]}"; do
   initial_state=dispatched
-  [[ $stage != review && $lead_first == true && $role != "$lead" ]] && initial_state=deferred
+  [[ $lead_only == true && $role != "$lead" ]] && initial_state=deferred
   {
     printf '# %s status · %s\n\n' "${role^}" "$task_id"
     printf 'State: %s\n\n## Findings\n\n## Changes or commits\n\n## Blockers\n' "$initial_state"

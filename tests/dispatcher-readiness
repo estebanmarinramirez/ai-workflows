@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Exercise unattended dispatch without real tmux, provider calls, or menus."""
+import json,os,shutil,subprocess,tempfile,unittest
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1]
+class Readiness(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.base=Path(self.tmp.name)
+  binaries=self.base/'bin';binaries.mkdir();self.log=self.base/'calls'
+  shutil.copytree(ROOT/'config',self.base/'.config/agent-workspaces')
+  self.workspace=self.base/'.local/share/agent-workspaces/repo-w/set';(self.workspace/'.coordination').mkdir(parents=True)
+  script='''#!/usr/bin/env python3
+import json,os,sys,time
+from pathlib import Path
+name=Path(sys.argv[0]).name;args=sys.argv[1:]
+with open(os.environ['TEST_LOG'],'a') as f:f.write(json.dumps([name]+args)+'\\n')
+if name=='tmux':
+ if args[0]=='list-sessions':
+  for role in ('claude','codex','grok'):print(f's-{role}\\tw:set\\t{role}\\t/repo\\tset')
+ elif args[0]=='show-option':
+  role=args[args.index('-t')+1][2:];print('grok' if role=='claude' and args[-1]=='@aw_provider' else role)
+ elif args[0]=='list-panes':print('%1')
+ elif args[0]=='display-message':print('/worktree')
+elif name=='agent-workspaces':
+ if args[0]=='available-providers':
+  print('claude\\ncodex\\ngrok',flush=True);time.sleep(.02)
+  print('unused-provider\\n'*20000)
+ elif args[0]=='workspace-root':print(os.environ['TEST_WORKSPACE'])
+ elif args[0]=='routing' and not os.environ.get('ALLOW_ROUTING'):print('budget: protected quota',file=sys.stderr);sys.exit(1)
+elif name=='agent-workspaces-pane-active':sys.exit(1 if args[1]==os.environ.get('MISSING_SESSION') else 0)
+elif name in ('omarchy','gum','omarchy-agent-pane-active'):sys.exit(99)
+'''
+  for name in ('tmux','agent-workspaces','agent-workspaces-pane-active','omarchy-agent-pane-active','omarchy','gum','notify-send'):
+   p=binaries/name;p.write_text(script);p.chmod(0o755)
+  self.env={**os.environ,'HOME':str(self.base),'PATH':str(binaries)+':'+os.environ['PATH'],'TEST_LOG':str(self.log),'TEST_WORKSPACE':str(self.workspace),'AW_WORKSPACE_ID':'w:set','AW_TEMPLATE':'bugfix','AW_OBJECTIVE':'fixture','AW_AUTO_CONFIRM':'1','AW_LEAD':''}
+ def run_dispatch(self,success=False,**changes):
+  result=subprocess.run(['bash',str(ROOT/'compat/bin/agent-workspaces-prompt')],env={**self.env,**changes},capture_output=True,text=True,timeout=10)
+  self.calls=[json.loads(x) for x in self.log.read_text().splitlines()]
+  self.assertEqual(result.returncode,0) if success else self.assertNotEqual(result.returncode,0)
+  self.assertFalse(any(c[0] in ('omarchy','gum','omarchy-agent-pane-active') for c in self.calls))
+  if not success:self.assertFalse(list((self.workspace/'.coordination').glob('*/state.json')))
+  return result
+ def test_counts_full_provider_output_and_uses_actual_provider(self):
+  r=self.run_dispatch(MISSING_SESSION='s-codex',AW_LEAD='grok',AW_STAGE='review');self.assertIn('2/3 agents ready',r.stderr);self.assertIn('codex (codex)',r.stderr)
+  self.assertIn(['agent-workspaces-pane-active','grok','s-claude'],self.calls)
+  self.assertEqual(sum(c==['agent-workspaces','available-providers'] for c in self.calls),1)
+ def test_missing_lead_is_visible_without_a_menu(self):
+  self.assertIn('No lead selected',self.run_dispatch().stderr)
+ def test_pending_handover_is_visible_and_preserved(self):
+  p=self.workspace/'.coordination/agents.json';state={'requests':{'r':{'role':'lead','slot':'claude','phase':'requested'}}};p.write_text(json.dumps(state))
+  self.assertIn('lead change is pending',self.run_dispatch(AW_LEAD='claude').stderr)
+  self.assertEqual(json.loads(p.read_text()),state)
+ def test_unavailable_reviewer_is_retained_and_other_slots_pending_request_does_not_block(self):
+  p=self.workspace/'.coordination/agents.json';p.write_text(json.dumps({'requests':{'r':{'role':'lead','slot':'codex','phase':'requested'}}}))
+  self.run_dispatch(success=True,MISSING_SESSION='s-codex',AW_LEAD='grok',ALLOW_ROUTING='1')
+  state=json.loads(next((self.workspace/'.coordination').glob('*/state.json')).read_text())
+  self.assertEqual(state['lead'],'grok');self.assertEqual(state['roles']['codex']['state'],'deferred')
+  self.assertEqual(state['roles']['claude']['provider'],'grok')
+  self.assertEqual(state['roles']['grok']['state'],'dispatched')
+ def test_budget_guard_still_blocks(self):
+  self.assertIn('protected quota',self.run_dispatch(AW_LEAD='claude').stderr)
+if __name__=='__main__':unittest.main()
