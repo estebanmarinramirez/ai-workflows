@@ -93,7 +93,7 @@ class Router:
         state = self.store.load()
         difficulty = (task or {}).get('routing', {}).get('difficulty', 'standard')
         if difficulty not in DIFFICULTIES: raise ChangeError('Invalid task routing difficulty')
-        report = dict(schema_version=1, workspace_id=self.store.workspace, mode=self.policy.get('mode', 'off'),
+        report = dict(policy_version='capacity-routing-v2',policy_kind='deterministic_capacity_heuristic',schema_version=1, workspace_id=self.store.workspace, mode=self.policy.get('mode', 'off'),
                       task=str(task_path) if task_path else None, difficulty=difficulty,
                       pools=self.pools, decisions=[], warnings=[])
         workspace_policy = read_object(self.root / 'workspace.json').get('routing', {})
@@ -182,10 +182,12 @@ class Router:
             if not candidates:
                 row.update(action='wait', reason='no allowed model/account with fresh capacity above the applicable reserve')
                 continue
+            row['candidates']=candidates
             best = max(candidates, key=lambda c: (c['score'], c['target']['provider'] == current['provider'], c['target']['provider']))
             incumbent = next((c for c in candidates if c['target']['provider'] == current['provider']), None)
             if incumbent and best['score'] - incumbent['score'] < self.policy['switch_improvement']:
                 best = incumbent
+            row['selection_probability']=1.0
             row.update(target=best['target'], pool=best['pool'],
                        action='keep' if current == best['target'] else 'handover',
                        reason=f'{difficulty} task; {"fixed settings" if effort_mode == "fixed" else "balanced budget profile" if effort_mode == "balanced" else "pressure effort" if best["pressure"] else "quality profile"}; fresh capacity weighted by shared slot load')
@@ -235,6 +237,10 @@ class Router:
                     row.update(action='pending', change_id=record['id'])
                 except ChangeError as error:
                     row.update(action='unavailable', reason=str(error))
+            for row in report['decisions']:
+                row['decision_id']=hashlib.sha256(json.dumps({'task':report['task'],
+                    'revision':report['task_revision'],'intent':report['intent_revision'],
+                    'policy':report['policy_version'],'decision':row},sort_keys=True).encode()).hexdigest()
             # Stable signature prevents monitor ticks from producing unbounded logs.
             evidence = {k: report[k] for k in ('mode', 'effort_mode', 'intent_revision', 'task', 'task_revision', 'difficulty', 'decisions', 'warnings')}
             signature = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()

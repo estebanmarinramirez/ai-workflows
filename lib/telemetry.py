@@ -50,6 +50,7 @@ def task_view(obj):
     result['roles'] = {k: pick(v, ROLE) for k, v in obj.get('roles', {}).items() if isinstance(v, dict)}
     result['transitions'] = [pick(v, TRANSITION) for v in obj.get('transitions', []) if isinstance(v, dict)]
     result['routing'] = pick(obj.get('routing', {}), 'difficulty revision effort_mode')
+    result['dispatch']=pick(obj.get('dispatch',{}),'started_at completed_at sent')
     result['integration'] = pick(obj.get('integration', {}), 'branch selected_commits integrated_at')
     return result
 
@@ -71,8 +72,8 @@ def agents_view(obj):
     return result
 
 def routing_view(obj):
-    result = pick(obj, 'at mode effort_mode intent_revision task_revision difficulty review_reserve signature')
-    result['decisions'] = [dict(pick(v, 'role slot action pool change_id'), target=pick(v.get('target', {}), CHOICE))
+    result = pick(obj, 'at mode effort_mode intent_revision task_revision difficulty review_reserve signature policy_version policy_kind')
+    result['decisions'] = [dict(pick(v, 'role slot action pool change_id decision_id selection_probability'), candidates=[dict(pick(c,'pool score pressure'),target=pick(c.get('target',{}),CHOICE)) for c in v.get('candidates',[])], target=pick(v.get('target', {}), CHOICE))
                            for v in obj.get('decisions', []) if isinstance(v, dict)]
     return result
 
@@ -279,15 +280,15 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
 
 RECEIPT_FIELDS = {'receipt_id', 'kind', 'workspace', 'task', 'role', 'attempt_id', 'at', 'provider', 'model', 'model_version', 'effort',
                   'input_tokens', 'output_tokens', 'cached_input_tokens', 'cost_usd', 'wall_seconds', 'exit_code',
-                  'accepted', 'failure_category', 'verifier_id', 'verifier_version', 'evidence_sha256', 'source', 'supersedes'}
+                  'accepted', 'failure_category', 'verifier_id', 'verifier_version', 'evidence_sha256', 'source', 'supersedes', 'decision_id', 'parent', 'eligible_parents', 'policy_id', 'selection_probability', 'observed_prefix_sha256', 'timing'}
 
 def receipt(ledger, payload):
     unknown = set(payload) - RECEIPT_FIELDS
     if unknown: raise ValueError('unknown receipt fields: ' + ', '.join(sorted(unknown)))
     for field in ('receipt_id', 'workspace', 'task', 'attempt_id', 'source', 'at'):
         if not isinstance(payload.get(field), str) or not payload[field].strip(): raise ValueError('missing ' + field)
-    if payload.get('kind') not in ('usage', 'verification', 'failure'):
-        raise ValueError('kind must be usage, verification or failure')
+    if payload.get('kind') not in ('usage', 'verification', 'failure', 'decision'):
+        raise ValueError('kind must be usage, verification, failure or decision')
     at = datetime.fromisoformat(payload['at'].replace('Z', '+00:00'))
     if at.tzinfo is None: raise ValueError('at must include timezone')
     for field in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'cost_usd', 'wall_seconds'):
@@ -296,6 +297,20 @@ def receipt(ledger, payload):
             raise ValueError('invalid ' + field)
         if field.endswith('tokens') and v is not None and not isinstance(v, int): raise ValueError('tokens must be integers')
     if payload.get('accepted') is not None and type(payload['accepted']) is not bool: raise ValueError('accepted must be boolean')
+    if payload.get('timing') is not None:
+        timing=payload['timing']
+        allowed={'admission_seconds','preparation_seconds','generation_seconds','snapshot_seconds','verification_seconds','queue_wait_seconds'}
+        if not isinstance(timing,dict) or set(timing)-allowed:raise ValueError('invalid timing fields')
+        if any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in timing.values()):raise ValueError('invalid timing value')
+    if payload['kind']=='decision':
+        for field in ('decision_id','parent','policy_id','observed_prefix_sha256'):
+            if not isinstance(payload.get(field),str) or not payload[field]:raise ValueError('missing '+field)
+        digest_value=payload['observed_prefix_sha256']
+        if len(digest_value)!=64 or any(c not in '0123456789abcdef' for c in digest_value):raise ValueError('invalid observed prefix hash')
+        eligible=payload.get('eligible_parents')
+        if not isinstance(eligible,list) or any(not isinstance(x,str) for x in eligible) or payload['parent'] not in eligible:raise ValueError('invalid decision eligibility')
+        probability=payload.get('selection_probability')
+        if probability is not None and (type(probability) not in (int,float) or not math.isfinite(probability) or not 0<probability<=1):raise ValueError('invalid selection probability')
     if payload['kind'] == 'verification':
         for field in ('verifier_id', 'verifier_version', 'evidence_sha256'):
             if not isinstance(payload.get(field), str) or not payload[field]: raise ValueError('missing ' + field)

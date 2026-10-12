@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import subprocess
 
-VERSION = 'dream-replay-v3'
+VERSION = 'dream-replay-v4'
 
 
 def number(value, name, minimum=0):
@@ -81,6 +81,10 @@ def validate(document):
         seen.add(name); instances.add(instance)
         if world.get('split') not in ('development', 'heldout'):
             raise ValueError('invalid split')
+        if 'execution' in world:
+            execution=object_value(world['execution'],'execution')
+            if execution.get('scheduler')!='serial-v1' or execution.get('max_workers')!=1:
+                raise ValueError('unsupported measured execution scheduler')
         number(world.get('root_score'), 'root_score')
         identifier(world.get('root_snapshot'), 'root_snapshot')
         nodes = {'root'}; children = set()
@@ -133,6 +137,9 @@ def choose(observed, blocked, policy):
 
 
 def replay(world, policy, weights):
+    requested_workers=policy['workers']
+    execution=world.get('execution')
+    if execution:policy=dict(policy,workers=min(requested_workers,execution['max_workers']))
     children = {}
     for node in world['nodes']:
         children.setdefault(node['parent'], []).append(node)
@@ -157,13 +164,15 @@ def replay(world, policy, weights):
         trace.append({'selected_parents': batch, 'revealed': revealed})
     best = max(n['score'] for n in observed.values())
     utility = weights['quality'] * best - weights['cost_usd'] * (cost or 0) - weights['wall_seconds'] * wall - weights['attempts'] * attempts
-    return {'world': world['id'], 'policy': policy['id'], 'best_score': best,
+    return {'world': world['id'], 'policy': policy['id'],
+            'requested_workers':requested_workers,'effective_workers':policy['workers'],
+            'execution_model':execution['scheduler'] if execution else 'idealized_unvalidated_parallel', 'best_score': best,
             'attempts': attempts, 'rounds': len(trace), 'cost_usd': cost,
             'simulated_wall_seconds': wall, 'unsupported_continuations': unsupported,
             'utility': utility, 'trace': trace}
 
 
-def optimize(document):
+def _optimize(document):
     validate(document)
     dev = [w for w in document['worlds'] if w['split'] == 'development']
     heldout = [w for w in document['worlds'] if w['split'] == 'heldout']
@@ -185,6 +194,7 @@ def optimize(document):
             validation.extend(replay(w, policy_by_id[name], document['objective']) for w in heldout)
     reasons = []
     if document['data_kind'] != 'real': reasons.append('synthetic_data')
+    if any(not w.get('execution') for w in document['worlds']):reasons.append('unverified_execution_model')
     if len(dev) < 3: reasons.append('fewer_than_three_development_instances')
     if len(heldout) < 3: reasons.append('fewer_than_three_heldout_instances')
     if winner is None: reasons.append('unsupported_development_replay')
@@ -196,7 +206,13 @@ def optimize(document):
         if sum(challenger) <= sum(incumbent):
             reasons.append('no_heldout_improvement')
     if any(r['unsupported_continuations'] for r in validation): reasons.append('unsupported_heldout_replay')
-    return {'version': VERSION, 'mode': 'offline_shadow',
+    from dream_statistics import paired_evidence
+    old={r['world']:r['utility'] for r in validation if r['policy']==document['incumbent']}
+    pairs=[(r['utility'],old[r['world']]) for r in validation if r['policy']==selected]
+    evidence=paired_evidence(pairs,**document.get('evidence',{}))
+    if not evidence['supported']:reasons.append('insufficient_paired_evidence')
+    if evidence['bounds_breached']:reasons.append('utility_bounds_breached')
+    return {'paired_evidence':evidence,'version': VERSION, 'mode': 'offline_shadow',
             'input_sha256': hashlib.sha256(json.dumps(document, sort_keys=True, allow_nan=False).encode()).hexdigest(),
             'objective': document['objective'], 'development': results,
             'development_winner': selected, 'heldout': validation,
@@ -209,11 +225,31 @@ def optimize(document):
                 'Repeated inspection of held-out results contaminates that holdout; use fresh instances.']}
 
 
+def optimize(document, register=False):
+    validate(document)
+    # Pure library calls and legacy traces remain useful for screening, not promotion.
+    verified=all(w.get('prompt_sha256') and w.get('verifier_sha256') for w in document['worlds'])
+    if not register or document['data_kind']!='real' or not verified:
+        result=_optimize(document)
+        result['recommendation']=None
+        result['abstention_reasons'].append('unregistered_evaluation')
+        return result
+    from dream_evaluation import evaluation, holdout_keys
+    identifier=hashlib.sha256(json.dumps([VERSION,document],sort_keys=True,allow_nan=False).encode()).hexdigest()
+    keys=holdout_keys(document['worlds'])
+    with evaluation(identifier,keys) as holder:
+        if holder['cached'] is not None:return holder['cached']
+        result=_optimize(document);result['evaluation_id']=identifier
+        holder['result']=result
+        return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('replay'); run.add_argument('file', type=Path)
     comparison=sub.add_parser('compare');comparison.add_argument('file',type=Path)
+    rollout_parser=sub.add_parser('rollout');rollout_parser.add_argument('directory',type=Path);rollout_parser.add_argument('world');rollout_parser.add_argument('--steps',type=int,default=1)
     init = sub.add_parser('init'); init.add_argument('spec', type=Path); init.add_argument('directory', type=Path)
     attempt_parser = sub.add_parser('attempt'); attempt_parser.add_argument('directory', type=Path)
     attempt_parser.add_argument('world'); attempt_parser.add_argument('--parent', default='root')
@@ -224,10 +260,11 @@ def main():
         from dream_compare import compare
         result=compare(args.file)
     elif args.command == 'replay':
-        result = optimize(json.loads(args.file.read_text()))
+        result = optimize(json.loads(args.file.read_text()),register=True)
     else:
         import dream_capture as capture
         if args.command == 'init': result = capture.initialize(args.spec, args.directory)
+        elif args.command == 'rollout': result = capture.rollout(args.directory,args.world,args.steps)
         elif args.command == 'attempt': result = capture.attempt(args.directory, args.world, args.parent)
         elif args.command == 'status': result = capture.status(args.directory)
         else: result = getattr(capture, args.command)(args.directory)

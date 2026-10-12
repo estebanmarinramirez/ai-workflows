@@ -18,8 +18,8 @@ import provider_adapter as adapter
 import telemetry
 import budget
 
-VERSION = 'dream-capture-v1'
-ENGINE = ('dream.py', 'dream_capture.py', 'provider_adapter.py', 'telemetry.py', 'budget.py', 'capacity.py', 'models.py', 'assignments.py', 'dream_compare.py')
+VERSION = 'dream-capture-v2'
+ENGINE = ('dream.py', 'dream_capture.py', 'provider_adapter.py', 'telemetry.py', 'budget.py', 'capacity.py', 'models.py', 'assignments.py', 'dream_compare.py', 'dream_statistics.py', 'dream_evaluation.py')
 
 
 def write(path, value):
@@ -134,7 +134,7 @@ def initialize(spec_file, directory):
     for name in ENGINE:
         shutil.copyfile(Path(__file__).parent / name, directory / 'engine' / name)
         engine[name] = adapter.sha(directory / 'engine' / name)
-    result = dict(spec, capture_version=VERSION, dataset_id=uuid.uuid4().hex, engine=engine, worlds=[])
+    result = dict(spec, execution={'scheduler':'serial-v1','max_workers':1,'timing':'admission-through-verification'}, capture_version=VERSION, dataset_id=uuid.uuid4().hex, engine=engine, worlds=[])
     for world, paths, commit in prepared:
         base = directory / 'worlds' / world['id']; base.mkdir(mode=0o700)
         (base / 'attempts').mkdir(mode=0o700)
@@ -227,13 +227,14 @@ def prompt_for(base, history, parent):
     return prompt
 
 
-def attempt(directory, world_id, parent):
+def attempt(directory, world_id, parent, decision=None):
     directory, manifest = load(directory)
     world = next((w for w in manifest['worlds'] if w['id'] == world_id), None)
     if world is None: raise ValueError('unknown world')
     base = directory / 'worlds' / safe_id(world_id)
     with locked(base):
         history = nodes(base)
+        if decision and decision.get('prefix_sha256')!=telemetry.digest(history):raise ValueError('observed prefix changed before dispatch; retry rollout')
         if len(history) >= manifest['max_attempts_per_world']:
             raise ValueError('frozen attempt budget exhausted')
         prior = next((n for n in history if n['id'] == parent), None)
@@ -242,39 +243,58 @@ def attempt(directory, world_id, parent):
             raise ValueError('non-root parent already has a continuation')
         source = base / 'root' if parent == 'root' else base / 'attempts' / parent / 'worktree'
         commit = world['root_snapshot'] if prior is None else prior['snapshot']
+        attempt_started=time.monotonic()
         config, _ = budget.configuration()
         budget.check_experiment(config,manifest['agent'],manifest['timeout_seconds'])
         with budget.admission(config,manifest['agent']['provider'],'experiment'):
+            admitted=time.monotonic()
             identifier = f'{len(history)+1:06d}'
             output = base / 'attempts' / identifier; output.mkdir(mode=0o700)
             write(output / 'started.json', {'id':identifier,'parent':parent,'snapshot':commit,'at':adapter.stamp()})
+            parents={n['parent'] for n in history}
+            eligible=['root']+[n['id'] for n in history if n['id'] not in parents]
+            decision_record=dict(kind='decision',receipt_id=identifier+'-decision',
+                workspace='dream:'+manifest['dataset_id'],task=world_id,attempt_id=identifier,
+                source=VERSION,at=adapter.stamp(),decision_id=uuid.uuid4().hex,
+                parent=parent,eligible_parents=eligible,
+                policy_id=decision['policy_id'] if decision else 'manual-parent',
+                selection_probability=1.0 if decision else None,
+                observed_prefix_sha256=telemetry.digest(history))
+            write(output/'decision.json',decision_record)
             clone(source, output / 'worktree', commit)
             prompt = prompt_for(base, history, parent)
             (output / 'prompt.txt').write_text(prompt)
             started = time.monotonic()
             receipt = adapter.run_role(manifest['agent'], output / 'worktree', output / 'provider', prompt, manifest['timeout_seconds'])
-            wall = time.monotonic() - started
+            generated=time.monotonic()
+            generation_seconds=generated-started
             # Freeze the candidate BEFORE running the independent verifier on another clone.
             git(output / 'worktree', 'add', '-A')
             tree = git(output / 'worktree', 'write-tree')
             snapshot = git(output / 'worktree', 'commit-tree', tree, '-p', commit, '-m', 'Measured candidate ' + identifier)
             git(output / 'worktree', 'update-ref', 'refs/heads/dream-snapshot', snapshot)
+            snapshotted=time.monotonic()
             check = None
             failure = {'timeout':'timeout','cancelled':'cancelled','protocol_or_launch_error':'protocol'}.get(receipt['status'], 'unknown')
             if receipt['status'] == 'completed':
                 clone(output / 'worktree', output / 'verification-worktree', snapshot)
                 check = verify(output / 'verification-worktree', output / 'verification', base / 'verifier.py',
                     manifest['timeout_seconds'], {'schema_version':1,'task':{'id':world_id},'attempt_id':identifier})
-                wall += check['wall_seconds']
+                # Total verification phase also includes its isolated checkout.
                 failure = (None if check['accepted'] else 'quality') if check['valid'] else ('timeout' if check['timed_out'] else 'infrastructure')
+            finished=time.monotonic()
+            wall=finished-attempt_started
+            timing=dict(admission_seconds=admitted-attempt_started,preparation_seconds=started-admitted,
+                        generation_seconds=generation_seconds,snapshot_seconds=snapshotted-generated,
+                        verification_seconds=finished-snapshotted,queue_wait_seconds=0.0)
             accepted = failure is None
             at = adapter.stamp()
             common = {'workspace':'dream:' + manifest['dataset_id'], 'task':world_id, 'attempt_id':identifier,
                       'source':VERSION, 'at':at}
             usage = {k:receipt.get(k) for k in ('input_tokens','output_tokens','cached_input_tokens','cost_usd','model_version')}
-            records = [dict(common, receipt_id=identifier+'-usage', kind='usage', role='discovery',
+            records = [decision_record,dict(common, receipt_id=identifier+'-usage', kind='usage', role='discovery',
                             provider=manifest['agent']['provider'], model=manifest['agent']['model'],
-                            effort=manifest['agent']['effort'], wall_seconds=wall, **usage)]
+                            effort=manifest['agent']['effort'], wall_seconds=wall, timing=timing,decision_id=decision_record['decision_id'], **usage)]
             if check and check['valid']:
                 records.append(dict(common, receipt_id=identifier+'-verification', kind='verification', accepted=accepted,
                     verifier_id='binary-acceptance', verifier_version=world['files']['verifier.py'],
@@ -288,9 +308,9 @@ def attempt(directory, world_id, parent):
                     'requested_agent':manifest['agent'], 'observed_model_version':receipt.get('model_version'),
                     'cli_version':receipt.get('cli_version'), 'verifier_version':world['files']['verifier.py'],
                     'score':float(accepted), 'accepted':accepted, 'failure_category':failure,
-                    'wall_seconds':wall, 'cost_usd':receipt.get('cost_usd')}
+                    'wall_seconds':wall, 'timing':timing,'decision_id':decision_record['decision_id'], 'cost_usd':receipt.get('cost_usd')}
             files = {str(p.relative_to(output)):adapter.sha(p) for p in output.rglob('*')
-                     if p.is_file() and p.relative_to(output).parts[0] in ('provider','verification','receipts.json','started.json','prompt.txt')}
+                     if p.is_file() and p.relative_to(output).parts[0] in ('provider','verification','receipts.json','started.json','prompt.txt','decision.json')}
             write(output / 'evidence.json', {'node':node,'files':files})
             write(output / 'node.json', dict(node, evidence_sha256=adapter.sha(output / 'evidence.json')))
     try: ingestion = ingest(directory)
@@ -311,7 +331,7 @@ def export(directory):
             for node in history:
                 expected = world['root_snapshot'] if node['parent'] == 'root' else next(n['snapshot'] for n in history if n['id'] == node['parent'])
                 if expected != node['parent_snapshot']: raise ValueError('parent snapshot mismatch')
-            result['worlds'].append({**{k:world[k] for k in ('id','instance_id','split','root_score','root_snapshot')},'prompt_sha256':world['files']['prompt.txt'],'verifier_sha256':world['files']['verifier.py'],'nodes':history})
+            result['worlds'].append({**{k:world[k] for k in ('id','instance_id','split','root_score','root_snapshot')},'execution':manifest['execution'],'prompt_sha256':world['files']['prompt.txt'],'verifier_sha256':world['files']['verifier.py'],'nodes':history})
     dream.validate(result)
     return result
 
@@ -328,9 +348,25 @@ def status(directory):
             observed = {'root':{'score':world['root_score'], 'depth':0}}
             for node in history:
                 observed[node['id']] = dict(node, depth=observed[node['parent']]['depth'] + 1)
-            policy = next(p for p in manifest['policies'] if p['id'] == manifest['incumbent'])
+            policy = dict(next(p for p in manifest['policies'] if p['id'] == manifest['incumbent']),workers=1)
             worlds.append({'id':world['id'], 'split':world['split'], 'completed_attempts':len(entries)-len(pending),
-                'incomplete_attempts':pending, 'remaining_budget':max(0,manifest['max_attempts_per_world']-len(entries)),
+                'incomplete_attempts':pending,'prefix_sha256':telemetry.digest(history), 'remaining_budget':max(0,manifest['max_attempts_per_world']-len(entries)),
                 'suggested_parents':dream.choose(observed,set(),policy) if not pending and len(entries)<manifest['max_attempts_per_world'] else []})
     return {'dataset_id':manifest['dataset_id'], 'data_kind':manifest['data_kind'], 'worlds':worlds,
             'automatic_live_promotion':False}
+
+
+def rollout(directory, world_id, steps=1):
+    """One deterministic serial policy, shared with replay; every attempt rechecks budget."""
+    dream.positive(steps,'steps')
+    directory,manifest=load(directory)
+    if steps>manifest['max_attempts_per_world']:raise ValueError('steps exceeds frozen attempt allowance')
+    policy=next(p for p in manifest['policies'] if p['id']==manifest['incumbent'])
+    results=[]
+    for _ in range(steps):
+        world=next((w for w in status(directory)['worlds'] if w['id']==world_id),None)
+        if world is None:raise ValueError('unknown world')
+        if world['incomplete_attempts']:raise ValueError('incomplete attempt retained; rollout stopped')
+        if not world['suggested_parents']:break
+        results.append(attempt(directory,world_id,world['suggested_parents'][0],{'policy_id':policy['id'],'prefix_sha256':world['prefix_sha256']}))
+    return {'attempts':results,'scheduler':'serial-v1','automatic_live_promotion':False}

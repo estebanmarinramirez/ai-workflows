@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Measured comparison safeguards; fixtures are never live training evidence."""
-import copy,hashlib,json,sys,tempfile,unittest
+import copy,hashlib,json,sys,tempfile,unittest,os
+from unittest.mock import patch
 from pathlib import Path
 sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'lib'))
@@ -9,23 +10,34 @@ import dream_compare
 class Comparison(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
+  env=patch.dict(os.environ,XDG_STATE_HOME=str(self.root/'state'));env.start();self.addCleanup(env.stop)
   self.docs=[];self.spec=dict(schema_version=1,difficulty='standard',incumbent='low',candidates=[])
   for effort,score in [('low',0),('medium',1)]:
    agent=dict(provider='claude',model='sonnet',effort=effort)
    doc=dict(schema_version=1,data_kind='real',evaluation_protocol='test',agent=agent,objective=dict(quality=1,cost_usd=1,wall_seconds=.01,attempts=.01),incumbent='p',policies=[dict(id='p',strategy='breadth',workers=1,rounds=1)],worlds=[])
    for i in range(6):
     node=dict(id='a',parent='root',score=score,wall_seconds=1,cost_usd=.01,snapshot='result',attempt_id='attempt'+str(i),configuration='test',requested_agent=agent,verifier_version='test',evidence_sha256='a'*64)
-    doc['worlds'].append(dict(id=str(i),instance_id=str(i),split='development' if i<3 else 'heldout',root_score=0,root_snapshot='base',prompt_sha256='b'*64,verifier_sha256='c'*64,nodes=[node]))
+    doc['worlds'].append(dict(id=str(i),instance_id=str(i),split='development' if i<3 else 'heldout',root_score=0,root_snapshot='base',execution={'scheduler':'serial-v1','max_workers':1},prompt_sha256='b'*64,verifier_sha256='c'*64,nodes=[node]))
    self.docs.append(doc);self.spec['candidates'].append(dict(id=effort,export=effort+'.json',policy='p'))
  def run_compare(self):
   for candidate,doc in zip(self.spec['candidates'],self.docs):
    raw=json.dumps(doc).encode();(self.root/candidate['export']).write_bytes(raw);candidate['sha256']=hashlib.sha256(raw).hexdigest()
   path=self.root/'comparison.json';path.write_text(json.dumps(self.spec));return dream_compare.compare(path)
+ def enlarge(self):
+  for doc in self.docs:
+   base=doc['worlds'][3]
+   doc['worlds']=doc['worlds'][:3]+[dict(copy.deepcopy(base),id=str(i),instance_id=str(i)) for i in range(3,83)]
+ def test_three_wins_do_not_establish_improvement(self):
+  result=self.run_compare();self.assertIsNone(result['recommendation'])
+  self.assertIn('insufficient_paired_evidence',result['abstention_reasons'])
  def test_supported_improvement_is_reviewable_not_automatic(self):
+  self.enlarge()
   result=self.run_compare();self.assertEqual(result['recommendation'],'medium');self.assertFalse(result['automatic_promotion'])
   self.assertEqual(result['routing_profile_proposal']['budget']['profiles']['claude']['standard']['effort'],'medium')
  def test_heldout_does_not_select_configuration(self):
   before=self.run_compare()
+  # Same mathematical comparison in a fresh test ledger; production reuse is tested separately.
+  os.environ['XDG_STATE_HOME']=str(self.root/'fresh-state')
   for w in self.docs[1]['worlds'][3:]:w['nodes'][0]['score']=0
   after=self.run_compare();self.assertEqual(before['development'],after['development']);self.assertEqual(after['selected'],'medium');self.assertIsNone(after['recommendation'])
  def test_abstention(self):
@@ -42,6 +54,19 @@ class Comparison(unittest.TestCase):
    if kind=='policy':d['policies'][0]['workers']=2
    if kind=='solved':d['worlds'][0]['root_score']=1
    with self.subTest(kind=kind),self.assertRaises(ValueError):self.run_compare()
+ def test_holdout_reuse_rejected_and_exact_repeat_cached(self):
+  first=self.run_compare();self.assertEqual(first,self.run_compare())
+  self.spec['uncertainty_weight']=2
+  with self.assertRaisesRegex(ValueError,'already exposed'):self.run_compare()
+ def test_changed_prompts_do_not_make_holdouts_fresh(self):
+  self.run_compare()
+  for doc in self.docs:
+   for w in doc['worlds']:w['prompt_sha256']='e'*64
+  with self.assertRaisesRegex(ValueError,'already exposed'):self.run_compare()
+ def test_changed_model_revision_rejected(self):
+  self.docs[0]['worlds'][0]['nodes'][0]['observed_model_version']='a'
+  self.docs[0]['worlds'][1]['nodes'][0]['observed_model_version']='b'
+  with self.assertRaisesRegex(ValueError,'mixed served'):self.run_compare()
  def test_hash_pin(self):
   self.run_compare();(self.root/'low.json').write_text('{}')
   with self.assertRaisesRegex(ValueError,'changed'):dream_compare.compare(self.root/'comparison.json')
