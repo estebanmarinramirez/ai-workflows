@@ -2,8 +2,8 @@
 
 This is an independent, limited adaptation of
 [Dream-RSI](https://github.com/zhengkid/Dream-RSI) and
-[the paper, section 3](https://arxiv.org/html/2609.14858v1).
-As checked on 2026-10-07, the official repository publishes the paper and assets;
+[the paper, section 3](https://arxiv.org/html/2609.14858v2).
+As checked on 2026-10-12, the official repository publishes the paper and assets;
 its full implementation and reproduction scripts are still pending release.
 No upstream code or third-party skill is installed.
 
@@ -34,8 +34,9 @@ results, not model self-reports. The simulator checks structure, not authenticit
 
 Each node includes its primary parent, attempt ID, exact configuration identity
 (provider/model/version/effort/topology), result snapshot, verifier version,
-evidence SHA-256, score, measured dollars (nullable), and generation-plus-verifier
-wall seconds. Scores must be nonnegative, comparable under the fixed protocol,
+evidence SHA-256, score, measured dollars (nullable), and measured wall seconds.
+Capture v2 measures admission through verification, with stage timings; older
+captures measured generation plus verifier time only. Scores must be nonnegative, comparable under the fixed protocol,
 and higher-is-better. Record failures and their costs too. Do not discard failed
 attempts to improve a trace. Independent instances must appear only once, across
 both splits. A world may branch at the root; each non-root node has at most one
@@ -68,10 +69,15 @@ J = quality_weight × best observed score
   − attempt_weight × number of revealed attempts
 ```
 
-Simulated elapsed time sums the maximum observed duration in each batch. Total
+Measured capture exports carry a `serial-v1` execution contract. Replay caps
+workers at one for these worlds, matching `dream rollout`; a policy asking for
+four workers therefore receives no unmeasured speedup. Legacy worlds without an
+execution contract use idealized parallel timing for screening only and cannot
+earn a recommendation. In that diagnostic model, elapsed time sums the maximum
+observed duration in each batch. Total
 cost sums all revealed attempts, including unsuccessful ones. This replaces the
 paper's explicit parallelism bonus with a latency term, so doing extra work has
-no independent reward. It assumes independent workers without shared quota,
+no independent reward. The idealized model assumes independent workers without shared quota,
 queueing, contention, or context-dependent timing changes. The report names that
 assumption. Unknown cost stays null; a nonzero cost weight requires measurements
 for every node. Zero explicitly excludes that objective dimension.
@@ -80,8 +86,9 @@ The candidate list includes the incumbent, and development ties retain it.
 Selection uses mean utility across development worlds only. Only the selected
 candidate and incumbent are subsequently evaluated on held-out worlds. A shadow
 recommendation requires real data, at least three independent instances in each
-split, a development improvement, a held-out improvement, and no unsupported
-continuations in the relevant replays. These minimum counts are guardrails, not
+split, a development improvement, a positive paired lower bound above a predeclared
+minimum gain, registered unused holdouts, measured execution metadata, and no
+unsupported continuations in the relevant replays. These minimum counts are guardrails, not
 statistical significance or a guarantee of generalization. Report trajectories
 and paired per-world utilities for inspection. Never repeatedly tune against the
 same holdout; use fresh untouched instances after an iteration.
@@ -122,7 +129,7 @@ agent-workspaces dream export /tmp/dream-capture > /tmp/dream-replay.json
 agent-workspaces dream replay /tmp/dream-replay.json
 ```
 
-Only `dream attempt` invokes a model and consumes provider quota. Its successful
+`dream attempt` and `dream rollout` invoke a model and consumes provider quota. Its successful
 CLI exit means the attempt was recorded; inspect `accepted` and `failure_category`
 to determine its result. `init` runs the
 user-supplied independent verifier on the baseline. `status` suggests parents
@@ -205,8 +212,10 @@ for the first budget-controlled run.
 
 ## Configuration comparison (1.9)
 
-Replay v3 can start independent root attempts in every available worker slot in
-one round. Missing recorded branches are unsupported, never fabricated. Batch
+The idealized replay interface can start independent root attempts in every
+available worker slot in one round. This is our repeated-root extension, not a
+claim that the paper's distinct-node formalization was defective. Version 4 caps
+measured serial captures to one worker in both replay and policy-driven rollout. Missing recorded branches are unsupported, never fabricated. Batch
 latency still assumes independent workers; real account contention is excluded.
 
 `agent-workspaces dream compare comparison.json` compares checked capture exports
@@ -252,3 +261,85 @@ Auto. Fixed effort and manual assignments retain their existing semantics.
 Pressure reductions, protected reserves and economical experiment limits remain
 in force. Historical observations without attempt receipts cannot be converted
 into measured results; collect fresh attempts with the capture commands above.
+
+
+## Evidence and execution contract (1.10)
+
+The live capacity router remains a deterministic heuristic. It records eligible
+candidate settings/scores, decision identity and its deterministic selection
+probability when choosing among candidates. This probability is **not** randomized
+exploration or evidence of support for actions never taken. Ordinary workspace
+status reports still do not become independent acceptance receipts.
+
+`agent-workspaces dream rollout DIRECTORY WORLD --steps 1` runs the frozen
+incumbent policy through the same `choose` interface as serial replay. It caps
+steps at the frozen allowance, checks the shared budget on every attempt, stops
+on the policy's observed success/stop condition and rejects an observed-prefix
+race. There is no background experiment daemon and no automatic policy promotion.
+Admission stays fail-fast: no hidden queue and no bypass of active account claims.
+
+Before the provider runs, capture writes `decision.json`: selected parent, eligible
+parents, prefix digest, policy ID, decision ID and selection probability (null for
+a manually chosen parent). The decision, usage, verification and failure receipts
+are linked by attempt identity. Stage timings cover admission, preparation,
+generation, snapshotting and verification including its isolated checkout. Their
+sum is the attempt wall time. Receipt finalization, telemetry ingestion, later
+integration and human wait time are outside this measurement boundary. Queue wait
+is zero for this fail-fast executor, not an estimate for interactive sessions.
+Workspace dispatch start/completion timestamps remain separate observations.
+
+Configuration comparison retains the Beta mean/standard deviation calculation as
+**heuristic development screening**, not a calibrated confidence bound. Promotion
+uses a separate paired bound. Both comparison specifications and replay documents
+may provide:
+
+```json
+"evidence": {
+  "alpha": 0.05,
+  "minimum_gain": 0.02,
+  "utility_bounds": [-1.0, 1.0]
+}
+```
+
+Those are also the defaults. Freeze them and the sample size before examining
+held-out outcomes. For bounds [L,H], set R=H-L. On each independent held-out task,
+compute d_i=clip(U_candidate,L,H)-clip(U_incumbent,L,H). Thus d_i is in [-R,R].
+Hoeffding gives the one-sided fixed-sample lower bound:
+
+```text
+LCB = max(-R, mean(d) - 2 R sqrt(log(1/alpha) / (2 n)))
+```
+
+A recommendation requires LCB > minimum_gain, all previous provenance/support
+checks, and no observed utility outside the bounds. Any observed clipping causes
+abstention. The bound concerns expected **clipped** utility and relies on
+independent task instances sampled from the target distribution, a fixed
+candidate and sample size, and preferences fixed before holdout inspection.
+It is conservative; three positive comparisons normally cannot establish gain.
+It does not establish an unbounded-cost guarantee, protect against distribution
+shift, or support optional stopping. Cross-task correlation requires a different
+sampling unit or statistical model. More samples must be planned, not appended
+until a desired conclusion appears. Automatic routing is never changed here.
+
+The local SQLite ledger at `$XDG_STATE_HOME/agent-workspaces/dream-evaluation/`
+(default `~/.local/state/...`) atomically claims held-out task identities before
+evaluation. Exact repeats return the recorded result; changing candidates,
+preferences or evidence requires fresh holdouts. Interrupted evaluations retain
+their claims. Registered CLI policy replay and model comparison share that ledger.
+Pure library `optimize(document)` calls are screening-only; `register=True` opts
+into the ledger. Deleting the ledger, renaming task instances, using another
+machine, or prior human inspection can defeat local protection: this is not
+cryptographic proof of independence or global preregistration.
+
+Comparison rejects mixed known served-model revisions within one candidate.
+Missing served-version attestation remains explicitly unknown; requested settings
+are not proof of provider identity. Historical frozen engines and captures are
+preserved; initialize a new dataset for v2 decision receipts and timing.
+
+Research motivation: [Dream-RSI v2](https://arxiv.org/abs/2609.14858v2) motivates
+shared online/replay semantics; [RRSI](https://github.com/google-research/rrsi)
+motivates noise and cost gates. [Bayesian orchestration](https://proceedings.mlr.press/v306/papamarkou26a.html)
+motivates uncertainty-aware decisions, without making this controller
+Bayes-consistent merely by using a Beta distribution. Contextual exploration,
+anytime-valid inference and prospective live promotion remain future measured
+stages; they require independent receipts and cannot be learned from snapshot counts.

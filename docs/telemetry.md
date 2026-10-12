@@ -180,3 +180,11 @@ Quota timestamps are retained because their freshness affects routing.
 Collector-version observations use a version-specific source to avoid alternating
 versions appearing as upgrades on every scan. Older running collectors may still
 emit their former snapshots until their sessions naturally restart.
+
+
+Dream capture v2 also ingests pre-outcome `decision` receipts, linked usage timing,
+and independent verification/failure receipts. These are measured experiments,
+not retroactive labels for ordinary chats. Live routing observations now retain
+candidate scores, decision IDs and deterministic selection probabilities where
+available. They do not supply randomized action coverage. Workspace dispatch
+start/completion timestamps are retained separately from agent-reported outcomes.

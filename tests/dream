@@ -31,16 +31,16 @@ class Dream(unittest.TestCase):
     def test_synthetic_replay_never_recommends(self):
         result = dream.optimize(fixture())
         self.assertIsNone(result['recommendation'])
-        self.assertEqual(result['abstention_reasons'], ['synthetic_data'])
+        self.assertIn('synthetic_data',result['abstention_reasons'])
         self.assertEqual(result['development_winner'], 'parallel')
         self.assertFalse(result['automatic_promotion'])
 
     def test_real_supported_improvement_is_shadow_only(self):
         doc=fixture();doc['data_kind']='real'
         result=dream.optimize(doc)
-        self.assertEqual(result['recommendation'],'parallel')
+        self.assertIsNone(result['recommendation'])
         self.assertFalse(result['automatic_promotion'])
-        self.assertEqual(result['abstention_reasons'],[])
+        self.assertIn('insufficient_paired_evidence',result['abstention_reasons'])
         doc['policies']=[doc['policies'][0]]
         self.assertIn('no_development_improvement',dream.optimize(doc)['abstention_reasons'])
 
@@ -129,6 +129,16 @@ class Dream(unittest.TestCase):
         world['nodes']=world['nodes'][:1]
         result=dream.replay(world,dict(doc['policies'][0],workers=4,rounds=1),doc['objective'])
         self.assertEqual(result['attempts'],1);self.assertEqual(result['unsupported_continuations'],3)
+
+    def test_measured_serial_execution_caps_parallel_policy(self):
+        doc=fixture();world=doc['worlds'][0];world['execution']={'scheduler':'serial-v1','max_workers':1}
+        result=dream.replay(world,doc['policies'][1],doc['objective'])
+        self.assertEqual(result['effective_workers'],1)
+        self.assertEqual(result['attempts'],2)
+        self.assertEqual(result['trace'][0]['selected_parents'],['root'])
+        self.assertEqual(result['simulated_wall_seconds'],4)
+        world['execution']['max_workers']=4
+        with self.assertRaises(ValueError):dream.validate(doc)
 
     def test_cli_example(self):
         result=subprocess.run([sys.executable,str(ROOT/'lib/dream.py'),'replay',str(ROOT/'examples/dream/replay.json')],capture_output=True,text=True)

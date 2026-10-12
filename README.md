@@ -41,6 +41,8 @@ agent-workspaces budget status
 agent-workspaces telemetry audit
 agent-workspaces dream init CAPTURE_SPEC DIRECTORY
 agent-workspaces dream attempt DIRECTORY WORLD [--parent root|ATTEMPT]
+agent-workspaces dream rollout DIRECTORY WORLD [--steps 1]
+agent-workspaces dream compare COMPARISON_SPEC
 agent-workspaces dream status DIRECTORY
 agent-workspaces dream export DIRECTORY
 agent-workspaces dream ingest DIRECTORY
