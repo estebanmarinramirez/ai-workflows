@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Offline Zed lifecycle checks; no Zed, tmux, provider CLI or API calls."""
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+import shutil
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import dream
+import zed_workflow as z
+
+
+class ZedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.source = self.base / "source"
+        self.source.mkdir()
+        z.git(self.source, "init", "--quiet")
+        (self.source / "answer.txt").write_text("wrong")
+        z.git(self.source, "add", ".")
+        z.git(self.source, "commit", "--quiet", "-m", "baseline")
+        self.brief = self.base / "brief.txt"
+        self.brief.write_text("Set answer.txt to correct.")
+        self.verifier = self.base / "verifier.py"
+        self.verifier.write_text(
+            "import json,sys\nfrom pathlib import Path\n"
+            "r=json.loads(Path(sys.argv[1]).read_text())\n"
+            'p=Path(r["worktree"])\n'
+            '(p/"verifier-only.txt").write_text("not candidate data")\n'
+            'sys.exit(0 if (p/"answer.txt").read_text()=="correct" else 1)\n'
+        )
+        self.task = self.base / "task"
+        self.report = self.base / "report.txt"
+        self.report.write_text("Worker reports completion; tests not run.")
+
+    def init(self, **kwargs) -> dict:
+        return z.initialize(self.source, self.task, self.brief, self.verifier, **kwargs)
+
+    def test_verified_snapshot_not_worker_claim(self) -> None:
+        self.init()
+        first = z.prepare(self.task, "provider/model")
+        row = z.finish(self.task, first["attempt_id"], "session-1", self.report)
+        self.assertFalse(row["result"]["accepted"])
+        self.assertTrue(row["result"]["valid"])
+        second = z.prepare(self.task, "provider/other")
+        candidate = Path(second["candidate"])
+        (candidate / "answer.txt").write_text("correct")
+        row = z.finish(self.task, second["attempt_id"], "session-2", self.report)
+        self.assertTrue(row["result"]["accepted"])
+        self.assertFalse((candidate / "verifier-only.txt").exists())
+        self.assertEqual(
+            z.git(candidate, "show", row["output_commit"] + ":answer.txt"), "correct"
+        )
+        self.assertEqual((self.source / "answer.txt").read_text(), "wrong")
+        self.assertEqual(z.git(self.source, "status", "--porcelain"), "")
+        status = z.status(self.task)
+        self.assertFalse(status["replay_eligible"])
+        self.assertIsNone(status["attempts"][1]["cost_usd"])
+        self.assertTrue(
+            all(v == "intact" for v in status["attempts"][1]["integrity"].values())
+        )
+        with self.assertRaises(ValueError):
+            z.finish(self.task, second["attempt_id"], "session-2", self.report)
+        with self.assertRaises(ValueError):
+            dream.validate(status)
+
+    def test_limits_and_explicit_abandonment(self) -> None:
+        self.init(max_attempts=2)
+        first = z.prepare(self.task, "provider/model")
+        with self.assertRaisesRegex(ValueError, "active attempt"):
+            z.prepare(self.task, "provider/model")
+        z.abandon(
+            self.task,
+            first["attempt_id"],
+            "dispatch uncertain; operator stopped session",
+        )
+        second = z.prepare(self.task, "provider/model")
+        z.abandon(self.task, second["attempt_id"], "cancelled")
+        with self.assertRaisesRegex(ValueError, "budget exhausted"):
+            z.prepare(self.task, "provider/model")
+
+    def test_parallel_candidates_are_separate(self) -> None:
+        self.init(max_active=2)
+        one = z.prepare(self.task, "provider/model-a")
+        two = z.prepare(self.task, "provider/model-b")
+        (Path(one["candidate"]) / "answer.txt").write_text("correct")
+        self.assertEqual((Path(two["candidate"]) / "answer.txt").read_text(), "wrong")
+        self.assertNotEqual(one["candidate"], two["candidate"])
+
+    def test_frozen_inputs_and_prompt_integrity(self) -> None:
+        self.init()
+        item = z.prepare(self.task, "provider/model")
+        prompt = self.task / item["attempt_id"] / "prompt.txt"
+        prompt.write_text("changed")
+        with self.assertRaisesRegex(ValueError, "evidence changed"):
+            z.finish(self.task, item["attempt_id"], "session", self.report)
+        self.assertEqual(
+            z.status(self.task)["attempts"][0]["integrity"]["prompt.txt"],
+            "missing_or_changed",
+        )
+        (self.task / "verifier.py").write_text("import sys;sys.exit(0)")
+        with self.assertRaisesRegex(ValueError, "frozen input"):
+            z.status(self.task)
+
+    def test_infrastructure_failure_is_not_quality_rejection(self) -> None:
+        self.verifier.write_text("import sys;sys.exit(2)")
+        self.init()
+        item = z.prepare(self.task, "provider/model")
+        row = z.finish(self.task, item["attempt_id"], "session", self.report)
+        self.assertFalse(row["result"]["accepted"])
+        self.assertFalse(row["result"]["valid"])
+
+    def test_dirty_source_and_internal_verifier_refused(self) -> None:
+        (self.source / "answer.txt").write_text("dirty")
+        with self.assertRaisesRegex(ValueError, "clean"):
+            self.init()
+        with self.assertRaisesRegex(ValueError, "outside"):
+            z.initialize(self.source, self.task, self.brief, self.source / "answer.txt")
+        self.assertFalse(self.task.exists())
+
+    def test_worker_commit_and_interrupted_verification_refused(self) -> None:
+        self.init()
+        item = z.prepare(self.task, "provider/model")
+        candidate = Path(item["candidate"])
+        (candidate / "answer.txt").write_text("correct")
+        z.git(candidate, "add", ".")
+        z.git(candidate, "commit", "-m", "unexpected worker commit")
+        with self.assertRaisesRegex(ValueError, "changed HEAD"):
+            z.finish(self.task, item["attempt_id"], "session", self.report)
+        journal = z.read(self.task / "journal.json")
+        journal["attempts"][0]["state"] = "verifying"
+        z.write(self.task / "journal.json", journal)
+        with self.assertRaisesRegex(ValueError, "never automatically retried"):
+            z.finish(self.task, item["attempt_id"], "session", self.report)
+
+    def test_interrupted_preparation_retains_admission(self) -> None:
+        self.init(max_attempts=2)
+        original_mkdir = Path.mkdir
+
+        def interrupted_mkdir(path: Path, *args, **kwargs) -> None:
+            if path == self.task / "000001":
+                raise OSError("interrupted")
+            original_mkdir(path, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", interrupted_mkdir):
+            with self.assertRaises(OSError):
+                z.prepare(self.task, "provider/model")
+        row = z.status(self.task)["attempts"][0]
+        self.assertEqual(row["state"], "prepared")
+        z.abandon(self.task, row["id"], "interrupted before delivery")
+        self.assertEqual(z.prepare(self.task, "provider/model")["attempt_id"], "000002")
+
+    def test_verifier_replacement_between_load_and_execution_refused(self) -> None:
+        self.init()
+        item = z.prepare(self.task, "provider/model")
+        original_clone = z.clone
+
+        def replace_verifier(*args) -> None:
+            original_clone(*args)
+            (self.task / "verifier.py").write_text("import sys;sys.exit(0)")
+
+        with patch.object(z, "clone", side_effect=replace_verifier):
+            with self.assertRaisesRegex(ValueError, "verifier changed"):
+                z.finish(self.task, item["attempt_id"], "session", self.report)
+        self.assertIsNone(z.read(self.task / "journal.json")["attempts"][0]["result"])
+
+    def test_missing_candidate_snapshot_is_visible(self) -> None:
+        self.init()
+        item = z.prepare(self.task, "provider/model")
+        (Path(item["candidate"]) / "answer.txt").write_text("correct")
+        z.finish(self.task, item["attempt_id"], "session", self.report)
+        self.assertEqual(
+            z.status(self.task)["attempts"][0]["snapshot_integrity"], "intact"
+        )
+        shutil.rmtree(Path(item["candidate"]) / ".git")
+        self.assertEqual(
+            z.status(self.task)["attempts"][0]["snapshot_integrity"],
+            "missing_or_changed",
+        )
+
+    def test_cli_works_without_workspace_installation(self) -> None:
+        entry = Path(__file__).resolve().parents[1] / "bin/agent-workspaces-zed"
+        completed = subprocess.run(
+            [sys.executable, str(entry), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("prepare", completed.stdout)
+        self.init()
+        completed = subprocess.run(
+            [sys.executable, str(entry), "status", str(self.task)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertFalse(json.loads(completed.stdout)["replay_eligible"])
+
+
+if __name__ == "__main__":
+    unittest.main()

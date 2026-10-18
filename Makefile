@@ -10,6 +10,7 @@ install-macos:
 	./packaging/install-macos
 
 test:
+	python3 tests/zed
 	python3 tests/measurement
 	python3 tests/dream-statistics
 	python3 tests/dispatcher-readiness

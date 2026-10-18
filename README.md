@@ -6,6 +6,14 @@ Provider participation is capability-based, not triad-dependent. A workspace ope
 
 On Omarchy, open **Workspaces → Workspaces Manager** for the primary flow. It presents one catalog of local checkouts, managed workspaces, and repositories from configured GitHub owners. Select a local repository to open a multi-agent workspace, launch Omarchy's default agent, or open a terminal; select a GitHub-only repository to confirm a clone and open it.
 
+## Zed-native frontend (experimental)
+
+For native Zed subagents without tmux, provider CLIs or desktop installation, use
+`python3 bin/agent-workspaces-zed --help`. The main Zed thread dispatches workers;
+this recorder prepares isolated candidates and independently verifies results.
+See [the Zed workflow](docs/zed-native.md) for the coordinator procedure, API-cost
+limits and explicit replay ineligibility.
+
 ## Install
 
 ### Omarchy
