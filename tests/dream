@@ -140,6 +140,13 @@ class Dream(unittest.TestCase):
         world['execution']['max_workers']=4
         with self.assertRaises(ValueError):dream.validate(doc)
 
+    def test_interactive_context_is_rejected_even_with_valid_discovery_shape(self):
+        for field, value in (('replay_eligible', False), ('context_scope', 'dispatcher_inputs_only')):
+            for nested in (False, True):
+                doc = fixture(); target = doc['worlds'][0] if nested else doc
+                target[field] = value
+                with self.assertRaisesRegex(ValueError, 'not replay eligible'): dream.validate(doc)
+
     def test_cli_example(self):
         result=subprocess.run([sys.executable,str(ROOT/'lib/dream.py'),'replay',str(ROOT/'examples/dream/replay.json')],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)

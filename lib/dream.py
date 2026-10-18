@@ -42,6 +42,8 @@ def array_value(value, name):
 
 def validate(document):
     object_value(document, 'manifest')
+    if document.get('replay_eligible') is False or document.get('context_scope') == 'dispatcher_inputs_only':
+        raise ValueError('interactive context evidence is not replay eligible')
     if document.get('schema_version') != 1 or document.get('data_kind') not in ('real', 'synthetic'):
         raise ValueError('expected schema_version 1 and real/synthetic data_kind')
     identifier(document.get('evaluation_protocol'), 'evaluation_protocol')
@@ -74,6 +76,8 @@ def validate(document):
         raise ValueError('at least one discovery world required')
     for world in array_value(document['worlds'], 'worlds'):
         object_value(world, 'world')
+        if world.get('replay_eligible') is False or world.get('context_scope') == 'dispatcher_inputs_only':
+            raise ValueError('interactive context evidence is not replay eligible')
         name = identifier(world.get('id'), 'world.id')
         instance = identifier(world.get('instance_id'), 'instance_id')
         if name in seen or instance in instances:

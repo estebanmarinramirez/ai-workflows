@@ -330,6 +330,8 @@ class Assignments:
             import measurement
             for path in (self.root / '.coordination').glob('*/measurement/journal.json'):
                 measurement.record(path.parent.parent, record['slot'], 'settings_observed', record['target'])
+                measurement.context(path.parent.parent, record['slot'], boundary='handover',
+                                    session=record['session'], handover=record.get('checkpoint'))
         except (OSError, ValueError, KeyError):
             print('agent-workspaces: measurement handover observation failed; assignment retained', file=sys.stderr)
         return record

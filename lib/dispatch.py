@@ -66,6 +66,7 @@ def deliver(path, cli):
                         '--state in_progress --summary started. Finish with completed or blocked and structured commits, changed_files and evidence. '
                         'Do not modify shared task files or another role status.')
                 measurement.start(path, slot, router.current(slot,state,router.store.load()))
+                measurement.context(path, slot, prompt=prompt, session=sessions[slot])
                 buffer='aw-dispatch-'+state['id']+'-'+slot
                 command(['tmux','set-buffer','-b',buffer,'--',prompt])
                 try:

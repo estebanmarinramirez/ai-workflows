@@ -123,9 +123,12 @@ def audit(ledger):
             key = (row['workspace'], row['task'], obj.get('attempt_id'))
             attempts.add(key)
             coverage.setdefault(key, set()).add(kind)
+            if kind == 'receipt.lifecycle' and obj.get('event') == 'context_recorded':
+                coverage[key].add('dispatcher_context')
     return {'schema_version': 1, 'evidence_cutoff_event': cutoff, 'counts': dict(counts),
             'distinct_tasks': len(tasks), 'distinct_receipted_attempts': len(attempts),
             'receipt_coverage': {
+                'with_dispatcher_context': sum('dispatcher_context' in v for v in coverage.values()),
                 'with_lifecycle': sum('receipt.lifecycle' in v for v in coverage.values()),
                 'with_usage': sum('receipt.usage' in v for v in coverage.values()),
                 'with_verification': sum('receipt.verification' in v for v in coverage.values()),
@@ -244,6 +247,10 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
                             for record in attempt.get('events', []):
                                 if record.get('task') != task or record.get('workspace') != ws:
                                     raise ValueError('measurement receipt identity mismatch')
+                                if record.get('event') == 'context_recorded':
+                                    from context_evidence import inspect
+                                    if inspect(journal.parent, record.get('context_sha256')) != 'intact':
+                                        raise ValueError('context artifact is missing or changed')
                                 receipt(ledger, record)
                     except (OSError, ValueError, TypeError, KeyError) as error:
                         report['errors'].append({'source': str(journal), 'error': type(error).__name__})
@@ -298,7 +305,7 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
 
 RECEIPT_FIELDS = {'receipt_id', 'kind', 'workspace', 'task', 'role', 'attempt_id', 'at', 'provider', 'model', 'model_version', 'effort',
                   'input_tokens', 'output_tokens', 'cached_input_tokens', 'cost_usd', 'wall_seconds', 'exit_code',
-                  'accepted', 'failure_category', 'verifier_id', 'verifier_version', 'evidence_sha256', 'source', 'supersedes', 'decision_id', 'parent', 'eligible_parents', 'policy_id', 'selection_probability', 'observed_prefix_sha256', 'timing', 'event', 'baseline_commit', 'repository_dirty', 'contract_sha256', 'previous_attempt_id', 'output_commit'}
+                  'accepted', 'failure_category', 'verifier_id', 'verifier_version', 'evidence_sha256', 'source', 'supersedes', 'decision_id', 'parent', 'eligible_parents', 'policy_id', 'selection_probability', 'observed_prefix_sha256', 'timing', 'event', 'baseline_commit', 'repository_dirty', 'contract_sha256', 'previous_attempt_id', 'output_commit', 'context_sha256', 'context_scope', 'replay_eligible'}
 
 def receipt(ledger, payload):
     unknown = set(payload) - RECEIPT_FIELDS
@@ -321,12 +328,18 @@ def receipt(ledger, payload):
         if not isinstance(timing,dict) or set(timing)-allowed:raise ValueError('invalid timing fields')
         if any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in timing.values()):raise ValueError('invalid timing value')
     if payload['kind'] == 'lifecycle':
-        if payload.get('event') not in ('prepared', 'delivered', 'in_progress', 'completed', 'blocked', 'cancelled', 'delivery_failed', 'settings_observed'):
+        if payload.get('event') not in ('prepared', 'delivered', 'in_progress', 'completed', 'blocked', 'cancelled', 'delivery_failed', 'settings_observed', 'context_recorded'):
             raise ValueError('invalid lifecycle event')
         if not isinstance(payload.get('role'), str) or not payload['role']: raise ValueError('lifecycle needs role')
         if payload.get('accepted') is not None: raise ValueError('lifecycle is not acceptance')
         if payload.get('repository_dirty') is not None and type(payload['repository_dirty']) is not bool:
             raise ValueError('invalid repository dirty flag')
+        if payload.get('event') == 'context_recorded':
+            if payload.get('context_scope') != 'dispatcher_inputs_only' or payload.get('replay_eligible') is not False:
+                raise ValueError('interactive context cannot assert replay eligibility')
+            value = payload.get('context_sha256')
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                raise ValueError('context requires SHA-256')
         for field in ('baseline_commit', 'contract_sha256', 'output_commit'):
             value = payload.get(field)
             if value is not None and (not isinstance(value, str) or len(value) not in (40, 64) or any(c not in '0123456789abcdef' for c in value)):

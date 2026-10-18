@@ -30,6 +30,9 @@ class Queue(unittest.TestCase):
    self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],['codex'])
    self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],[])
    self.assertEqual(sum(c[1]=='paste-buffer' for c in calls),1)
+   journal=json.loads((self.task/'measurement/journal.json').read_text())
+   events=journal['attempts'][0]['events']
+   self.assertEqual([e['event'] for e in events],['prepared','context_recorded','delivered'])
  def test_interrupted_paste_retains_attempt_and_does_not_redeliver(self):
   def command(args):
    if args[1]=='list-sessions':return 's\tw:s\tcodex'

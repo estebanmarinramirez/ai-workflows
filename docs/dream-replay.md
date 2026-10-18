@@ -343,3 +343,36 @@ motivates uncertainty-aware decisions, without making this controller
 Bayes-consistent merely by using a Beta distribution. Contextual exploration,
 anytime-valid inference and prospective live promotion remain future measured
 stages; they require independent receipts and cannot be learned from snapshot counts.
+
+## Implementation audit against the revised paper (2026-10-18)
+
+The repository PDF at commit `4149ea9181ab1db80f85717ffda2c9f0f130e85b`
+uses a best-score/attempt-count/batch-bonus objective while its appendix describes
+a Pareto-area objective. [ArXiv v2, section 3](https://arxiv.org/html/2609.14858v2#S3)
+now explicitly defines normalized quality–call hypervolume minus a parallelism
+penalty. Its prompts are in Appendix D. The older PDF discrepancy should not be
+presented as a finding about v2. Upstream runtime code remains unreleased as of
+this audit; this project is an independent adaptation.
+
+Our objective remains the explicit weighted utility documented above; our search
+compares a supplied finite policy list, not generated policy code or a Pareto
+budget sweep. Measured capture is serial. Repeated root launches are our explicit
+interface extension. Neither paper-level nondegradation on fixed history nor our
+statistical gate proves improvement on the next live task.
+
+The built-in selector receives only revealed outcomes. This is an interface
+restriction, not an adversarial sandbox for arbitrary policy programs. Capture
+saves the exact assembled prompt and hashes its evidence: baseline plus ancestor
+observations, not unrestricted sibling history. The no-sibling instruction is
+not itself proof of filesystem isolation. Dependencies, provider revisions and
+external tools can still change outcomes. A recorded outcome must not be reused
+as a causal prediction under a different context or model.
+
+Ordinary interactive attempts now preserve dispatcher input snapshots, but not
+complete model context. They remain observational and explicitly ineligible for
+replay; see [task measurement](task-measurement.md). Acceptance, integration
+approval and release approval remain separate. Interactive per-call costs and
+full review/policy-development overhead are not yet measured. Unknown costs must
+not be replaced by zero when claiming savings. The policy evaluation cache's
+implementation fingerprint remains a prepared development task, with a verifier
+in `examples/measurement/`; no live policy promotion is enabled.

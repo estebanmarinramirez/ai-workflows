@@ -14,8 +14,9 @@ import uuid
 from assignments import atomic, locked, now
 import telemetry
 import provider_adapter
+import context_evidence
 
-VERSION = 'interactive-measurement-v1'
+VERSION = 'interactive-measurement-v2'
 TERMINAL = {'completed', 'blocked', 'cancelled', 'delivery_failed'}
 
 
@@ -171,6 +172,26 @@ def start(task, role, choice=None):
         return attempt['id']
 
 
+def context(task, role, prompt=None, boundary='dispatch', session=None, handover=None):
+    task = Path(task).resolve(); directory = location(task)
+    if not enabled() or not (directory / 'journal.json').exists(): return None
+    if prompt is not None and len(prompt.encode()) > context_evidence.LIMIT: raise ValueError('dispatch prompt exceeds context capture limit')
+    if boundary not in ('dispatch', 'handover'): raise ValueError('invalid context boundary')
+    with locked(directory / '.lock'):
+        journal = read(directory / 'journal.json')
+        attempt = next((a for a in reversed(journal['attempts']) if a['role'] == role), None)
+        if not attempt or attempt['state'] in (TERMINAL - {'blocked'}): return None
+        if boundary == 'dispatch' and attempt['state'] != 'prepared':
+            raise ValueError('dispatch context must be captured before delivery')
+        document = context_evidence.capture(task, attempt, prompt, boundary, session, handover)
+        digest = context_evidence.store(directory, document)
+        if not any(r.get('context_sha256') == digest for r in attempt['events']):
+            emit(task, attempt, 'context_recorded', context_sha256=digest,
+                 context_scope='dispatcher_inputs_only', replay_eligible=False)
+            atomic(directory / 'journal.json', journal)
+        return digest
+
+
 def record(task, role, event, choice=None):
     task = Path(task).resolve(); directory = location(task)
     if not enabled(): return None
@@ -293,7 +314,12 @@ def report(task):
         if delivered and end:
             elapsed = (datetime.fromisoformat(end['at']) - datetime.fromisoformat(delivered['at'])).total_seconds()
             if elapsed < 0: elapsed = None
-        rows.append(dict(attempt_id=attempt['id'], role=attempt['role'], state=attempt['state'],
+        contexts = [dict(sha256=r['context_sha256'], integrity=context_evidence.inspect(directory, r['context_sha256']))
+                    for r in attempt['events'] if r.get('event') == 'context_recorded']
+        rows.append(dict(contexts=contexts, context_scope='dispatcher_inputs_only' if contexts else 'unrecorded',
+                         replay_eligible=False, replay_blockers=['Interactive context and execution dependencies are incomplete.'],
+                         output_commit=end.get('output_commit') if end else None,
+                         attempt_id=attempt['id'], role=attempt['role'], state=attempt['state'],
                          elapsed_observed_seconds=elapsed, verification=attempt.get('verification'),
                          usage_known=False))
     return dict(attempts=rows, contract=read(directory / 'contract.json'),
@@ -379,7 +405,7 @@ def release(task, role):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('prepare', 'preflight', 'start', 'record', 'sync', 'verify', 'status', 'release'):
+    for command in ('prepare', 'preflight', 'start', 'record', 'sync', 'verify', 'status', 'release', 'context'):
         p = sub.add_parser(command); p.add_argument('task', type=Path)
         if command != 'status': p.add_argument('--role', required=True)
         if command == 'prepare':
@@ -387,11 +413,13 @@ def main():
             p.add_argument('--max-attempts', type=int, default=2); p.add_argument('--timeout', type=int, default=120)
         if command == 'record': p.add_argument('--event', required=True)
         if command == 'verify': p.add_argument('--commit')
+        if command == 'context': p.add_argument('--session')
     p = sub.add_parser('stage'); p.add_argument('workspace'); p.add_argument('--role', required=True)
     p.add_argument('--template', required=True); p.add_argument('--objective', required=True)
     p.add_argument('--seam', default='general'); p.add_argument('--difficulty', default='standard')
     args = parser.parse_args(); kw = vars(args).copy(); command = kw.pop('command')
-    if command == 'status': result = report(**kw)
+    if command == 'context': result = context(**kw, prompt=sys.stdin.read(context_evidence.LIMIT + 1))
+    elif command == 'status': result = report(**kw)
     elif command == 'preflight': result = preflight(**kw, capacity=True)
     else: result = globals()[command](**kw)
     if command != 'verify' or result.get('status') != 'unconfigured':
