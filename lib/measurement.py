@@ -308,7 +308,9 @@ def stage(workspace, role, template, objective, seam='general', difficulty='stan
     data, _, config_path = telemetry.roots()
     roots = [p.parent for p in data.glob('*/*/workspace.json') if read(p).get('workspace_id') == workspace]
     if len(roots) != 1: raise ValueError('workspace ID must identify one saved workspace')
-    root = roots[0]; config = read(config_path)
+    root = roots[0]; config = read(config_path); manifest = read(root / 'workspace.json')
+    if not isinstance(manifest.get('repository'), str) or not manifest['repository']:
+        raise ValueError('saved workspace must identify its source repository')
     if not re.fullmatch(r'[a-zA-Z0-9_-]+', template): raise ValueError('invalid template ID')
     template_doc = read(config_path.parent / 'templates' / (template + '.json'))
     if not template_doc or not objective.strip(): raise ValueError('template and objective required')
@@ -341,9 +343,13 @@ def stage(workspace, role, template, objective, seam='general', difficulty='stan
     (task / 'task.md').write_text('# Task\n\n' + objective.strip() + '\n\n' +
         '\n'.join(slot + ': ' + value['assignment'] for slot, value in roles.items()) + '\n')
     atomic(task / 'state.json', dict(schema_version=2, id=task.name, workspace_id=workspace,
-           stage=template_doc['stage'], status='prepared', lead=role, roles=roles, gates={}, transitions=[],
+           stage=template_doc['stage'], status='prepared', lead=role, roles=roles,
+           repository=manifest['repository'], set=manifest.get('set', root.name), objective=objective.strip(),
+           parent_id='', issue='', pr={}, updated_at=now(),
+           gates={key: False for key in ('triage_approved', 'execution_approved', 'integration_approved', 'pr_prepared', 'pr_approved')},
+           transitions=[], delivery=dict(mode='quota-aware', continue_while_capacity_remains=True, repair_round=0),
            seam=seam, allowed_paths=config['seams'][seam]['paths'], routing={'difficulty':difficulty},
-           template_id=template, profile=read(root/'workspace.json').get('profile', 'trusted'), created_at=now()))
+           template_id=template, template_version=template_doc['schema_version'], profile=manifest.get('profile', 'trusted'), created_at=now()))
     return {'status': 'prepared', 'task': str(task), 'roles': list(roles)}
 
 
