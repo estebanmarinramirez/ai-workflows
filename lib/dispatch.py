@@ -6,6 +6,7 @@ from pathlib import Path
 from assignments import atomic, locked, now, ChangeError, PENDING
 from capacity import read_object
 from routing import Router
+import measurement
 
 
 def command(argv):
@@ -20,6 +21,8 @@ def deliver(path, cli):
         slots=[s for s,r in state['roles'].items() if r['state']!='deferred']
         router=Router(root,cli)
         reasons=router.readiness(path,slots)
+        for slot in slots:
+            reasons.extend(slot + ': ' + reason for reason in measurement.preflight(path, slot)['reasons'])
         # Serialize final readiness and delivery with manual/automatic handovers.
         with locked(root/'.coordination/.agents.lock'):
             for request in router.store.load().get('requests',{}).values():
@@ -62,6 +65,7 @@ def deliver(path, cli):
                         f'Record state with agent-workspaces status --task {str(path)!r} --role {slot!r} '
                         '--state in_progress --summary started. Finish with completed or blocked and structured commits, changed_files and evidence. '
                         'Do not modify shared task files or another role status.')
+                measurement.start(path, slot, router.current(slot,state,router.store.load()))
                 buffer='aw-dispatch-'+state['id']+'-'+slot
                 command(['tmux','set-buffer','-b',buffer,'--',prompt])
                 try:
@@ -70,6 +74,7 @@ def deliver(path, cli):
                     time.sleep(.35);command(['tmux','send-keys','-t',sessions[slot],'Enter'])
                     if provider=='codex':time.sleep(.65);command(['tmux','send-keys','-t',sessions[slot],'Enter'])
                 finally:command(['tmux','delete-buffer','-b',buffer])
+                measurement.record(path, slot, 'delivered')
                 with locked(path/'.state.lock'):
                     current=read_object(path/'state.json')
                     current['dispatch']['sent'].append(slot)

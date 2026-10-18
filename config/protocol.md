@@ -104,3 +104,16 @@ A user may explicitly authorize unknown quota for a named provider through
 budget.unknown_managed_providers. Respect this narrow managed-work exception;
 do not ask to disable the whole budget gate. Keep the quota labeled unknown,
 and do not extend the exception to experiments, boosts or other providers.
+
+
+## Measured ordinary tasks
+
+When `measurement/contract.json` exists in the shared task directory, its criteria,
+verifier, task text, and baseline were frozen before dispatch. Do not edit that
+directory or run a replacement verifier to obtain acceptance. Use the normal
+status command and include the immutable output commit with `--commit` on
+completion. Completion triggers the frozen verifier on a separate checkout.
+Agent-reported completion does not imply independent acceptance: inspect
+`agent-workspaces measurement status TASK` before integration. Record a blocker
+when the contract is unavailable or its allowance is exhausted; do not create a
+new workflow solely to evade its attempt limit. Unknown usage stays unknown.

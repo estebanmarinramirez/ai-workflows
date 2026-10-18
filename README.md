@@ -39,6 +39,8 @@ The integration checkout is human-controlled. No merge, push, or pull request ha
 agent-workspaces doctor
 agent-workspaces budget status
 agent-workspaces telemetry audit
+agent-workspaces measurement status TASK
+agent-workspaces measurement preflight TASK --role ROLE
 agent-workspaces dream init CAPTURE_SPEC DIRECTORY
 agent-workspaces dream attempt DIRECTORY WORLD [--parent root|ATTEMPT]
 agent-workspaces dream rollout DIRECTORY WORLD [--steps 1]
@@ -339,3 +341,7 @@ quota is verified, and their CLI is idle. Unavailable reviewers remain required
 and appear as Waiting entries in the workspace snapshot. The monitor retries
 locally; no model calls are used to poll readiness. Explicit `--roles` activation
 is still available for selecting a strict reviewer set.
+
+Ordinary dispatch now captures [task lifecycle evidence](docs/task-measurement.md).
+Use `dispatch --prepare-only` and a frozen measurement contract to prepare verified
+work before opening agents, without making provider calls.

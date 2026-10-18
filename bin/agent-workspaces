@@ -16,6 +16,9 @@ case "$cmd" in
   dream)
     exec python3 "$(dirname "$catalog_script")/dream.py" "$@"
     ;;
+  measurement)
+    exec python3 "$(dirname "$catalog_script")/measurement.py" "$@"
+    ;;
   attempts)
     exec python3 "$(dirname "$catalog_script")/attempts.py" "$@"
     ;;
@@ -212,6 +215,8 @@ case "$cmd" in
     if [[ $before != "$after" ]]; then
       aw_audit "$workspace_root" role.status "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg state "$state" '{task_id:$task,role:$role,state:$state}')" "$role"
     fi
+    "$0" measurement sync "$task" --role "$role" >/dev/null || printf 'Measurement sync failed; status retained.\n' >&2
+    "$0" measurement verify "$task" --role "$role" || printf 'Independent verification failed to run; inspect measurement status.\n' >&2
     aw_task_refresh "$task" >/dev/null
     printf '%s\n' "$status_file"
     ;;
@@ -505,7 +510,7 @@ PLIST
     } >"$orchestrator_root/briefing.md"
     ;;
   dispatch)
-    workspace_id='' template='' objective='' lead='' seam=general difficulty=standard
+    workspace_id='' template='' objective='' lead='' seam=general difficulty=standard prepare_only=0
     while (($#)); do
       case "$1" in
         --workspace) workspace_id=$2; shift 2 ;;
@@ -514,12 +519,16 @@ PLIST
         --lead) lead=$2; shift 2 ;;
         --seam) seam=$2; shift 2 ;;
         --difficulty) difficulty=$2; shift 2 ;;
+        --prepare-only) prepare_only=1; shift ;;
         *) aw_die "unknown dispatch option: $1" ;;
       esac
     done
     [[ -n $workspace_id && -n $template && -n $objective && -n $lead ]] || \
       aw_die 'dispatch requires --workspace, --template, --objective, and --lead'
     [[ $difficulty =~ ^(simple|standard|complex)$ ]] || aw_die 'difficulty must be simple, standard or complex'
+    if [[ $prepare_only == 1 ]]; then
+      exec python3 "$(dirname "$catalog_script")/measurement.py" stage "$workspace_id" --role "$lead" --template "$template" --objective "$objective" --seam "$seam" --difficulty "$difficulty"
+    fi
     prompt_dispatcher="${AW_PROMPT_DISPATCHER:-$HOME/.local/bin/agent-workspaces-prompt}"
     [[ -x $prompt_dispatcher ]] || aw_die "workflow prompt dispatcher not found: $prompt_dispatcher"
     exec env AW_WORKSPACE_ID="$workspace_id" AW_TEMPLATE="$template" AW_OBJECTIVE="$objective" \
@@ -633,6 +642,10 @@ PLIST
     deferred=("${eligible[@]}")
     roles_json=$(printf '%s\n' "${deferred[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')
     for role in "${deferred[@]}"; do
+      "$0" measurement preflight "$task" --role "$role" >/dev/null
+    done
+    for role in "${deferred[@]}"; do
+      "$0" measurement start "$task" --role "$role" >/dev/null
       aw_atomic_jq "$task/$role.status.json" --arg at "$(aw_now)" '.state="dispatched" | .updated_at=$at'
     done
     aw_atomic_jq "$state" --arg at "$(aw_now)" --argjson roles "$roles_json" \
@@ -648,6 +661,7 @@ PLIST
       buffer="aw-review-$$-$role"; tmux set-buffer -b "$buffer" -- "$instruction"; tmux paste-buffer -b "$buffer" -t "$pane"; sleep 0.35; tmux send-keys -t "$pane" Enter
       [[ $provider == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
       tmux delete-buffer -b "$buffer"
+      "$0" measurement record "$task" --role "$role" --event delivered >/dev/null
     done
     aw_audit "${task%/.coordination/*}" reviewers.activated "$(jq -cn --arg task "$(basename "$task")" --argjson roles "$roles_json" '{task_id:$task,roles:$roles}')"
     printf 'Activated reviewers: %s\n' "${deferred[*]}"
@@ -673,11 +687,15 @@ PLIST
     provider=$(aw_role_provider "$provider" "$role" "$workspace_id")
     case "$provider" in claude) guide="$task/instructions/CLAUDE.md" ;; codex) guide="$task/instructions/AGENTS.md" ;; grok) guide="$task/instructions/GROK.md" ;; *) guide="$task/PROTOCOL.md" ;; esac
     instruction="Retry the same assigned workflow after an infrastructure failure; do not create a new workflow. Read $task/PROTOCOL.md, $guide, $task/task.md, and the lead status in $lead_status. Review only the task-scoped lead commits. Work only in $worktree. Consolidate findings into one report and record status with agent-workspaces status --task '$task' --role '$role'."
+    "$0" measurement sync "$task" --role "$role" >/dev/null
+    "$0" measurement preflight "$task" --role "$role" >/dev/null
+    "$0" measurement start "$task" --role "$role" >/dev/null
     aw_atomic_jq "$status_file" --arg at "$(aw_now)" '.state="dispatched" | .summary="" | .blockers=[] | .updated_at=$at'
     aw_task_refresh "$task" >/dev/null
     buffer="aw-retry-$$-$role"; tmux set-buffer -b "$buffer" -- "$instruction"; tmux paste-buffer -b "$buffer" -t "$pane"; sleep 0.35; tmux send-keys -t "$pane" Enter
     [[ $provider == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
     tmux delete-buffer -b "$buffer"
+    "$0" measurement record "$task" --role "$role" --event delivered >/dev/null
     aw_audit "${task%/.coordination/*}" agent.retried "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" '{task_id:$task,role:$role}')" orchestrator
     printf 'Retried %s for task %s.\n' "$role" "$(basename "$task")"
     ;;
