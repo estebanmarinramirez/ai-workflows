@@ -198,3 +198,9 @@ outcomes. Frozen task verifiers produce separate verification or failure receipt
 See [task measurement](task-measurement.md) for preparation and verifier contracts.
 `telemetry audit` reports attempt coverage by lifecycle, usage and verification;
 receipt counts alone are never a readiness or training-quality score.
+
+Version 1.12 imports context references as lifecycle events, checks local artifact
+integrity during collection, and reports `with_dispatcher_context` coverage.
+Raw prompt and input-file copies stay in the private task-local context directory;
+they are not exported through telemetry. Interactive context is always partial
+and explicitly ineligible for replay, even when a verifier accepts the output.

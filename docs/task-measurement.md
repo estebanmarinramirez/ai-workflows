@@ -115,3 +115,42 @@ Before claiming improvement, collect real usage where available and verified
 outcomes on representative tasks, preserve retries under each task, then compare
 frozen alternatives on fresh independent tasks. Automatic learning and live
 policy promotion remain disabled.
+
+## Dispatcher context evidence (1.12)
+
+Initial dispatch, reviewer activation and retry save the exact dispatcher prompt
+before sending it. A private, content-addressed JSON artifact retains copies of
+task text, protocol, task instruction files, root repository instructions, and
+worker/lead status available at capture time. Missing, external, non-regular,
+unreadable or oversized files are recorded as gaps rather than invented content.
+Each file is bounded to 1 MiB. These are available input snapshots, not proof of
+which files the agent read. Acknowledged handovers add the checkpoint note and
+new requested settings to the same attempt; they do not invent a fresh sample.
+
+Artifacts live under `TASK/measurement/contexts/`, with private directory/file
+permissions. Their raw prompts, file contents, session references and handover
+notes stay local to that task. The telemetry ledger receives only a hash and the
+scope `dispatcher_inputs_only`. Collection reports an error if a referenced
+artifact is missing or changed. The status report checks integrity and links
+these hashes to the attempt's reported output commit and verification result.
+`telemetry audit` counts attempts with dispatcher context separately; that count
+is not a claim of complete context or independent training examples.
+
+Every interactive attempt remains `replay_eligible: false`, including a fully
+verified one. Prior conversation, compaction, provider system prompts, later user
+messages, dynamic instructions and tool results remain unobserved. Switching
+providers preserves those uncertainties. Replay validation rejects manifests or
+worlds explicitly labeled with this partial context scope or ineligibility.
+Removing a provenance label does not make the evidence valid; externally supplied
+manifests are still the producer's responsibility. No automatic conversion from
+interactive records to discovery trees exists.
+
+To inspect one task without reading conversations or launching agents:
+
+```sh
+agent-workspaces measurement status TASK
+agent-workspaces telemetry audit
+```
+
+Old attempts remain unrecorded where context was not captured before execution.
+No history is backfilled and no live session is restarted to obtain these records.

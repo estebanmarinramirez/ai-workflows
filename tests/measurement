@@ -83,6 +83,56 @@ class Measurement(unittest.TestCase):
         self.assertEqual(attempt['state'], 'completed')
         self.assertEqual(sum(r.get('event') == 'delivered' for r in attempt['events']), 1)
 
+    def test_context_is_private_linked_and_tamper_evident(self):
+        m.start(self.task, 'codex')
+        secret = 'private dispatch instruction'
+        digest = m.context(self.task, 'codex', secret, session='fixture-session')
+        self.assertEqual(m.context(self.task, 'codex', secret, session='fixture-session'), digest)
+        artifact = self.task/'measurement/contexts'/(digest+'.json')
+        saved = t.read(artifact)
+        self.assertEqual(saved['prompt'], secret)
+        self.assertFalse(saved['replay_eligible'])
+        self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
+        (self.task/'task.md').write_text('changed after dispatch')
+        import base64
+        self.assertIn('Make answer', base64.b64decode(saved['files']['task/task.md']['content_base64']).decode())
+        self.completed(self.baseline)
+        report = m.report(self.task)['attempts'][0]
+        self.assertEqual(report['contexts'][0]['integrity'], 'intact')
+        self.assertEqual(report['output_commit'], self.baseline)
+        self.assertFalse(report['replay_eligible'])
+        t.collect(fast=True); ledger = t.Ledger(self.ledger)
+        try:
+            self.assertEqual(t.audit(ledger)['receipt_coverage']['with_dispatcher_context'], 1)
+            self.assertNotIn(secret, ' '.join(row[0] for row in ledger.db.execute('SELECT payload FROM events')))
+        finally: ledger.close()
+        saved['prompt'] = 'tampered'; atomic(artifact, saved)
+        self.assertEqual(m.report(self.task)['attempts'][0]['contexts'][0]['integrity'], 'changed')
+        self.assertTrue(t.collect(fast=True)['errors'])
+
+    def test_context_unknown_history_handover_and_missing_files(self):
+        identifier = m.start(self.task, 'codex'); digest = m.context(self.task, 'codex', 'dispatch')
+        saved = t.read(self.task/'measurement/contexts'/(digest+'.json'))
+        self.assertEqual(saved['files']['task/PROTOCOL.md']['status'], 'missing')
+        m.record(self.task, 'codex', 'delivered')
+        with self.assertRaisesRegex(ValueError, 'before delivery'): m.context(self.task, 'codex', 'late')
+        digest = m.context(self.task, 'codex', boundary='handover', handover={'note': 'checkpoint'})
+        saved = t.read(self.task/'measurement/contexts'/(digest+'.json'))
+        self.assertEqual(saved['attempt_id'], identifier)
+        self.assertIsNone(saved['prompt'])
+        self.assertFalse(saved['replay_eligible'])
+        self.assertEqual(len(m.report(self.task)['attempts']), 1)
+
+    def test_context_does_not_follow_external_links_or_read_fifo(self):
+        import context_evidence
+        outside = self.base/'secret'; outside.write_text('do not collect')
+        link = self.tree/'AGENTS.md'; link.symlink_to(outside)
+        self.assertEqual(context_evidence.file_record(link, self.tree)['status'], 'outside_scope')
+        fifo = self.tree/'pipe'; os.mkfifo(fifo)
+        self.assertEqual(context_evidence.file_record(fifo, self.tree)['status'], 'not_regular')
+        atomic(self.config, {'telemetry': {'enabled': False}})
+        self.assertIsNone(m.context(self.task, 'codex', 'disabled'))
+
     def test_quality_failure_is_independent_of_reported_completion(self):
         self.prepare(); m.start(self.task, 'codex'); self.completed(self.baseline)
         self.assertFalse(m.verify(self.task, 'codex')['accepted'])
