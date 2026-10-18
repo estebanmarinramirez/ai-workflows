@@ -326,6 +326,12 @@ class Assignments:
         if record['role'] == 'lead':
             state['default_lead'] = record['slot']
         self.save(state)
+        try:
+            import measurement
+            for path in (self.root / '.coordination').glob('*/measurement/journal.json'):
+                measurement.record(path.parent.parent, record['slot'], 'settings_observed', record['target'])
+        except (OSError, ValueError, KeyError):
+            print('agent-workspaces: measurement handover observation failed; assignment retained', file=sys.stderr)
         return record
 
     def reconcile(self):

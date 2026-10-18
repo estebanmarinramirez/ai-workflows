@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Real Git and local verifiers, fake delivery; never invokes a model provider."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import shutil
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT / 'lib'))
+import measurement as m
+import telemetry as t
+from assignments import atomic
+
+
+class Measurement(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        env = patch.dict(os.environ, XDG_DATA_HOME=str(self.base/'data'), XDG_STATE_HOME=str(self.base/'state'), XDG_CONFIG_HOME=str(self.base/'config'))
+        env.start(); self.addCleanup(env.stop)
+        self.data, self.ledger, self.config = t.roots()
+        self.ws = self.data/'p/w'; self.task = self.ws/'.coordination/t'; self.tree = self.ws/'codex'
+        self.tree.mkdir(parents=True); self.task.mkdir(parents=True)
+        self.git('init', '-q'); self.git('config', 'user.email', 'fixture@example.invalid'); self.git('config', 'user.name', 'Fixture')
+        (self.tree/'answer.txt').write_text('wrong'); self.commit()
+        self.baseline = self.git('rev-parse', 'HEAD')
+        atomic(self.config, {'telemetry': {'enabled': True}, 'model_policy': {'codex': {'model': 'fake', 'effort': 'low'}}})
+        atomic(self.ws/'workspace.json', {'workspace_id': 'p:w', 'repository': str(self.tree), 'set': 'w'})
+        atomic(self.task/'state.json', dict(id='t', workspace_id='p:w', status='prepared', roles={'codex': dict(provider='codex', state='dispatched', worktree=str(self.tree))}))
+        (self.task/'task.md').write_text('Make answer.txt contain correct.\n')
+        self.criteria = self.base/'criteria.txt'; self.criteria.write_text('The submitted commit contains correct.\n')
+        self.verifier = self.base/'verify.py'
+        self.verifier.write_text("import json,sys\nfrom pathlib import Path\nr=json.loads(Path(sys.argv[1]).read_text())\nsys.exit(0 if (Path(r['worktree'])/'answer.txt').read_text()=='correct' else 1)\n")
+
+    def git(self, *args): return m.git(self.tree, *args)
+    def commit(self):
+        self.git('add', '.'); self.git('commit', '-qm', 'fixture'); return self.git('rev-parse', 'HEAD')
+    def prepare(self, **kw): return m.prepare(self.task, 'codex', self.criteria, self.verifier, **kw)
+    def events(self): return json.loads((self.task/'measurement/journal.json').read_text())['attempts']
+    def completed(self, commit):
+        atomic(self.task/'codex.status.json', dict(state='completed', commits=[commit]))
+        m.sync(self.task, 'codex')
+
+    def test_full_lifecycle_accepts_commit_not_dirty_files_and_collects_once(self):
+        self.prepare(); identifier = m.start(self.task, 'codex'); m.record(self.task, 'codex', 'delivered')
+        m.record(self.task, 'codex', 'in_progress')
+        (self.tree/'answer.txt').write_text('correct'); commit = self.commit()
+        self.completed(commit)
+        (self.tree/'answer.txt').write_text('wrong')
+        result = m.verify(self.task, 'codex'); self.assertTrue(result['accepted']); self.assertEqual(result['output_commit'], commit)
+        self.assertEqual(m.verify(self.task, 'codex'), result)
+        self.assertEqual((self.tree/'answer.txt').read_text(), 'wrong')
+        t.collect(fast=True); t.collect(fast=True)
+        ledger = t.Ledger(self.ledger)
+        try:
+            audit = t.audit(ledger)
+            self.assertEqual(audit['distinct_receipted_attempts'], 1)
+            self.assertEqual(audit['receipt_coverage']['with_verification'], 1)
+            self.assertEqual(audit['receipt_coverage']['with_usage_and_verification'], 0)
+            self.assertEqual(audit['counts']['receipt.lifecycle'], 4)
+        finally: ledger.close()
+        report = m.report(self.task)['attempts'][0]
+        self.assertEqual(report['attempt_id'], identifier); self.assertFalse(report['usage_known'])
+        self.assertIsNotNone(report['elapsed_observed_seconds'])
+
+    def test_normal_status_command_runs_frozen_verifier(self):
+        self.prepare(); m.start(self.task, 'codex'); m.record(self.task, 'codex', 'delivered')
+        (self.tree/'answer.txt').write_text('correct'); commit = self.commit()
+        result = subprocess.run([str(ROOT/'bin/agent-workspaces'), 'status', '--task', str(self.task),
+             '--role', 'codex', '--state', 'completed', '--summary', 'fixed', '--command', 'fixture-test',
+             '--exit-code', '0', '--commit', commit], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(m.report(self.task)['attempts'][0]['verification']['accepted'])
+
+    def test_fast_worker_completion_is_not_overwritten_by_delivery_ack(self):
+        m.start(self.task, 'codex'); self.completed(self.baseline)
+        m.record(self.task, 'codex', 'delivered'); m.record(self.task, 'codex', 'delivered')
+        attempt = self.events()[0]
+        self.assertEqual(attempt['state'], 'completed')
+        self.assertEqual(sum(r.get('event') == 'delivered' for r in attempt['events']), 1)
+
+    def test_quality_failure_is_independent_of_reported_completion(self):
+        self.prepare(); m.start(self.task, 'codex'); self.completed(self.baseline)
+        self.assertFalse(m.verify(self.task, 'codex')['accepted'])
+        self.assertEqual(t.read(self.task/'codex.status.json')['state'], 'completed')
+
+    def test_timeout_is_not_quality_rejection_and_never_reexecutes(self):
+        self.verifier.write_text('import time\ntime.sleep(10)\n'); self.prepare(timeout=1)
+        m.start(self.task, 'codex'); self.completed(self.baseline)
+        result = m.verify(self.task, 'codex')
+        self.assertEqual(result['failure_category'], 'timeout')
+        self.assertEqual(m.verify(self.task, 'codex'), result)
+        self.assertFalse(any(r['kind'] == 'verification' for r in self.events()[0]['events']))
+
+    def test_interrupt_preserves_claim_and_no_duplicate_delivery(self):
+        self.prepare(); m.start(self.task, 'codex')
+        with self.assertRaisesRegex(ValueError, 'already open'): m.start(self.task, 'codex')
+        self.completed(self.baseline)
+        with patch.object(m.provider_adapter, 'bounded', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt): m.verify(self.task, 'codex')
+        self.assertEqual(m.verify(self.task, 'codex')['status'], 'interrupted')
+
+    def test_retry_links_same_task_and_enforces_attempt_limit(self):
+        self.prepare(max_attempts=2)
+        first = m.start(self.task, 'codex'); m.record(self.task, 'codex', 'blocked')
+        second = m.start(self.task, 'codex'); self.assertNotEqual(first, second)
+        self.assertEqual(self.events()[1]['previous_attempt_id'], first)
+        m.record(self.task, 'codex', 'cancelled')
+        with self.assertRaisesRegex(ValueError, 'allowance'): m.start(self.task, 'codex')
+
+    def test_handover_preserves_attempt_but_records_settings(self):
+        identifier = m.start(self.task, 'codex'); m.record(self.task, 'codex', 'delivered')
+        atomic(self.task.parent/'agents.json', {'active': {'codex': {'provider': 'grok', 'model': 'fake-other', 'effort': 'high'}}})
+        atomic(self.task/'codex.status.json', {'state': 'in_progress'})
+        m.sync(self.task, 'codex'); m.sync(self.task, 'codex')
+        self.assertEqual(len(self.events()), 1); self.assertEqual(self.events()[0]['id'], identifier)
+        changes = [r for r in self.events()[0]['events'] if r['event'] == 'settings_observed']
+        self.assertEqual(len(changes), 1); self.assertEqual(changes[0]['provider'], 'grok')
+
+    def test_preflight_freezes_inputs_and_rejects_dirty_or_changed_baseline(self):
+        self.prepare(); self.assertTrue(m.preflight(self.task, 'codex')['ready'])
+        (self.tree/'extra').write_text('changed')
+        self.assertFalse(m.preflight(self.task, 'codex')['ready']); self.commit()
+        self.assertFalse(m.preflight(self.task, 'codex')['ready'])
+        with self.assertRaises(ValueError): self.prepare()
+
+    def test_tampered_verifier_and_absent_commit_cannot_accept(self):
+        self.prepare(); m.start(self.task, 'codex'); self.completed(self.baseline)
+        (self.task/'measurement/verifier.py').write_text('raise SystemExit(0)')
+        with self.assertRaisesRegex(ValueError, 'artifacts changed'): m.verify(self.task, 'codex')
+
+    def test_legacy_completion_does_not_invent_an_attempt(self):
+        self.completed(self.baseline)
+        self.assertEqual(m.report(self.task)['attempts'], [])
+        self.assertEqual(m.verify(self.task, 'codex')['status'], 'unconfigured')
+
+    def test_disabled_collection_and_contract_release(self):
+        atomic(self.config, {'telemetry': {'enabled': False}})
+        self.assertIsNone(m.start(self.task, 'codex'))
+        self.prepare(); self.assertFalse(m.preflight(self.task, 'codex')['ready'])
+        atomic(self.config, {'telemetry': {'enabled': True}})
+        with patch('budget.check'), patch('budget.configuration', return_value=({}, None)):
+            result = m.release(self.task, 'codex')
+        self.assertTrue(result['ready'])
+        self.assertEqual(t.read(self.task/'state.json')['status'], 'awaiting_configuration')
+
+    def test_offline_stage_preserves_workers_without_launching(self):
+        shutil.copytree(ROOT/'config', self.config.parent, dirs_exist_ok=True)
+        subprocess.run(['git', 'clone', '--quiet', str(self.tree), str(self.ws/'grok')], check=True)
+        with patch.object(m.provider_adapter, 'run_role') as provider:
+            result = m.stage('p:w', 'codex', 'bugfix', 'Fix the answer')
+            task = Path(result['task']); state = t.read(task/'state.json')
+            self.assertEqual(state['status'], 'prepared')
+            self.assertEqual(state['repository'], str(self.tree))
+            self.assertEqual(state['objective'], 'Fix the answer')
+            self.assertEqual(state['set'], 'w')
+            self.assertFalse(state['gates']['integration_approved'])
+            self.assertEqual(state['roles']['grok']['state'], 'deferred')
+            self.assertEqual(state['roles']['codex']['state'], 'dispatched')
+            self.assertTrue((task/'instructions/AGENTS.md').is_file())
+            self.assertFalse((task/'measurement/journal.json').exists())
+            provider.assert_not_called()
+        m.prepare(task, 'codex', self.criteria, self.verifier)
+        original = t.read(self.task/'state.json'); original['status'] = 'active'; original['seam'] = 'general'
+        atomic(self.task/'state.json', original)
+        self.assertFalse(m.release(task, 'codex')['ready'])
+
+    def test_blocked_session_can_resume_without_inventing_new_attempt(self):
+        identifier = m.start(self.task, 'codex'); m.record(self.task, 'codex', 'delivered')
+        m.record(self.task, 'codex', 'blocked'); m.record(self.task, 'codex', 'in_progress')
+        self.completed(self.baseline)
+        self.assertEqual(self.events()[0]['id'], identifier)
+        self.assertEqual(self.events()[0]['state'], 'completed')
+
+    def test_missing_commit_and_invalid_receipt_cannot_be_acceptance(self):
+        self.prepare(); m.start(self.task, 'codex')
+        atomic(self.task/'codex.status.json', {'state': 'completed', 'commits': []}); m.sync(self.task, 'codex')
+        self.assertEqual(m.verify(self.task, 'codex')['status'], 'missing_commit')
+        ledger = t.Ledger(self.ledger)
+        try:
+            event = self.events()[0]['events'][0]
+            with self.assertRaises(ValueError): t.receipt(ledger, dict(event, accepted=True))
+        finally: ledger.close()
+
+if __name__ == '__main__': unittest.main()

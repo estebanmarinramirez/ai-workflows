@@ -101,6 +101,7 @@ def audit(ledger):
     counts, versions, latest, previous = Counter(), Counter(), {}, {}
     duplicates = Counter()
     tasks, attempts = set(), set()
+    coverage = {}
     cutoff = 0
     # A single SELECT holds a consistent SQLite read snapshot throughout iteration.
     for row in ledger.db.execute('SELECT * FROM events ORDER BY id'):
@@ -119,9 +120,16 @@ def audit(ledger):
         if kind == 'collector':
             versions[obj.get('version', 'unknown')] += 1
         if kind.startswith('receipt.'):
-            attempts.add((row['workspace'], row['task'], obj.get('attempt_id')))
+            key = (row['workspace'], row['task'], obj.get('attempt_id'))
+            attempts.add(key)
+            coverage.setdefault(key, set()).add(kind)
     return {'schema_version': 1, 'evidence_cutoff_event': cutoff, 'counts': dict(counts),
             'distinct_tasks': len(tasks), 'distinct_receipted_attempts': len(attempts),
+            'receipt_coverage': {
+                'with_lifecycle': sum('receipt.lifecycle' in v for v in coverage.values()),
+                'with_usage': sum('receipt.usage' in v for v in coverage.values()),
+                'with_verification': sum('receipt.verification' in v for v in coverage.values()),
+                'with_usage_and_verification': sum({'receipt.usage', 'receipt.verification'} <= v for v in coverage.values())},
             'timestamp_only_observations': dict(duplicates),
             'latest_task_statuses': dict(Counter(status if isinstance(status, str) else 'unknown'
                 for status in (v.get('status', 'unknown') for v in latest.values()))),
@@ -229,6 +237,16 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
                 task = state.parent.name
                 report['tasks'] += 1
                 capture(state, 'task', task_view, ws, task)
+                journal = state.parent / 'measurement/journal.json'
+                if journal.is_file():
+                    try:
+                        for attempt in read(journal).get('attempts', []):
+                            for record in attempt.get('events', []):
+                                if record.get('task') != task or record.get('workspace') != ws:
+                                    raise ValueError('measurement receipt identity mismatch')
+                                receipt(ledger, record)
+                    except (OSError, ValueError, TypeError, KeyError) as error:
+                        report['errors'].append({'source': str(journal), 'error': type(error).__name__})
                 for status in sorted(state.parent.glob('*.status.json')):
                     capture(status, 'role', role_view, ws, task)
             for name in ('audit.jsonl', 'routing-audit.jsonl'):
@@ -280,15 +298,15 @@ def collect(data=None, directory=None, config=None, workspace=None, fast=False):
 
 RECEIPT_FIELDS = {'receipt_id', 'kind', 'workspace', 'task', 'role', 'attempt_id', 'at', 'provider', 'model', 'model_version', 'effort',
                   'input_tokens', 'output_tokens', 'cached_input_tokens', 'cost_usd', 'wall_seconds', 'exit_code',
-                  'accepted', 'failure_category', 'verifier_id', 'verifier_version', 'evidence_sha256', 'source', 'supersedes', 'decision_id', 'parent', 'eligible_parents', 'policy_id', 'selection_probability', 'observed_prefix_sha256', 'timing'}
+                  'accepted', 'failure_category', 'verifier_id', 'verifier_version', 'evidence_sha256', 'source', 'supersedes', 'decision_id', 'parent', 'eligible_parents', 'policy_id', 'selection_probability', 'observed_prefix_sha256', 'timing', 'event', 'baseline_commit', 'repository_dirty', 'contract_sha256', 'previous_attempt_id', 'output_commit'}
 
 def receipt(ledger, payload):
     unknown = set(payload) - RECEIPT_FIELDS
     if unknown: raise ValueError('unknown receipt fields: ' + ', '.join(sorted(unknown)))
     for field in ('receipt_id', 'workspace', 'task', 'attempt_id', 'source', 'at'):
         if not isinstance(payload.get(field), str) or not payload[field].strip(): raise ValueError('missing ' + field)
-    if payload.get('kind') not in ('usage', 'verification', 'failure', 'decision'):
-        raise ValueError('kind must be usage, verification, failure or decision')
+    if payload.get('kind') not in ('usage', 'verification', 'failure', 'decision', 'lifecycle'):
+        raise ValueError('kind must be usage, verification, failure, decision or lifecycle')
     at = datetime.fromisoformat(payload['at'].replace('Z', '+00:00'))
     if at.tzinfo is None: raise ValueError('at must include timezone')
     for field in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'cost_usd', 'wall_seconds'):
@@ -302,6 +320,17 @@ def receipt(ledger, payload):
         allowed={'admission_seconds','preparation_seconds','generation_seconds','snapshot_seconds','verification_seconds','queue_wait_seconds'}
         if not isinstance(timing,dict) or set(timing)-allowed:raise ValueError('invalid timing fields')
         if any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in timing.values()):raise ValueError('invalid timing value')
+    if payload['kind'] == 'lifecycle':
+        if payload.get('event') not in ('prepared', 'delivered', 'in_progress', 'completed', 'blocked', 'cancelled', 'delivery_failed', 'settings_observed'):
+            raise ValueError('invalid lifecycle event')
+        if not isinstance(payload.get('role'), str) or not payload['role']: raise ValueError('lifecycle needs role')
+        if payload.get('accepted') is not None: raise ValueError('lifecycle is not acceptance')
+        if payload.get('repository_dirty') is not None and type(payload['repository_dirty']) is not bool:
+            raise ValueError('invalid repository dirty flag')
+        for field in ('baseline_commit', 'contract_sha256', 'output_commit'):
+            value = payload.get(field)
+            if value is not None and (not isinstance(value, str) or len(value) not in (40, 64) or any(c not in '0123456789abcdef' for c in value)):
+                raise ValueError('invalid ' + field)
     if payload['kind']=='decision':
         for field in ('decision_id','parent','policy_id','observed_prefix_sha256'):
             if not isinstance(payload.get(field),str) or not payload[field]:raise ValueError('missing '+field)

@@ -188,3 +188,13 @@ not retroactive labels for ordinary chats. Live routing observations now retain
 candidate scores, decision IDs and deterministic selection probabilities where
 available. They do not supply randomized action coverage. Workspace dispatch
 start/completion timestamps are retained separately from agent-reported outcomes.
+
+## Interactive task evidence (1.11)
+
+Normal dispatch, reviewer activation, retries, status updates and acknowledged
+handovers write task-local lifecycle receipts. The collector imports these into
+the ledger, including inactive workspaces, without synthesizing usage or accepted
+outcomes. Frozen task verifiers produce separate verification or failure receipts.
+See [task measurement](task-measurement.md) for preparation and verifier contracts.
+`telemetry audit` reports attempt coverage by lifecycle, usage and verification;
+receipt counts alone are never a readiness or training-quality score.

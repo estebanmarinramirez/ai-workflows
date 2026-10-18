@@ -2,7 +2,7 @@
 
 set -o pipefail
 
-AW_VERSION=1.10.0
+AW_VERSION=1.11.0
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
@@ -338,6 +338,7 @@ aw_next_actions_json() {
     return 0
   fi
   case "$status" in
+    prepared) jq -cn '[{id:"prepare-measurement",label:"Freeze acceptance criteria and verifier, then release the prepared task",mutating:false}]' ;;
     active) jq -cn '[{id:"wait",label:"Agents are still working",mutating:false}]' ;;
     awaiting_configuration) jq -cn '[{id:"configuration-pending",label:"Waiting for task configuration acknowledgement; monitor resumes automatically",mutating:false}]' ;;
     dispatching) jq -cn '[{id:"inspect-dispatch",label:"Inspect interrupted prompt delivery before retrying",mutating:false}]' ;;

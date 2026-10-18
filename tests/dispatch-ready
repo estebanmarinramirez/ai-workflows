@@ -9,6 +9,7 @@ import dispatch
 from assignments import atomic
 class Queue(unittest.TestCase):
  def setUp(self):
+  snap=patch.object(dispatch.measurement,'snapshot',return_value={'commit':None,'dirty':None});snap.start();self.addCleanup(snap.stop)
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
   self.task=Path(self.tmp.name)/'.coordination/t';self.task.mkdir(parents=True)
   self.state=dict(id='t',status='awaiting_configuration',workspace_id='w:s',stage='execute',lead='codex',roles={'codex':{'state':'dispatched','worktree':'/fixture'},'grok':{'state':'deferred'}},transitions=[])
@@ -29,6 +30,18 @@ class Queue(unittest.TestCase):
    self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],['codex'])
    self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],[])
    self.assertEqual(sum(c[1]=='paste-buffer' for c in calls),1)
+ def test_interrupted_paste_retains_attempt_and_does_not_redeliver(self):
+  def command(args):
+   if args[1]=='list-sessions':return 's\tw:s\tcodex'
+   if args[1]=='capture-pane':return '›'
+   if args[1]=='paste-buffer':raise OSError('transport lost; delivery unknown')
+   return ''
+  with patch.object(dispatch,'Router') as Router,patch.object(dispatch,'command',side_effect=command),patch.object(dispatch.subprocess,'run') as run,patch('budget.check'):
+   router=Router.return_value;router.config={};router.current.return_value={'provider':'codex'};router.readiness.return_value=[];run.return_value.returncode=0
+   with self.assertRaises(OSError):dispatch.deliver(self.task,'cli')
+   self.assertEqual(dispatch.deliver(self.task,'cli')['sent'],[])
+  journal=json.loads((self.task/'measurement/journal.json').read_text())
+  self.assertEqual(len(journal['attempts']),1);self.assertEqual(journal['attempts'][0]['state'],'prepared')
  def test_pending_handover_still_blocks_when_routing_does_not_manage_it(self):
   with patch.object(dispatch,'Router') as Router,patch.object(dispatch,'command',return_value='s\tw:s\tcodex') as command,patch.object(dispatch.subprocess,'run') as run,patch('budget.check'):
    router=Router.return_value;router.config={};router.current.return_value={'provider':'codex'};router.readiness.return_value=[]
