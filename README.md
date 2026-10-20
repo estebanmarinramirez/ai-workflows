@@ -116,7 +116,7 @@ reflows existing windows without interrupting a checkpointed handover.
 sets. On macOS, worker slots remain available through tmux; automatic placement
 of four desktop windows is an Omarchy feature.
 
-The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. A deduplicated pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval.
+The monitor itself is deterministic and consumes no model tokens. It wakes the orchestrator only when the actionable signature changes: task status, gate values, role commits and changed files, integration and pull-request records, dispatch and reviewer eligibility, next actions, or a pending handover. Snapshot timestamps, quota telemetry, status evidence, and audit lines do not create another wake. When that signature changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. One pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval, and an acknowledged signature is not delivered again after a monitor restart.
 
 Visible provider prompts are not treated as completion signals because some CLIs render their composer while tools are still running. Workflow state changes only from explicit agent reports, confirmed process failure, or an operator-initiated recovery.
 

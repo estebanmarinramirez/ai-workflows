@@ -295,6 +295,91 @@ aw_orchestrator_prompt_idle() {
   esac
 }
 
+# Wake identity is task status, every gate value, role state, role commits and
+# changed files, integration and pull-request records, dispatch and reviewer
+# eligibility, next actions, and pending handovers. Timestamps, quota
+# telemetry, status evidence, live footers, and audit lines stay observational.
+aw_actionable_payload() {
+  (
+    set -euo pipefail
+    workspace_root=$1
+    directory=$(mktemp -d)
+    trap 'rm -rf "$directory"' EXIT
+    tasks_file=$directory/tasks.json
+    assignments_file=$directory/assignments.json
+    if [[ -f $workspace_root/.coordination/agents.json ]]; then
+      jq -c '{
+        active: ((.active // {}) | to_entries | sort_by(.key) | map({slot:.key, provider:.value.provider, model:.value.model, effort:.value.effort})),
+        pending: [(.requests // {})[] | select(.phase=="requested" or .phase=="ready" or .phase=="launching" or .phase=="awaiting_ack") | {id,slot,role,phase,when,provider:.target.provider,model:.target.model,effort:.target.effort}] | sort_by(.id)
+      }' "$workspace_root/.coordination/agents.json" >"$assignments_file"
+    else
+      printf '%s\n' '{"active":[],"pending":[]}' >"$assignments_file"
+    fi
+    : >"$directory/tasks.lines"
+    while IFS= read -r state; do
+      task_dir=$(dirname "$state")
+      next_ids=$(aw_next_actions_json "$task_dir" | jq -c '[.[].id] | sort')
+      artifacts='[]'
+      while IFS=$'\t' read -r slot status_path; do
+        [[ -n $slot ]] || continue
+        if [[ -n $status_path && -f $status_path ]]; then
+          item=$(jq -c --arg slot "$slot" '{slot:$slot, commits: ((.commits // []) | map(select(type=="string")) | unique), files: ((.changed_files // []) | map(select(type=="string")) | unique)}' "$status_path") || return 1
+        else
+          item=$(jq -nc --arg slot "$slot" '{slot:$slot,commits:[],files:[]}')
+        fi
+        artifacts=$(jq -c --argjson item "$item" '. + [$item]' <<<"$artifacts") || return 1
+      done < <(jq -r '.roles // {} | to_entries | sort_by(.key)[] | [.key, (.value.status_json // .value.status_file // "")] | @tsv' "$state")
+      jq -c --argjson next "$next_ids" --argjson artifacts "$artifacts" '{
+        id, status, stage,
+        roles: ((.roles // {}) | to_entries | sort_by(.key) | map({slot:.key, state:(.value.state // "dispatched")})),
+        artifacts: $artifacts,
+        gates: ((.gates // {}) | to_entries | sort_by(.key) | from_entries),
+        integration: (if (.integration | type) == "object" then (.integration | del(.updated_at, .checked_at, .at)) else {} end),
+        pr: (if (.pr | type) == "object" then (.pr | del(.updated_at, .checked_at, .at)) else {} end),
+        sent: ((.dispatch.sent // []) | sort),
+        deferred: ((.review_activation.deferred // {}) | keys | sort),
+        next: $next
+      }' "$state" >>"$directory/tasks.lines"
+    done < <(find "$workspace_root/.coordination" -mindepth 2 -maxdepth 2 -name state.json -type f -print 2>/dev/null | sort)
+    if [[ -s $directory/tasks.lines ]]; then
+      jq -s 'sort_by(.id)' "$directory/tasks.lines" >"$tasks_file"
+    else
+      printf '%s\n' '[]' >"$tasks_file"
+    fi
+    jq -nS --slurpfile tasks "$tasks_file" --slurpfile assignments "$assignments_file" \
+      '{tasks:$tasks[0], assignments:$assignments[0]}'
+  )
+}
+
+aw_actionable_signature() {
+  local payload
+  payload=$(aw_actionable_payload "$1") || return 1
+  [[ -n $payload ]] || return 1
+  printf '%s' "$payload" | sha256sum | awk '{print $1}'
+}
+
+# Record at most one undelivered wake. Returns 0 only when a new event is queued.
+aw_queue_orchestrator_wake() {
+  local workspace_root=$1 signature previous signature_file pending_file temporary
+  signature=$(aw_actionable_signature "$workspace_root") || return 1
+  [[ -n $signature ]] || return 1
+  mkdir -p "$workspace_root/.orchestrator"
+  signature_file="$workspace_root/.orchestrator/.state-signature"
+  pending_file="$workspace_root/.orchestrator/.pending-wake"
+  previous=''
+  [[ -f $signature_file ]] && read -r previous <"$signature_file" || true
+  temporary=$(mktemp "$workspace_root/.orchestrator/.state-signature.XXXXXX") || return 1
+  printf '%s\n' "$signature" >"$temporary"
+  mv "$temporary" "$signature_file"
+  if [[ -n $previous && $signature != "$previous" ]]; then
+    temporary=$(mktemp "$workspace_root/.orchestrator/.pending-wake.XXXXXX") || return 1
+    printf '%s\n' "$signature" >"$temporary"
+    mv "$temporary" "$pending_file"
+    return 0
+  fi
+  return 1
+}
+
 aw_workspace_risks() {
   local workspace_id=$1 session repository role worktree branch dirty ahead task_count overdue_count=0 active_agents=0 now task_status deadline
   repository=$(tmux list-sessions -F $'#{@aw_workspace_id}\t#{@aw_repository}' 2>/dev/null | awk -F '\t' -v id="$workspace_id" '$1==id {print $2; exit}' || true)

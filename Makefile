@@ -25,6 +25,9 @@ test:
 	./tests/shadow
 	./tests/benchmark
 	./tests/sessions
+	python3 tests/pane-recovery
+	./tests/orchestrator-wake
+	./tests/monitor-wake
 	./tests/routing
 	./tests/menu
 	./tests/models

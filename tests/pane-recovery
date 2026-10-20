@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Exercise pending handover recovery without touching live tmux sessions."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+with tempfile.TemporaryDirectory() as temporary:
+    base = Path(temporary)
+    binaries = base / 'bin'
+    binaries.mkdir()
+    config = base / '.config/agent-workspaces'
+    config.mkdir(parents=True)
+    (config / 'config.json').write_text('{"orchestrator_provider":"claude"}')
+    coordination = base / '.coordination'
+    coordination.mkdir()
+    for name, code in {
+        'agent-workspaces': """case "$1" in
+available-providers) echo claude ;;
+role-provider) echo "$2" ;;
+workspace-root) echo "$HOME" ;;
+esac
+""",
+        'tmux': """if [[ $1 == has-session ]]; then [[ $EXISTS == yes ]]; else exit 0; fi
+""",
+    }.items():
+        path = binaries / name
+        path.write_text(f'#!/bin/bash\necho "{name} $*" >>"$HOME/calls"\n' + code)
+        path.chmod(0o755)
+    for phase in ('ready', 'launching', 'awaiting_ack'):
+        for exists in ('yes', 'no'):
+            (coordination / 'agents.json').write_text(json.dumps({'requests': {'change': {
+                'id': 'change', 'slot': 'orchestrator', 'phase': phase,
+                'outgoing_provider': 'claude', 'target': {'provider': 'codex'}}}}))
+            capture = base / 'calls'
+            capture.write_text('')
+            env = dict(os.environ, HOME=str(base), PATH=f'{binaries}:{os.environ["PATH"]}', EXISTS=exists)
+            subprocess.run(['bash', str(ROOT / 'compat/bin/omarchy-agent-pane'),
+                            'orchestrator', 'session', str(base), 'description', '',
+                            str(ROOT), 'set', 'class', 'w:set'], env=env, check=True)
+            calls = capture.read_text()
+            assert 'tmux attach-session -t session' in calls, calls
+            assert 'provider-command' not in calls, calls
+            assert 'agent-workspaces monitor-start w:set' in calls, calls
+            assert ('tmux new-session' in calls) == (exists == 'no'), calls
+            assert ('agents w:set apply change' in calls) == (exists == 'no'), calls
+            assert 'kill-session' not in calls and 'respawn-pane' not in calls, calls
+            if exists == 'no':
+                provider = 'claude' if phase == 'ready' else 'codex'
+                assert f'@aw_provider {provider}' in calls, calls
+                assert '@aw_handover_id change' in calls, calls
+    for exists in ('yes', 'no'):
+        (coordination / 'agents.json').write_text(json.dumps({'requests': {'change': {
+            'id': 'change', 'slot': 'codex', 'phase': 'ready',
+            'outgoing_provider': 'codex', 'target': {'provider': 'grok'}}}}))
+        capture = base / 'calls'
+        capture.write_text('')
+        env = dict(os.environ, HOME=str(base), PATH=f'{binaries}:{os.environ["PATH"]}', EXISTS=exists)
+        subprocess.run(['bash', str(ROOT / 'compat/bin/omarchy-agent-pane'),
+                        'codex', 'session', str(base), 'description', '',
+                        str(ROOT), 'set', 'class', 'w:set'], env=env, check=True)
+        calls = capture.read_text()
+        assert 'tmux attach-session -t session' in calls, calls
+        assert 'provider-command' not in calls, calls
+        assert 'monitor-start' not in calls, calls
+        assert ('tmux new-session' in calls) == (exists == 'no'), calls
+        assert ('agents w:set apply change' in calls) == (exists == 'no'), calls
+        assert 'kill-session' not in calls, calls
+        if exists == 'no':
+            assert '@aw_provider codex' in calls, calls
+print('ok - pending handovers recover missing sessions and preserve existing sessions')

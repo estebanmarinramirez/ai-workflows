@@ -1,0 +1,268 @@
+#!/bin/bash
+# Full monitor-loop wake regressions. No live tmux server, provider, desktop,
+# or installed monitor is used. Paste-buffer lines are injected model wakes.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" \
+  XDG_STATE_HOME="$fixture/state" TMUX_LOG="$fixture/tmux.log" TMUX_CAPTURE="$fixture/pane.txt" \
+  TMUX_WORKSPACE=x:set TMUX_PROVIDER=claude TMUX_HAVE_SESSION=yes \
+  AW_TASK="" AW_TICK_SCENARIO="$fixture/extra.sh" AW_WAKE_BEFORE_RECORD=""
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/agent-workspaces/providers" "$XDG_STATE_HOME" "$fixture/bin" \
+  "$XDG_DATA_HOME/agent-workspaces/repo-hash/set/.orchestrator"
+cp "$root/config/config.json" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+cp -a "$root/config/providers/." "$XDG_CONFIG_HOME/agent-workspaces/providers/"
+jq '.event_reviewer.enabled=false | .budget.enabled=false' "$XDG_CONFIG_HOME/agent-workspaces/config.json" >"$XDG_CONFIG_HOME/agent-workspaces/config.tmp"
+mv "$XDG_CONFIG_HOME/agent-workspaces/config.tmp" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+export PATH="$fixture/bin:$PATH"
+source "$root/lib/core.sh"
+
+workspace="$XDG_DATA_HOME/agent-workspaces/repo-hash/set"
+task="$workspace/.coordination/t1"
+orch="$workspace/.orchestrator"
+jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex","grok"]}' >"$workspace/workspace.json"
+
+cat >"$fixture/bin/tmux" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$TMUX_LOG"
+case "$1" in
+  list-sessions)
+    [[ ${TMUX_HAVE_SESSION:-yes} == yes ]] && printf '%s\n' "orch|orchestrator|${TMUX_WORKSPACE:-x:set}|${TMUX_PROVIDER:-claude}"
+    ;;
+  list-panes) printf '%s\n' '%1' ;;
+  capture-pane) cat "${TMUX_CAPTURE:?}" ;;
+esac
+exit 0
+EOF
+cat >"$fixture/bin/notify-send" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+cat >"$fixture/bin/tick-hook" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+stamp="2026-10-20T13:46:${AW_MONITOR_TICK}0+02:00"
+jq --arg at "$stamp" --arg waiting "grok: budget heartbeat ${AW_MONITOR_TICK}" \
+  '.updated_at=$at | .roles.grok.updated_at=$at | .dispatch.waiting=[$waiting] | .review_activation.deferred.codex=("quota "+$at)' \
+  "$AW_TASK/state.json" >"$AW_TASK/state.tmp"
+mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"
+if [[ -f $AW_TASK/grok.status.json ]]; then
+  jq --arg at "$stamp" '.updated_at=$at | .summary=("telemetry "+$at) | .evidence=[{command:"quota",exit_code:0,at:$at}]' \
+    "$AW_TASK/grok.status.json" >"$AW_TASK/status.tmp"
+  mv "$AW_TASK/status.tmp" "$AW_TASK/grok.status.json"
+fi
+printf '%s\n' "{\"at\":\"$stamp\",\"event\":\"telemetry.refresh\",\"actor\":\"monitor\"}" >>"$(dirname "$AW_TASK")/audit.jsonl"
+mkdir -p "${XDG_STATE_HOME:?}/omarchy/agents/usage"
+percent="0.9${AW_MONITOR_TICK}"
+[[ $percent =~ ^0[.]9[0-9]$ ]] || percent=0.99
+jq -n --arg at "$stamp" --argjson percent "$percent" '{schemaVersion:1,id:"claude",ready:true,updatedAt:$at,limits:[{percent:$percent,resetsAt:"2026-10-23T14:44:59Z"}]}' \
+  >"$XDG_STATE_HOME/omarchy/agents/usage/claude.json"
+if [[ -f ${AW_TICK_SCENARIO:-} ]]; then
+  # shellcheck disable=SC1090
+  source "$AW_TICK_SCENARIO"
+fi
+EOF
+cat >"$fixture/bin/before-record" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+jq '.gates.note="arrived-during-delivery"' "$AW_TASK/state.json" >"$AW_TASK/state.race"
+mv "$AW_TASK/state.race" "$AW_TASK/state.json"
+EOF
+chmod +x "$fixture/bin/tmux" "$fixture/bin/notify-send" "$fixture/bin/tick-hook" "$fixture/bin/before-record"
+
+pastes() { grep -c '^paste-buffer ' "$TMUX_LOG" || true; }
+fail() {
+  printf 'not ok - %s\npending=%s\nwake=%s\nsignature=%s\nlog:\n%s\n' "$*" \
+    "$(cat "$orch/.pending-wake" 2>/dev/null || true)" \
+    "$(cat "$orch/.wake-signature" 2>/dev/null || true)" \
+    "$(aw_actionable_signature "$workspace" 2>/dev/null || true)" \
+    "$(cat "$TMUX_LOG" 2>/dev/null || true)"
+  exit 1
+}
+export AW_TASK="$task" AW_MONITOR_TICK_HOOK="$fixture/bin/tick-hook"
+
+prepare() {
+  local status=$1 role_state=$2
+  rm -rf "$workspace/.coordination"
+  mkdir -p "$task" "$orch"
+  jq -n '{schema_version:1,active:{grok:{provider:"grok",model:"grok-4.6",effort:"high"}},requests:{}}' >"$workspace/.coordination/agents.json"
+  jq -n --arg status "$status" --arg role_state "$role_state" --arg status_path "$task/grok.status.json" \
+    '{schema_version:2,id:"t1",workspace_id:"x:set",stage:"execute",status:$status,objective:"stop repeated wakes",
+      updated_at:"2026-10-20T13:40:00+02:00",
+      roles:{grok:{state:$role_state,updated_at:"2026-10-20T13:40:00+02:00",status_json:$status_path}},
+      gates:{integration_approved:false},
+      transitions:[{from:"active",to:$status,at:"2026-10-20T13:40:00+02:00",actor:"test"}],
+      dispatch:{waiting:["grok: budget heartbeat 95"],sent:[],started_at:"2026-10-20T13:40:00+02:00"},
+      review_activation:{deferred:{codex:"quota 95%"}}}' >"$task/state.json"
+  jq -n --arg role_state "$role_state" \
+    '{schema_version:1,task_id:"t1",role:"grok",state:$role_state,summary:"working",updated_at:"2026-10-20T13:40:00+02:00",
+      evidence:[{command:"quota",exit_code:0,at:"2026-10-20T13:40:00+02:00"}],commits:[],changed_files:[],blockers:[]}' \
+    >"$task/grok.status.json"
+  printf 'exit 0\n' >"$fixture/extra.sh"
+  rm -f "$orch/.state-signature" "$orch/.pending-wake" "$orch/.pending-wake.delivered" "$orch/.wake-signature"
+  : >"$TMUX_LOG"
+  printf '%s\n' '❯' >"$TMUX_CAPTURE"
+  export TMUX_HAVE_SESSION=yes
+  unset AW_WAKE_BEFORE_RECORD
+}
+
+extra() { printf '%s\n' "$1" >"$fixture/extra.sh"; }
+run_ticks() {
+  AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" monitor-loop x:set "$1"
+}
+measure() {
+  local name=$1 want=$2 got
+  got=$(pastes)
+  printf 'measure %s pastes=%s\n' "$name" "$got"
+  [[ $got == "$want" && ! -f $orch/.pending-wake ]] || fail "$name injected $got wakes, want $want"
+}
+expect_held() {
+  local name=$1 got
+  got=$(pastes)
+  printf 'measure %s pastes=%s held=yes\n' "$name" "$got"
+  [[ $got == 0 && -s $orch/.pending-wake ]] || fail "$name did not hold the undelivered wake (pastes=$got)"
+}
+
+# The installed 1.12.0 monitor hashes snapshot prose except the Updated line.
+# Quota lines therefore change every poll. This fixture records that divergence.
+installed_hash() { sed '/^Updated:/d' | sha256sum | awk '{print $1}'; }
+hash_one=$(printf 'Updated: one\n- Account claude: remaining 90%%\n' | installed_hash)
+hash_two=$(printf 'Updated: two\n- Account claude: remaining 80%%\n' | installed_hash)
+[[ $hash_one != "$hash_two" ]] || fail 'fixture no longer models the installed snapshot hash'
+printf 'measure installed-snapshot-churn hash_changed=yes\n'
+
+prepare awaiting_integration completed
+signature_one=$(aw_actionable_signature "$workspace")
+jq '.updated_at="2026-10-20T13:46:10+02:00" | .dispatch.waiting=["grok: budget heartbeat 90"] | .review_activation.deferred.codex="quota 90%"' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+jq '.updated_at="2026-10-20T13:46:10+02:00" | .summary="telemetry" | .evidence=[{command:"quota",exit_code:0,at:"2026-10-20T13:46:10+02:00"}]' "$task/grok.status.json" >"$task/status.tmp"
+mv "$task/status.tmp" "$task/grok.status.json"
+signature_two=$(aw_actionable_signature "$workspace")
+[[ $signature_one == "$signature_two" ]] || fail 'timestamp and quota churn changed the semantic signature before the loop'
+jq '.gates.integration_approved=true' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+signature_gate=$(aw_actionable_signature "$workspace")
+[[ $signature_gate != "$signature_one" ]] || fail 'boolean integration gate did not change the semantic signature'
+jq '.gates.integration_approved=false' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+
+prepare awaiting_integration completed
+run_ticks 5
+measure unchanged-integration-gate 0
+
+prepare superseded completed
+run_ticks 4
+measure superseded-quota-churn 0
+
+prepare active in_progress
+run_ticks 4
+measure evidence-and-quota-churn 0
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 3 ]]; then jq ".gates.integration_approved=true" "$AW_TASK/state.json" >"$AW_TASK/state.tmp" && mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"; fi'
+run_ticks 6
+measure boolean-gate-once 1
+[[ $(cat "$orch/.wake-signature") == "$(aw_actionable_signature "$workspace")" ]] || fail 'delivered signature drifted from the boolean gate'
+: >"$TMUX_LOG"
+run_ticks 3
+measure boolean-gate-restart 0
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 3 ]]; then jq ".gates.note=\"human sign-off required\"" "$AW_TASK/state.json" >"$AW_TASK/state.tmp" && mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"; fi'
+run_ticks 6
+measure nonboolean-gate-once 1
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 3 ]]; then jq ".commits=[\"4c3879bd950d2998616b4a17825ebd11c53123ea\"] | .changed_files=[\"lib/core.sh\"]" "$AW_TASK/grok.status.json" >"$AW_TASK/status.tmp" && mv "$AW_TASK/status.tmp" "$AW_TASK/grok.status.json"; fi'
+run_ticks 6
+measure lead-commit-once 1
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 3 ]]; then jq ".changed_files=[\"README.md\"]" "$AW_TASK/grok.status.json" >"$AW_TASK/status.tmp" && mv "$AW_TASK/status.tmp" "$AW_TASK/grok.status.json"; fi'
+run_ticks 6
+measure changed-file-once 1
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 2 ]]; then jq ".gates.integration_approved=true" "$AW_TASK/state.json" >"$AW_TASK/state.tmp" && mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"; fi'
+printf '%s\n' '❯' 'bypass permissions · esc to interrupt' >"$TMUX_CAPTURE"
+run_ticks 3
+expect_held busy-turn
+: >"$TMUX_LOG"
+printf '%s\n' '❯' >"$TMUX_CAPTURE"
+run_ticks 3
+measure busy-retry-once 1
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 2 ]]; then jq ".gates.integration_approved=true" "$AW_TASK/state.json" >"$AW_TASK/state.tmp" && mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"; fi'
+printf '%s\n' '❯ user draft must survive' >"$TMUX_CAPTURE"
+run_ticks 3
+expect_held typed-draft
+: >"$TMUX_LOG"
+printf '%s\n' '❯' >"$TMUX_CAPTURE"
+run_ticks 3
+measure draft-retry-once 1
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 2 ]]; then jq ".gates.integration_approved=true" "$AW_TASK/state.json" >"$AW_TASK/state.tmp" && mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"; fi'
+export TMUX_HAVE_SESSION=no
+run_ticks 2
+expect_held missing-session
+: >"$TMUX_LOG"
+export TMUX_HAVE_SESSION=yes
+run_ticks 3
+measure session-retry-once 1
+
+prepare active in_progress
+jq '.requests.change={id:"change",slot:"grok",role:"lead",phase:"requested",when:"checkpoint",target:{provider:"claude",model:"opus",effort:"high"}}' \
+  "$workspace/.coordination/agents.json" >"$workspace/.coordination/agents.tmp"
+mv "$workspace/.coordination/agents.tmp" "$workspace/.coordination/agents.json"
+extra 'if [[ ${AW_MONITOR_TICK} == 3 ]]; then jq ".requests.change.phase=\"launching\"" "$(dirname "$AW_TASK")/agents.json" >"$(dirname "$AW_TASK")/agents.tmp" && mv "$(dirname "$AW_TASK")/agents.tmp" "$(dirname "$AW_TASK")/agents.json"; fi'
+run_ticks 6
+measure handover-phase-once 1
+
+prepare awaiting_integration completed
+printf '%s\n' 'undelivered-token' >"$orch/.pending-wake"
+run_ticks 1
+measure planted-pending-once 1
+: >"$TMUX_LOG"
+run_ticks 3
+measure planted-pending-restart 0
+
+prepare active in_progress
+extra 'if [[ ${AW_MONITOR_TICK} == 2 ]]; then jq ".gates.integration_approved=true" "$AW_TASK/state.json" >"$AW_TASK/state.tmp" && mv "$AW_TASK/state.tmp" "$AW_TASK/state.json"; fi'
+export AW_WAKE_BEFORE_RECORD="$fixture/bin/before-record"
+run_ticks 5
+measure delivery-race-kept 2
+[[ $(cat "$orch/.wake-signature") == "$(aw_actionable_signature "$workspace")" ]] || fail 'raced gate was recorded without being delivered'
+unset AW_WAKE_BEFORE_RECORD
+: >"$TMUX_LOG"
+run_ticks 3
+measure delivery-race-restart 0
+
+prepare active in_progress
+base=$(aw_actionable_signature "$workspace")
+jq '.integration={branch:"agents/example",updated_at:"2026-10-20T13:40:00+02:00"}' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+branch=$(aw_actionable_signature "$workspace")
+[[ $branch != "$base" ]] || fail 'integration branch did not change the signature'
+jq '.integration.updated_at="2026-10-20T13:46:00+02:00"' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+[[ $(aw_actionable_signature "$workspace") == "$branch" ]] || fail 'integration timestamp changed the signature'
+jq '.pr={state:"open",checked_at:"2026-10-20T13:40:00+02:00"}' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+pr_signature=$(aw_actionable_signature "$workspace")
+[[ $pr_signature != "$branch" ]] || fail 'pull request state did not change the signature'
+jq '.pr.checked_at="2026-10-20T13:46:00+02:00"' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+[[ $(aw_actionable_signature "$workspace") == "$pr_signature" ]] || fail 'pull request timestamp changed the signature'
+jq '.review_activation.deferred.claude="quota 95%"' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+eligibility=$(aw_actionable_signature "$workspace")
+[[ $eligibility != "$pr_signature" ]] || fail 'reviewer eligibility did not change the signature'
+jq '.review_activation.deferred.claude="quota 90%"' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+[[ $(aw_actionable_signature "$workspace") == "$eligibility" ]] || fail 'reviewer quota text changed the signature'
+printf 'measure integration-pr-eligibility signature=stable-on-timestamps\n'
+
+printf 'ok - monitor loop delivers each actionable change once\n'

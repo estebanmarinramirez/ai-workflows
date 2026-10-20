@@ -345,31 +345,41 @@ case "$cmd" in
     ;;
   monitor-loop)
     workspace_id=${1:?workspace id}
+    # A positive second argument bounds one process for deterministic tests.
+    # The installed monitor invokes this command with the workspace id only.
+    max_ticks=${2:-}
+    [[ -z $max_ticks || $max_ticks =~ ^[1-9][0-9]*$ ]] || aw_die 'monitor-loop tick count must be a positive integer'
     interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
     [[ $interval =~ ^[0-9]+$ && $interval -ge 5 ]] || interval=15
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
-    signature_file="$workspace_root/.orchestrator/.state-signature"
+    monitor_tick=0
     while :; do
+      monitor_tick=$((monitor_tick + 1))
+      if [[ -n ${AW_MONITOR_TICK_HOOK:-} ]]; then
+        AW_MONITOR_TICK=$monitor_tick "$AW_MONITOR_TICK_HOOK" || true
+      fi
       "$0" routing "$workspace_id" reconcile >/dev/null 2>&1 || true
       "$0" agents "$workspace_id" reconcile >/dev/null 2>&1 || true
       "$0" reconcile-dispatch "$workspace_id" >/dev/null 2>&1 || true
       "$0" reconcile-reviewers "$workspace_id" >/dev/null 2>&1 || true
-      snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
-      if [[ -s $snapshot_file ]]; then
-        signature=$(sed '/^Updated:/d' "$snapshot_file" | sha256sum | awk '{print $1}')
-        previous=''; [[ -f $signature_file ]] && read -r previous <"$signature_file"
-        printf '%s\n' "$signature" >"$signature_file"
-        if [[ -n $previous && $signature != "$previous" ]]; then
-          "$0" attention "$workspace_id" >/dev/null 2>&1 || true
-          "$0" event-review "$workspace_id" >/dev/null 2>&1 || true
-          printf '%s\n' "$signature" >"$workspace_root/.orchestrator/.pending-wake"
-        fi
+      # The snapshot stays fresh for the orchestrator. Its timestamps and
+      # telemetry are not themselves a reason to wake.
+      "$0" snapshot "$workspace_id" --write >/dev/null 2>&1 || true
+      if aw_queue_orchestrator_wake "$workspace_root"; then
+        "$0" attention "$workspace_id" >/dev/null 2>&1 || true
+        "$0" event-review "$workspace_id" >/dev/null 2>&1 || true
       fi
       if [[ -s $workspace_root/.orchestrator/.pending-wake ]]; then
         read -r pending_signature <"$workspace_root/.orchestrator/.pending-wake"
         "$0" wake "$workspace_id" "$pending_signature" >/dev/null 2>&1 || true
       fi
-      sleep "$interval"
+      if [[ -n $max_ticks ]]; then
+        if [[ $monitor_tick -ge $max_ticks ]]; then
+          break
+        fi
+      else
+        sleep "$interval"
+      fi
     done
     ;;
   wake)
@@ -377,8 +387,10 @@ case "$cmd" in
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
     pending_file="$workspace_root/.orchestrator/.pending-wake"
     delivered_file="$workspace_root/.orchestrator/.wake-signature"
-    delivered=''; [[ -f $delivered_file ]] && read -r delivered <"$delivered_file"
-    if [[ $delivered == "$signature" ]]; then
+    delivered=''; [[ -f $delivered_file ]] && read -r delivered <"$delivered_file" || true
+    semantic=$(aw_actionable_signature "$workspace_root" || true)
+    # A handover token and the semantic signature are one event once delivered.
+    if [[ -n $delivered && ( $delivered == "$signature" || ( -n $semantic && $delivered == "$semantic" ) ) ]]; then
       [[ ! -f $pending_file ]] || mv "$pending_file" "$workspace_root/.orchestrator/.pending-wake.delivered"
       exit 0
     fi
@@ -400,9 +412,19 @@ case "$cmd" in
     tmux paste-buffer -b "$buffer" -t "$pane" -d
     tmux send-keys -t "$pane" Enter
     [[ $provider == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
+    # Test seam for a change that lands after the signature was read. The
+    # recorded value stays the earlier signature, so the newer change remains
+    # undelivered and is retried instead of being marked acknowledged.
+    if [[ -n ${AW_WAKE_BEFORE_RECORD:-} ]]; then
+      "$AW_WAKE_BEFORE_RECORD" || true
+    fi
+    recorded=${semantic:-$signature}
     temporary=$(mktemp "$workspace_root/.orchestrator/.wake-signature.XXXXXX")
-    printf '%s\n' "$signature" >"$temporary"
+    printf '%s\n' "$recorded" >"$temporary"
     mv "$temporary" "$delivered_file"
+    temporary=$(mktemp "$workspace_root/.orchestrator/.state-signature.XXXXXX")
+    printf '%s\n' "$recorded" >"$temporary"
+    mv "$temporary" "$workspace_root/.orchestrator/.state-signature"
     [[ ! -f $pending_file ]] || mv "$pending_file" "$workspace_root/.orchestrator/.pending-wake.delivered"
     ;;
   attention)

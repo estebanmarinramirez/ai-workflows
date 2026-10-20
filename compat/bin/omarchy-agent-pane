@@ -40,6 +40,19 @@ set_session_metadata() {
 
 assignment_root=$(agent-workspaces workspace-root "$workspace_id" 2>/dev/null || true)
 if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  # A checkpoint survives a reboot, but its tmux session does not. Recreate an
+  # idle shell so the handover can launch only its designated successor.
+  # Never resume the outgoing provider, and never replace a session that exists.
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    pending=$(jq -c --arg role "$role" 'first(.requests[] | select(.slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack")))' "$assignment_root/.coordination/agents.json")
+    provider=$(jq -r 'if .phase=="ready" then .outgoing_provider else .target.provider end' <<<"$pending")
+    change_id=$(jq -r '.id' <<<"$pending")
+    tmux new-session -d -s "$session" -c "$directory" bash --noprofile --norc || exit 1
+    set_session_metadata
+    tmux set-option -q -t "$session" @aw_handover_id "$change_id"
+    agent-workspaces agents "$workspace_id" apply "$change_id" || printf 'Handover remains pending; review with agent-workspaces agents %s\n' "$workspace_id" >&2
+  fi
+  [[ $role == orchestrator ]] && agent-workspaces monitor-start "$workspace_id" >/dev/null 2>&1
   exec tmux attach-session -t "$session"
 fi
 was_started=false
