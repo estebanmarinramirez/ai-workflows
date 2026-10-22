@@ -33,6 +33,7 @@ test:
 	./tests/models
 	./tests/layouts
 	./tests/desktop-layout
+	./tests/integration-base
 	./tests/model-policy
 	./tests/live-config
 	./tests/assignments

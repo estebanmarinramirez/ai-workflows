@@ -39,15 +39,82 @@ aw_provider_available() {
 }
 
 aw_origin_base() {
-  local repository=$1 base
+  local repository=$1 base remote_head
   base=$(git -C "$repository" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [[ -z $base ]]; then
+    # Ask the remote for its default branch before guessing a conventional name.
+    remote_head=$(timeout 10 git -C "$repository" ls-remote --symref origin HEAD 2>/dev/null | awk '$1=="ref:" && $3=="HEAD" {sub("^refs/heads/","",$2); print $2; exit}' || true)
+    if [[ -n $remote_head ]] && git -C "$repository" show-ref --verify --quiet "refs/remotes/origin/$remote_head"; then
+      base="origin/$remote_head"
+    fi
+  fi
   if [[ -z $base ]]; then
     for candidate in origin/main origin/master; do
       git -C "$repository" show-ref --verify --quiet "refs/remotes/$candidate" && { base=$candidate; break; }
     done
   fi
-  [[ -n $base ]] || aw_die 'cannot determine the origin default branch'
+  [[ -n $base ]] || aw_die 'cannot determine the origin default branch; pass --base REF'
   printf '%s\n' "$base"
+}
+
+# Read-only integration preflight. Prints one JSON document describing the base
+# the integration branch would start from, the checkout it would leave and
+# return to, and the validated commit selection. Nothing is created or changed.
+# Usage: aw_integration_plan_json TASK_DIR BASE_REF_OR_EMPTY [COMMIT...]
+aw_integration_plan_json() {
+  local task_dir=$1 explicit_base=$2; shift 2
+  local state="$task_dir/state.json" repository blockers='[]' base_ref='' base_sha='' base_source=''
+  local original_branch='' original_sha='' dirty=0 set_slug task_id branch branch_exists=false default_ref=''
+  local commits=() commit full status_json reported role plan_id roles_for entries='[]' reported_by
+  [[ -f $state ]] || aw_die "missing task: $task_dir"
+  repository=$(jq -r '.repository' "$state")
+  git -C "$repository" rev-parse --git-dir >/dev/null 2>&1 || aw_die "integration checkout is not a git repository: $repository"
+  block() { blockers=$(jq -c --arg b "$1" '. + [$b]' <<<"$blockers"); }
+  original_sha=$(git -C "$repository" rev-parse --verify -q HEAD 2>/dev/null || true)
+  original_branch=$(git -C "$repository" branch --show-current 2>/dev/null || true)
+  dirty=$(git -C "$repository" status --porcelain 2>/dev/null | wc -l)
+  ((dirty == 0)) || block "integration checkout is dirty ($dirty path(s)); commit or stash outside this workflow first"
+  [[ -n $original_sha ]] || block 'integration checkout has no commits'
+  default_ref=$(aw_origin_base "$repository" 2>/dev/null || true)
+  if [[ -n $explicit_base ]]; then
+    base_ref=$explicit_base; base_source=explicit
+  elif [[ -n $default_ref ]]; then
+    base_ref=$default_ref; base_source=origin-default
+  fi
+  if [[ -z $base_ref ]]; then
+    block 'cannot determine the origin default branch; pass --base REF'
+  elif base_sha=$(git -C "$repository" rev-parse --verify -q "$base_ref^{commit}" 2>/dev/null); then :
+  else
+    base_sha=''; block "unknown base: $base_ref"
+  fi
+  for commit in "$@"; do
+    if ! full=$(git -C "$repository" rev-parse --verify -q "$commit^{commit}" 2>/dev/null); then
+      block "unknown commit: $commit"; continue
+    fi
+    reported_by='[]'
+    while IFS=$'\t' read -r role status_json; do
+      [[ -f $status_json ]] || continue
+      while IFS= read -r reported; do
+        [[ $(git -C "$repository" rev-parse --verify -q "$reported^{commit}" 2>/dev/null || true) == "$full" ]] \
+          && { reported_by=$(jq -c --arg r "$role" '. + [$r]' <<<"$reported_by"); break; }
+      done < <(jq -r '.commits // [] | .[]' "$status_json")
+    done < <(jq -r '.roles | to_entries[] | [.key, (.value.status_json // .value.status_file // "")] | @tsv' "$state")
+    [[ $reported_by != '[]' ]] || block "commit was not reported by an assigned agent: $commit"
+    commits+=("$full")
+    entries=$(jq -c --arg sha "$full" --argjson by "$reported_by" '. + [{sha:$sha,reported_by:$by}]' <<<"$entries")
+  done
+  ((${#commits[@]} > 0)) || block 'select at least one --commit reported by an assigned agent'
+  set_slug=$(jq -r '.set' "$state"); task_id=$(basename "$task_dir")
+  branch=$(sed -E 's/[^[:alnum:]_.\/-]+/-/g' <<<"integration/$set_slug/$task_id")
+  git -C "$repository" show-ref --verify --quiet "refs/heads/$branch" && { branch_exists=true; block "integration branch already exists: $branch"; }
+  plan_id=$(printf '%s\n' "$task_id" "$repository" "$base_sha" "${commits[@]}" | sha256sum | awk '{print substr($1,1,16)}')
+  jq -n --arg task "$task_id" --arg repository "$repository" --arg original_branch "$original_branch" --arg original_sha "$original_sha" \
+    --argjson dirty "$dirty" --arg base_ref "$base_ref" --arg base_sha "$base_sha" --arg base_source "$base_source" --arg default_ref "$default_ref" \
+    --argjson commits "$entries" --arg branch "$branch" --argjson branch_exists "$branch_exists" --arg plan_id "$plan_id" --argjson blockers "$blockers" '
+    {task_id:$task, repository:$repository,
+     original:{branch:$original_branch, sha:$original_sha, detached:($original_branch == "")},
+     clean:($dirty == 0), base:{ref:$base_ref, sha:$base_sha, source:$base_source}, origin_default:$default_ref,
+     commits:$commits, integration_branch:$branch, plan_id:$plan_id, blockers:$blockers, ready:($blockers | length == 0)}'
 }
 
 aw_atomic_jq() {
@@ -435,7 +502,7 @@ aw_next_actions_json() {
       if jq -e '(.integration.branch // "") != ""' "$state_file" >/dev/null; then
         jq -cn '[{id:"record-integration",label:"Record validation evidence for the integrated branch",mutating:true}]'
       else
-        jq -cn '[{id:"integrate",label:"Integrate an explicitly selected commit plan",mutating:true}]'
+        jq -cn '[{id:"plan-integration",label:"Run integrate --plan: read-only base and commit preflight for the integration checkout",mutating:false},{id:"integrate",label:"Apply the approved plan from its exact base: integrate --base-sha SHA --commit SHA ... --confirmed-by-user",mutating:true}]'
       fi
       ;;
     awaiting_pr) jq -cn '[{id:"prepare-pr",label:"Prepare PR title, body, and readiness checklist",mutating:true}]' ;;
