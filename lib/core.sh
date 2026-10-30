@@ -27,7 +27,8 @@ APPLESCRIPT
     notify-send -a 'Workspaces' "$title" "$message" 2>/dev/null || true
   fi
 }
-aw_valid_state() { [[ $1 =~ ^(deferred|dispatched|in_progress|blocked|completed)$ ]]; }
+aw_valid_state() { [[ $1 =~ ^(deferred|dispatched|in_progress|blocked|completed|waived)$ ]]; }
+aw_closed_task() { [[ $1 =~ ^(cancelled|archived|superseded)$ ]]; }
 aw_valid_profile() { [[ $1 =~ ^(safe|trusted|yolo)$ ]]; }
 
 aw_provider_available() {
@@ -162,8 +163,18 @@ aw_audit() {
     printf 'agent-workspaces: telemetry collection incomplete; inspect telemetry status\n' >&2
 }
 
+aw_roles_allow_gate() {
+  jq -e '
+    all(.roles[]?; .state == "completed" or .state == "waived")
+    and all(.roles[]? | select(.state == "waived");
+         ((.waiver.reason // "") | gsub("^\\s+|\\s+$"; "")) != ""
+         and (.waiver.actor // "") != ""
+         and (.waiver.at // "") != "")
+  ' "$1" >/dev/null
+}
+
 aw_task_refresh() {
-  local task_dir=$1 state_file="$1/state.json" state status_file role role_state any_blocked=false all_completed=true any_deferred=false
+  local task_dir=$1 state_file="$1/state.json" state status_file role role_state waiver any_blocked=false all_completed=true any_deferred=false any_waived=false
   [[ -f $state_file ]] || aw_die "missing task state: $state_file"
   exec {task_lock}>"$task_dir/.state.lock"
   flock "$task_lock"
@@ -173,28 +184,48 @@ aw_task_refresh() {
     jq -r '.status' <<<"$state"
     return 0
   fi
+  local current next stage now
+  current=$(jq -r '.status' <<<"$state")
+  if aw_closed_task "$current"; then
+    flock -u "$task_lock"; exec {task_lock}>&-
+    printf '%s\n' "$current"
+    return 0
+  fi
   while IFS=$'\t' read -r role status_file; do
-    [[ -f $status_file ]] || { role_state=dispatched; all_completed=false; }
+    [[ -f $status_file ]] || { role_state=dispatched; all_completed=false; waiver=null; }
     if [[ -f $status_file ]]; then
       role_state=$(jq -r '.state // "dispatched"' "$status_file" 2>/dev/null)
       aw_valid_state "$role_state" || role_state=dispatched
+      waiver=$(jq -c '.waiver // null' "$status_file" 2>/dev/null || printf 'null')
       if [[ $role_state == deferred ]]; then
         any_deferred=true
       fi
+      [[ $role_state == waived ]] && any_waived=true
       [[ $role_state == blocked ]] && any_blocked=true
-      [[ $role_state == completed || $role_state == deferred ]] || all_completed=false
+      [[ $role_state == completed || $role_state == deferred || $role_state == waived ]] || all_completed=false
     fi
-    state=$(jq --arg role "$role" --arg value "$role_state" '.roles[$role].state=$value' <<<"$state")
+    state=$(jq --arg role "$role" --arg value "$role_state" --argjson waiver "${waiver:-null}" '
+      .roles[$role].state=$value
+      | if $value == "waived" and $waiver != null then .roles[$role].waiver=$waiver else del(.roles[$role].waiver) end
+    ' <<<"$state")
   done < <(jq -r '.roles | to_entries[] | [.key, (.value.status_json // .value.status_file)] | @tsv' <<<"$state")
 
-  local current next stage now
-  current=$(jq -r '.status' <<<"$state")
   next=$current
+  if [[ $any_waived == true ]]; then
+    state=$(jq '.gates.reduced_assurance=true' <<<"$state")
+  fi
   if [[ $current == active && $any_deferred == true && $all_completed == true ]]; then
     next=awaiting_review
   elif [[ $current == active && $any_blocked == true ]]; then
     next=blocked
   elif [[ $current == active && $all_completed == true ]]; then
+    stage=$(jq -r '.stage' <<<"$state")
+    case "$stage" in
+      review) next=awaiting_triage ;;
+      execute|verify) next=awaiting_integration ;;
+      integrate) next=awaiting_pr ;;
+    esac
+  elif [[ $current == awaiting_review && $any_deferred == false && $any_blocked == false && $all_completed == true ]]; then
     stage=$(jq -r '.stage' <<<"$state")
     case "$stage" in
       review) next=awaiting_triage ;;
@@ -456,7 +487,7 @@ aw_workspace_risks() {
   while IFS= read -r state; do
     [[ $(jq -r '.workspace_id' "$state") == "$workspace_id" ]] || continue
     task_status=$(jq -r '.status' "$state")
-    if [[ ! $task_status =~ ^(completed|ready_for_pr|draft_pr)$ ]]; then
+    if [[ ! $task_status =~ ^(completed|ready_for_pr|draft_pr|cancelled|archived|superseded)$ ]]; then
       ((task_count+=1))
       deadline=$(jq -r '.delivery.deadline_at // empty' "$state")
       [[ -n $deadline && $deadline < $now ]] && ((overdue_count+=1))
@@ -486,6 +517,11 @@ aw_next_actions_json() {
   local task_dir=$1 state_file="$1/state.json" status
   [[ -f $state_file ]] || aw_die "missing task: $task_dir"
   status=$(jq -r '.status' "$state_file")
+  # A closed task has no next action, even when a handover request is still recorded.
+  # Nonterminal tasks still stop until the successor acknowledges.
+  case "$status" in
+    completed|cancelled|archived|superseded) jq -cn '[]'; return 0 ;;
+  esac
   if aw_handover_frozen "$task_dir"; then
     jq -cn '[{id:"complete-handover",label:"Finish the pending agent handover before continuing",mutating:false}]'
     return 0
@@ -495,10 +531,16 @@ aw_next_actions_json() {
     active) jq -cn '[{id:"wait",label:"Agents are still working",mutating:false}]' ;;
     awaiting_configuration) jq -cn '[{id:"configuration-pending",label:"Waiting for task configuration acknowledgement; monitor resumes automatically",mutating:false}]' ;;
     dispatching) jq -cn '[{id:"inspect-dispatch",label:"Inspect interrupted prompt delivery before retrying",mutating:false}]' ;;
-    awaiting_review) jq -cn '[{id:"activate-reviewers",label:"Release the immutable lead artifact to reviewers",mutating:true}]' ;;
+    awaiting_review) jq -cn '[{id:"activate-reviewers",label:"Release the immutable lead artifact to reviewers",mutating:true},{id:"waive-role",label:"Record a user-approved waiver for one deferred role; this is reduced assurance, not review evidence",mutating:true}]' ;;
     blocked) jq -cn '[{id:"resolve-blocker",label:"Review blockers and dispatch a focused follow-up",mutating:false}]' ;;
     awaiting_triage) jq -cn '[{id:"dispatch-execution",label:"Approve scope and dispatch an execution cycle",mutating:true},{id:"complete-review",label:"Close the review without implementation",mutating:true}]' ;;
-    awaiting_integration) jq -cn '[{id:"approve-integration",label:"Validate collisions and approve an integration handoff",mutating:true},{id:"dispatch-verification",label:"Request another independent verification cycle",mutating:true}]' ;;
+    awaiting_integration)
+      if jq -e 'any(.roles[]?; .state=="waived") or .gates.reduced_assurance==true' "$state_file" >/dev/null; then
+        jq -cn '[{id:"approve-integration",label:"Approve integration with recorded reduced assurance; waived roles are not review evidence",mutating:true},{id:"dispatch-verification",label:"Request another independent verification cycle",mutating:true}]'
+      else
+        jq -cn '[{id:"approve-integration",label:"Validate collisions and approve an integration handoff",mutating:true},{id:"dispatch-verification",label:"Request another independent verification cycle",mutating:true}]'
+      fi
+      ;;
     integration_ready)
       if jq -e '(.integration.branch // "") != ""' "$state_file" >/dev/null; then
         jq -cn '[{id:"record-integration",label:"Record validation evidence for the integrated branch",mutating:true}]'
@@ -510,7 +552,6 @@ aw_next_actions_json() {
     awaiting_pr_review) jq -cn '[{id:"approve-pr",label:"Approve the validated integration branch for publication",mutating:true}]' ;;
     ready_for_pr) jq -cn '[{id:"publish",label:"Push and open a draft pull request",mutating:true,external:true}]' ;;
     draft_pr) jq -cn '[{id:"review-pr",label:"Review the draft pull request and CI",mutating:false}]' ;;
-    completed) jq -cn '[]' ;;
     *) jq -cn --arg status "$status" '[{id:"inspect",label:("Inspect unsupported workflow state: " + $status),mutating:false}]' ;;
   esac
 }

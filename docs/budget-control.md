@@ -167,7 +167,12 @@ and automatic routing uses the economical pressure profile when quota is
 exhausted or unknown. The provider's credit balance is not visible to this
 controller, so this is an authorization to use the provider's credit facility,
 not a dollar cap or balance check. This exception does not cover experiments or
-temporary boosts. Remove the provider to restore quota-based admission.
+temporary boosts. Once any native credit field or owned credit sidecar exists
+(including stale, malformed, empty, or conflicting alias evidence), normalized
+authoritative accounting takes precedence over this fallback. Fresh account denial
+always blocks; observed paid allowance must meet freshness, permission and configured
+minimum checks. The explicit fallback remains only for accounts without credit
+telemetry. Remove the provider to restore quota-based admission.
 
 New workflow tasks are persisted as `awaiting_configuration`. The dispatcher
 reconciles routing using that task's difficulty and sends work only after the
@@ -192,3 +197,45 @@ For lead-first execution and integration, only the selected lead must be running
 unavailable reviewers remain recorded as deferred assignments for later activation.
 A pending lead handover on another slot does not prevent this dispatch. Review and
 verification batches still require their participating agents to be ready.
+
+## Paid credits and extra usage
+
+Subscription windows and paid allowance are separate, provider-specific evidence.
+A pool whose subscription is exhausted still shows as exhausted, but ordinary
+managed work continues while the provider confirms a usable paid allowance:
+
+- the observation is `{source, unit, observedAt, hasCredits, unlimited, balance,
+  ordinaryUsageAllowed, spendControlReached}`, written by an owned collector to
+  `omarchy/agents/agent-workspaces-credits/PROVIDER.json` (or a native record's
+  optional `credits` object) and kept only while fresh (`telemetry_ttl_seconds`);
+- usable means: fresh, a unit and source, `ordinaryUsageAllowed` true,
+  `spendControlReached` false, and either `unlimited` true or a finite decimal
+  balance above `budget.credit_minimum.PROVIDER` (default 0). Missing, malformed,
+  non-finite, stale, zero or negative data is never available allowance;
+  `ordinaryUsageAllowed: false` denies the whole account (every purpose, admission,
+  routing guard and handover, even with healthy subscription headroom or an unknown
+  exception) and a spend control denies paid usage;
+- the 5% (configured) subscription reserve never applies to a balance, a balance
+  is never turned into a percentage, and balances are never summed across
+  providers or units. Account aliases share one balance: the lowest balance is
+  checked against the strictest configured minimum, and the most restrictive alias
+  (unknown, denied, incompatible unit) wins regardless of source or order;
+- credits never fund RSI experiments or temporary boosts, never repair unknown
+  subscription evidence, and a separate API balance never funds a subscription login;
+- the usage updater refreshes Codex credit and permission evidence from the
+  existing read-only `account/rateLimits/read` call on every run, even when the
+  native subscription record is fresh. The same observation's subscription limits are
+  kept in the owned overlay; the newer of overlay and native record wins (a tie keeps
+  the more constrained), so a fresh native cache cannot hide a newer exhaustion or
+  restriction. Balance changes alone do not wake the
+  orchestrator; a changed eligibility does (reviewer eligibility and next actions).
+  The snapshot's account line says "subscription exhausted, paid allowance available
+  for ordinary work" (never a balance) when admission would allow it.
+
+Provider coverage: **Codex** is collected (credits, `ordinaryUsageAllowed`,
+`spendControlReached`; unit `credits`). **Claude** extra usage and **Grok**
+on-demand/prepaid allowance are accepted by the same contract, but no read-only
+source with a documented unit and permission signal exists today (Grok's local log
+carries unit-less `prepaidBalance`/`onDemandCap` numbers; Claude's collector
+exposes none), so they stay unknown and fall back to subscription-only admission
+until an owned collector supplies a confirmed observation.

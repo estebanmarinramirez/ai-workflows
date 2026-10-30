@@ -1,0 +1,113 @@
+#!/bin/bash
+# Superseded tasks are terminal, and reduced assurance is an audited waiver.
+# No live tmux server, provider, or desktop session is used.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" XDG_STATE_HOME="$fixture/state"
+export NOTIFY_LOG="$fixture/notify.log" TMUX_LOG="$fixture/tmux.log"
+export PATH="$fixture/bin:$PATH"
+unset AW_WORKSPACE_ID AW_HANDOVER_ID AW_HANDOVER_TARGET || true
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/agent-workspaces" "$fixture/bin" "$XDG_STATE_HOME"
+cp "$root/config/config.json" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$*" >>"$TMUX_LOG"' 'exit 0' >"$fixture/bin/tmux"
+printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$*" >>"$NOTIFY_LOG"' 'exit 0' >"$fixture/bin/notify-send"
+chmod 755 "$fixture/bin/tmux" "$fixture/bin/notify-send"
+source "$root/lib/core.sh"
+
+workspace="$XDG_DATA_HOME/agent-workspaces/repo-hash/set"
+repo="$fixture/repo"
+task="$workspace/.coordination/live"
+old="$workspace/.coordination/old"
+mkdir -p "$task" "$old" "$workspace/.orchestrator"
+git init -q -b main "$repo"
+git -C "$repo" config user.name fixture
+git -C "$repo" config user.email fixture@example.invalid
+printf 'base\n' >"$repo/file.txt"
+git -C "$repo" add file.txt
+git -C "$repo" commit -qm base
+commit=$(git -C "$repo" rev-parse HEAD)
+jq -n --arg repo "$repo" '{schema_version:2,workspace_id:"fixture:deadlock",repository:$repo,set:"set",profile:"trusted",providers:["claude","codex","grok"]}' >"$workspace/workspace.json"
+
+cli() { AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" "$@"; }
+
+jq -n --arg repo "$repo" --arg task "$task" \
+  '{schema_version:2,id:"live",workspace_id:"fixture:deadlock",repository:$repo,stage:"execute",status:"active",objective:"live work",
+    updated_at:"2026-10-19T09:00:00+02:00",lead:"claude",roles:{claude:{state:"in_progress",worktree:$repo,status_json:($task+"/claude.status.json")}},
+    gates:{},transitions:[]}' >"$task/state.json"
+jq -n --arg old "$old" --arg repo "$repo" \
+  '{schema_version:2,id:"old",workspace_id:"fixture:deadlock",repository:$repo,stage:"execute",status:"superseded",objective:"replaced work",
+    updated_at:"2026-10-19T08:00:00+02:00",lead:"claude",roles:{claude:{state:"in_progress",worktree:$repo,status_json:($old+"/claude.status.json")}},
+    gates:{},transitions:[]}' >"$old/state.json"
+jq -n '{schema_version:1,task_id:"old",role:"claude",state:"in_progress",summary:"",updated_at:"2026-10-19T08:00:00+02:00",evidence:[],commits:[],changed_files:[],blockers:[]}' >"$old/claude.status.json"
+
+[[ $(cli next "$old" | jq -r '.actions|length') == 0 ]] || { printf 'not ok - superseded task is still actionable\n'; exit 1; }
+[[ $(jq -r '.status + " " + .updated_at' "$old/state.json") == 'superseded 2026-10-19T08:00:00+02:00' ]] || { printf 'not ok - superseded metadata was rewritten\n'; exit 1; }
+old_stamp=$(jq -c . "$old/state.json")
+for phase in ready launching awaiting_ack; do
+  jq -n --arg task "$(realpath "$old")" --arg phase "$phase" '{requests:{change:{task:$task,phase:$phase}}}' >"$workspace/.coordination/agents.json"
+  [[ $(cli next "$old" | jq -r '.actions|length') == 0 ]] || { printf 'not ok - superseded task with %s handover is actionable\n' "$phase"; exit 1; }
+  [[ $(jq -c . "$old/state.json") == "$old_stamp" ]] || { printf 'not ok - superseded metadata changed during %s handover\n' "$phase"; exit 1; }
+done
+jq -n --arg task "$(realpath "$task")" '{requests:{change:{task:$task,phase:"ready"}}}' >"$workspace/.coordination/agents.json"
+[[ $(cli next "$task" | jq -r '.actions[0].id') == complete-handover ]] || { printf 'not ok - active handover no longer waits for acknowledgement\n'; exit 1; }
+rm -f "$workspace/.coordination/agents.json"
+[[ $(aw_workspace_risks fixture:deadlock | awk '/^Active tasks:/{print $3}') == 1 ]] || { printf 'not ok - superseded task counted as active\n%s\n' "$(aw_workspace_risks fixture:deadlock)"; exit 1; }
+: >"$NOTIFY_LOG"
+cli attention fixture:deadlock >/dev/null
+[[ ! -s $NOTIFY_LOG ]] || { printf 'not ok - superseded task requested a human decision\n'; exit 1; }
+! rg -q 'unsupported workflow state: superseded' "$workspace/.orchestrator/attention.md"
+
+review="$workspace/.coordination/review"
+mkdir -p "$review"
+jq -n --arg commit "$commit" '{schema_version:1,task_id:"review",role:"claude",state:"completed",summary:"lead",updated_at:"2026-10-19T09:00:00+02:00",evidence:[{command:"true",exit_code:0}],commits:[$commit],changed_files:["file.txt"],blockers:[]}' >"$review/claude.status.json"
+for role in codex grok; do
+  jq -n --arg role "$role" '{schema_version:1,task_id:"review",role:$role,state:"deferred",summary:"",updated_at:"2026-10-19T09:00:00+02:00",evidence:[],commits:[],changed_files:[],blockers:[]}' >"$review/$role.status.json"
+done
+jq -n --arg repo "$repo" --arg review "$review" \
+  '{schema_version:2,id:"review",workspace_id:"fixture:deadlock",repository:$repo,stage:"execute",status:"awaiting_review",objective:"needs review",
+    updated_at:"2026-10-19T09:00:00+02:00",lead:"claude",
+    roles:{
+      claude:{state:"completed",provider:"claude",worktree:$repo,status_json:($review+"/claude.status.json")},
+      codex:{state:"deferred",provider:"codex",worktree:$repo,status_json:($review+"/codex.status.json")},
+      grok:{state:"deferred",provider:"grok",worktree:$repo,status_json:($review+"/grok.status.json")}
+    },
+    gates:{},transitions:[],review_activation:{deferred:{codex:"account quota is exhausted",grok:"account quota is exhausted"}}}' >"$review/state.json"
+[[ $(cli refresh "$review") == awaiting_review ]] || { printf 'not ok - quota exhaustion left the review gate\n'; exit 1; }
+[[ $(jq -r '.roles.codex.state' "$review/state.json") == deferred && $(jq -r '.roles.codex.waiver // "none"' "$review/state.json") == none ]] || { printf 'not ok - quota exhaustion fabricated a waiver\n'; exit 1; }
+[[ $(jq -r '.gates.reduced_assurance // false' "$review/state.json") == false ]] || { printf 'not ok - quota exhaustion reduced assurance automatically\n'; exit 1; }
+if cli status --task "$review" --role codex --state waived --summary 'skip' >/dev/null 2>"$fixture/status.err"; then
+  printf 'not ok - status command accepted a waiver\n'; exit 1
+fi
+rg -q 'waive-role' "$fixture/status.err"
+if cli waive-role "$review" --role codex --reason 'Codex has no fresh quota until Tuesday' >/dev/null 2>"$fixture/waive.err"; then
+  printf 'not ok - waiver without user confirmation\n'; exit 1
+fi
+rg -q 'confirmed-by-user' "$fixture/waive.err"
+if cli waive-role "$review" --role codex --confirmed-by-user --reason 'quota' >/dev/null 2>"$fixture/reason.err"; then
+  printf 'not ok - waiver accepted a vague reason\n'; exit 1
+fi
+cli waive-role "$review" --role codex --confirmed-by-user --reason 'Codex has no fresh quota until Tuesday' >/dev/null
+[[ $(jq -r '.roles.codex.state' "$review/state.json") == waived ]] || { printf 'not ok - waiver was stored as another state\n'; exit 1; }
+[[ $(jq -r '.roles.codex.state' "$review/state.json") != completed ]] || { printf 'not ok - waiver was stored as completed review\n'; exit 1; }
+[[ $(jq -r '.evidence|length' "$review/codex.status.json") == 0 && $(jq -r '.commits|length' "$review/codex.status.json") == 0 ]] || { printf 'not ok - waiver fabricated review evidence\n'; exit 1; }
+[[ $(jq -r '.waiver.actor' "$review/codex.status.json") == user:confirmed-via-orchestrator ]] || { printf 'not ok - waiver actor missing\n'; exit 1; }
+[[ -n $(jq -r '.waiver.at' "$review/codex.status.json") && $(jq -r '.waiver.reason' "$review/codex.status.json") == 'Codex has no fresh quota until Tuesday' ]] || { printf 'not ok - waiver time or reason missing\n'; exit 1; }
+audit=$(jq -s 'map(select(.event=="role.waived" and .details.role=="codex")) | last' "$workspace/.coordination/audit.jsonl")
+[[ $(jq -r '.actor' <<<"$audit") == user:confirmed-via-orchestrator ]] || { printf 'not ok - waiver audit actor\n%s\n' "$audit"; exit 1; }
+[[ $(jq -r '.details.reason' <<<"$audit") == 'Codex has no fresh quota until Tuesday' && -n $(jq -r '.at' <<<"$audit") ]] || { printf 'not ok - waiver audit reason\n%s\n' "$audit"; exit 1; }
+[[ $(jq -r '.status' "$review/state.json") == awaiting_review ]] || { printf 'not ok - one waiver dropped the remaining reviewer\n'; exit 1; }
+[[ $(jq -r '.roles.grok.state' "$review/state.json") == deferred ]] || { printf 'not ok - unwaved reviewer changed\n'; exit 1; }
+[[ $(cli next "$review" | jq -r '([.actions[].id] | index("activate-reviewers")) != null and ([.actions[].id] | index("waive-role")) != null') == true ]] || { printf 'not ok - review gate hid the waiver or the wait\n'; exit 1; }
+cli waive-role "$review" --role grok --confirmed-by-user --reason 'Grok review is intentionally skipped for this task' >/dev/null
+[[ $(jq -r '.status' "$review/state.json") == awaiting_integration ]] || { printf 'not ok - explicit waivers did not open integration\n%s\n' "$(jq -c '{status,roles:.roles|map_values(.state)}' "$review/state.json")"; exit 1; }
+[[ $(jq -r '.gates.reduced_assurance' "$review/state.json") == true ]] || { printf 'not ok - reduced assurance was not recorded\n'; exit 1; }
+[[ $(jq -r '[.roles.codex.state,.roles.grok.state,.roles.claude.state] | join(" ")' "$review/state.json") == 'waived waived completed' ]] || { printf 'not ok - role outcomes were rewritten\n'; exit 1; }
+[[ $(cli next "$review" | jq -r '.actions[0].label' | rg -c 'reduced assurance') == 1 ]] || { printf 'not ok - integration gate hid reduced assurance\n'; exit 1; }
+cli advance "$review" approve-integration --confirmed-by-user >/dev/null
+[[ $(jq -r '.status' "$review/state.json") == integration_ready ]] || { printf 'not ok - reduced-assurance integration was rejected\n'; exit 1; }
+[[ $(jq -r '[.roles.codex.state,.roles.grok.state] | join(" ")' "$review/state.json") == 'waived waived' ]] || { printf 'not ok - integration marked waived roles completed\n'; exit 1; }
+approved=$(jq -s 'map(select(.event=="integration.approved")) | last' "$workspace/.coordination/audit.jsonl")
+[[ $(jq -r '.details.assurance' <<<"$approved") == reduced ]] || { printf 'not ok - integration audit hid reduced assurance\n%s\n' "$approved"; exit 1; }
+printf 'ok - superseded tasks stay terminal and waivers stay audited\n'

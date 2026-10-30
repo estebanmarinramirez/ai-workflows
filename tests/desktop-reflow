@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Reflow managed windows against a stateful compositor double (no live desktop)."""
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+REFLOW = Path(os.environ.get('AW_REFLOW_UNDER_TEST', ROOT / 'compat/bin/omarchy-agent-grid-reflow'))
+EDP = {'name': 'eDP-2', 'id': 0, 'x': 0, 'y': 0, 'width': 2560, 'height': 1600, 'scale': 1.6,
+       'transform': 0, 'focused': True, 'reserved': [0, 0, 0, 26]}
+HDMI = {'name': 'HDMI-A-1', 'id': 1, 'x': -1536, 'y': 136, 'width': 1920, 'height': 1080, 'scale': 1.25,
+        'transform': 0, 'focused': False, 'reserved': [0, 0, 0, 0]}
+
+
+def client(address, workspace, at, size, floating=True):
+    return {'address': address, 'class': 'c' + address, 'initialClass': 'c' + address,
+            'workspace': {'id': workspace, 'name': str(workspace)}, 'at': at, 'size': size,
+            'floating': floating, 'monitor': 0}
+
+
+def run(base, workspace, addresses, **options):
+    binaries = base / 'bin'
+    binaries.mkdir(exist_ok=True)
+    double = binaries / 'hyprctl'
+    shutil.copy(ROOT / 'tests/hyprctl-double', double)
+    (base / 'options.json').write_text(json.dumps(options))
+    (base / 'calls').write_text('')
+    env = dict(os.environ, PATH=f'{binaries}:{os.environ["PATH"]}', FIXTURE=str(base),
+               AW_REFLOW_DELAY='0', AW_REFLOW_ATTEMPTS=str(options.get('attempts', 40)))
+    result = subprocess.run([str(REFLOW), str(workspace), *addresses], env=env, capture_output=True, text=True)
+    calls = [json.loads(line) for line in (base / 'calls').read_text().splitlines()]
+    return result, [c[1] for c in calls if c[0] == 'dispatch']
+
+
+def inside(window, monitor):
+    left = monitor['x'] + monitor['reserved'][0]
+    top = monitor['y'] + monitor['reserved'][1]
+    right = monitor['x'] + round(monitor['width'] / monitor['scale']) - monitor['reserved'][2]
+    bottom = monitor['y'] + round(monitor['height'] / monitor['scale']) - monitor['reserved'][3]
+    x, y = window['at']
+    width, height = window['size']
+    return left <= x and top <= y and x + width <= right and y + height <= bottom
+
+
+def overlap(a, b):
+    return not (a['at'][0] + a['size'][0] <= b['at'][0] or b['at'][0] + b['size'][0] <= a['at'][0]
+                or a['at'][1] + a['size'][1] <= b['at'][1] or b['at'][1] + b['size'][1] <= a['at'][1])
+
+
+roles = ['0x1', '0x2', '0x3', '0x4']  # orchestrator first in the registry, last in the grid
+for delay, retile, late in [(0, False, False), (0, True, False), (3, False, False), (3, True, False), (0, False, True), (3, True, True)]:
+    if True:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / 'monitor.json').write_text(json.dumps([EDP, HDMI]))
+            (base / 'workspaces.json').write_text(json.dumps({'6': 'eDP-2', '7': 'HDMI-A-1'}))
+            unrelated = client('0x99', 7, [-1400, 200], [300, 200])
+            clients = [
+                client('0x1', 7, [-3133, 540], [700, 480]),    # off-screen worker (observed)
+                client('0x2', 7, [-2367, 540], [700, 480]),    # off-screen worker (observed)
+                client('0x3', 7, [-3133, 140], [700, 480]),
+                client('0x4', 6, [20, 20], [1200, 900], floating=False),  # orchestrator split away
+                unrelated,
+            ]
+            (base / 'clients.json').write_text(json.dumps(clients))
+            before = json.loads((base / 'clients.json').read_text())
+            result, dispatches = run(base, 7, roles, delay=delay, retile=retile, retile_after_place=late)
+            label = f'delay={delay} retile={retile} late={late}'
+            assert result.returncode == 0, (label, result.stderr, dispatches)
+            after = {c['address']: c for c in json.loads((base / 'clients.json').read_text())}
+            managed = [after[a] for a in roles]
+            assert all(w['workspace']['id'] == 7 for w in managed), (label, managed)
+            assert all(w['floating'] for w in managed), (label, managed)
+            assert all(inside(w, HDMI) for w in managed), (label, [w['at'] + w['size'] for w in managed])
+            assert not any(overlap(a, b) for i, a in enumerate(managed) for b in managed[i + 1:]), label
+            assert after['0x99'] == unrelated, (label, after['0x99'])
+            assert not any('0x99' in d for d in dispatches), (label, dispatches)
+            # A second reflow of an arranged set changes nothing and spawns nothing.
+            snapshot = (base / 'clients.json').read_text()
+            result, dispatches = run(base, 7, roles, delay=delay, retile=retile, retile_after_place=late)
+            assert result.returncode == 0 and dispatches == [], (label, dispatches, result.stderr)
+            assert (base / 'clients.json').read_text() == snapshot, label
+
+def selectors(dispatches):
+    return {m for d in dispatches for m in re.findall(r"address:([^']*)'", d)}
+
+
+def incident(base, jitter=0):
+    """Three windows already in their HDMI cells, 0x4 still off-screen (the observed state)."""
+    (base / 'monitor.json').write_text(json.dumps([EDP, HDMI]))
+    (base / 'workspaces.json').write_text(json.dumps({'6': 'eDP-2', '7': 'HDMI-A-1'}))
+    (base / 'clients.json').write_text(json.dumps([client('0x1', 7, [-1533, 139], [764, 428]), client('0x2', 7, [-767, 139], [764, 428]),
+                                                   client('0x3', 7, [-1533, 571], [764, 428]), client('0x4', 7, [-3133, 140], [764, 428]),
+                                                   client('0x99', 7, [-1400, 200], [300, 200])]))
+
+
+# A failed, empty or partial clients snapshot is never a verified layout. Read 0 is
+# the arrival read; reads 1.. are placement, then (when exact sizes never converge)
+# the final validation. A transient fault is retried; a persistent one fails closed.
+for mode in ('fail', 'empty', 'omit'):
+    for stage, extra, first in (('placement', {}, 1), ('final', {'size_jitter': -10}, 41)):
+        for persistent in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                incident(base)
+                fault = {'fault_mode': mode, 'fault_from': first, 'fault_omit': '0x4',
+                         'fault_until': (1 << 30) if persistent else first + 1}
+                result, dispatches = run(base, 7, roles, **fault, **extra)
+                label = f'{mode} {stage} persistent={persistent}'
+                after = {c['address']: c for c in json.loads((base / 'clients.json').read_text())}
+                assert selectors(dispatches) <= set(roles), (label, dispatches)
+                if persistent:
+                    assert result.returncode == 1, (label, result.returncode, result.stderr)
+                    assert result.stderr.strip(), label
+                else:
+                    assert result.returncode == 0, (label, result.stderr)
+                    assert inside(after['0x4'], HDMI) and after['0x4']['workspace']['id'] == 7, (label, after['0x4'])
+
+# Arrival: a missing, partial or unreadable snapshot never gathers or places anything.
+for mode in ('fail', 'empty', 'omit'):
+    with tempfile.TemporaryDirectory() as directory:
+        base = Path(directory)
+        incident(base)
+        result, dispatches = run(base, 7, roles, fault_mode=mode, fault_from=0, fault_omit='0x4', attempts=5)
+        assert result.returncode == 1 and 'left unchanged' in result.stderr, (mode, result.stderr)
+        assert not any('relative = false' in d for d in dispatches), (mode, dispatches)
+
+# A requested window with no client row must not produce an empty or unrequested selector.
+with tempfile.TemporaryDirectory() as directory:
+    base = Path(directory)
+    incident(base)
+    (base / 'clients.json').write_text(json.dumps([client('0x99', 7, [-1400, 200], [300, 200])]))
+    result, dispatches = run(base, 7, ['0x1'], attempts=5)
+    assert result.returncode == 1 and dispatches == [], (result.stderr, dispatches)
+    for bad in ('', 'address:0x1', '0x1 0x2', 'x'):
+        result, dispatches = run(base, 7, [bad])
+        assert result.returncode == 2 and dispatches == [], (bad, result.returncode, dispatches)
+    result, dispatches = run(base, 7, ['0x1', '0x1'])
+    assert result.returncode == 2 and dispatches == [], dispatches
+
+
+# A window that never arrives must not be placed with stale coordinates.
+with tempfile.TemporaryDirectory() as directory:
+    base = Path(directory)
+    (base / 'monitor.json').write_text(json.dumps([EDP, HDMI]))
+    (base / 'workspaces.json').write_text(json.dumps({'6': 'eDP-2', '7': 'HDMI-A-1'}))
+    (base / 'clients.json').write_text(json.dumps([client('0x1', 7, [-1500, 200], [600, 400]),
+                                                   client('0x2', 6, [20, 20], [600, 400])]))
+    result, dispatches = run(base, 7, ['0x1', '0x2'], delay=1000, attempts=6)
+    assert result.returncode == 1 and 'left unchanged' in result.stderr, (result.stderr, dispatches)
+    assert not any('relative = false' in d for d in dispatches), dispatches
+
+# Fractional scale, rotated output and reserved edges all stay inside the work area.
+for scale, width, height, transform, reserved in [(1.5, 2560, 1600, 0, [0, 30, 0, 26]), (1.25, 1920, 1080, 1, [10, 0, 0, 0]),
+                                                    (1.6, 2560, 1600, 0, [0, 0, 0, 26])]:
+    with tempfile.TemporaryDirectory() as directory:
+        base = Path(directory)
+        monitor = dict(HDMI, scale=scale, width=width, height=height, transform=transform, reserved=reserved, x=-2000, y=-50)
+        probe = dict(monitor, width=height, height=width) if transform % 2 else monitor
+        (base / 'monitor.json').write_text(json.dumps([EDP, monitor]))
+        (base / 'workspaces.json').write_text(json.dumps({'7': 'HDMI-A-1'}))
+        (base / 'clients.json').write_text(json.dumps([client(f'0x{i}', 3, [3000 + i, 900], [500, 400]) for i in range(1, 4)]))
+        result, dispatches = run(base, 7, ['0x1', '0x2', '0x3'], delay=2)
+        assert result.returncode == 0, (scale, result.stderr)
+        after = json.loads((base / 'clients.json').read_text())
+        assert all(w['workspace']['id'] == 7 and inside(w, probe) for w in after), (scale, after)
+print('ok - windows reunite on the workspace monitor, survive async moves, stay idempotent')

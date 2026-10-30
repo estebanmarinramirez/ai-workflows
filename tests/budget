@@ -121,7 +121,16 @@ class Budget(unittest.TestCase):
 
     def test_usage_timer_refreshes_native_limits_only_when_enabled(self):
         binaries=self.base/'bin';binaries.mkdir()
-        codex=binaries/'codex';codex.write_text('#!/bin/sh\nexit 1\n');codex.chmod(0o755)
+        codex=binaries/'codex';codex.chmod(0o755) if codex.write_text('''#!/usr/bin/env python3
+import json,sys,time
+for line in sys.stdin:
+    message=json.loads(line)
+    if message.get('method')=='account/rateLimits/read':
+        print(json.dumps({'id':message['id'],'result':{'ordinaryUsageAllowed':True,'rateLimits':{'primary':{'usedPercent':20,'resetsAt':int(time.time())+3600},
+              'spendControlReached':False,'credits':{'hasCredits':True,'unlimited':False,'balance':'5.5'}}}}),flush=True)
+        break
+    if 'id' in message:print(json.dumps({'id':message['id'],'result':{}}),flush=True)
+''') else None
         native=binaries/'omarchy';native.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$AW_TEST_NATIVE_LOG"\n');native.chmod(0o755)
         collector=binaries/'fixture';collector.write_text('#!/usr/bin/env python3\nprint('+repr(json.dumps({'schemaVersion':1,'id':'fixture','name':'Fixture','ready':True,'limits':[],'updatedAt':'2026-10-11T00:00:00Z'}))+')\n');collector.chmod(0o755)
         logfile=self.base/'native.log'
@@ -130,6 +139,9 @@ class Budget(unittest.TestCase):
         result=subprocess.run([str(ROOT/'compat/bin/agent-workspaces-usage-update')],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(logfile.read_text().strip(),'agent usage-update --limits-only codex claude')
+        # Credit and permission evidence is refreshed even though native subscription limits are fresh.
+        credits=json.loads((self.base/'state/omarchy/agents/agent-workspaces-credits/codex.json').read_text())
+        self.assertEqual((credits['balance'],credits['unit'],credits['spendControlReached']),('5.5','credits',False))
         logfile.unlink();self.config['budget']['enabled']=False;self.save()
         result=subprocess.run([str(ROOT/'compat/bin/agent-workspaces-usage-update')],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(logfile.exists())
@@ -194,8 +206,9 @@ class Budget(unittest.TestCase):
         with patch.object(codex_quota,'query',side_effect=TimeoutError('fixture')):
             with self.assertRaises(TimeoutError):codex_quota.refresh()
         self.assertEqual(path.read_bytes(),before)
-        with patch.object(codex_quota,'query',return_value=[{'percent':.37}]) as query:
-            codex_quota.refresh();codex_quota.refresh();query.assert_called_once()
+        credits={'provider':'codex','source':'fixture','unit':'credits','observedAt':datetime.now(timezone.utc).isoformat()}
+        with patch.object(codex_quota,'query',return_value=([{'percent':.37}],credits)) as query:
+            codex_quota.refresh();codex_quota.refresh();self.assertEqual(query.call_count,2)
         self.assertEqual(json.loads(path.read_text())['limits'],[{'percent':.37}])
 
     def test_managed_exception_is_scoped_and_never_authorizes_experiments_or_boosts(self):

@@ -1,0 +1,80 @@
+#!/bin/bash
+# Integration collision: identical commits are not conflicts; divergent content and incompatible history still block.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+repo=$fixture/repo
+git init -q -b main "$repo"
+git -C "$repo" config user.name fixture
+git -C "$repo" config user.email fixture@example.invalid
+
+check() {
+  local name=$1 expect=$2 task=$3
+  local output code
+  set +e
+  output=$(AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" collision "$task" 2>"$fixture/err")
+  code=$?
+  set -e
+  [[ $code == "$expect" ]] || { printf 'not ok - %s exit %s\n%s\n' "$name" "$code" "$output" >&2; exit 1; }
+  printf '%s\n' "$output"
+}
+
+write_task() {
+  local task=$1 left_commit=$2 right_commit=$3 left_files=$4 right_files=$5
+  mkdir -p "$task"
+  jq -n --arg commit "$left_commit" --argjson files "$left_files" \
+    '{schema_version:1,task_id:"t",role:"claude",state:"completed",commits:[$commit],changed_files:$files,evidence:[],blockers:[]}' >"$task/claude.status.json"
+  jq -n --arg commit "$right_commit" --argjson files "$right_files" \
+    '{schema_version:1,task_id:"t",role:"codex",state:"completed",commits:[$commit],changed_files:$files,evidence:[],blockers:[]}' >"$task/codex.status.json"
+  jq -n --arg repo "$repo" --arg task "$task" \
+    '{schema_version:2,id:"t",repository:$repo,status:"awaiting_integration",roles:{
+      claude:{state:"completed",worktree:$repo,status_json:($task+"/claude.status.json")},
+      codex:{state:"completed",worktree:$repo,status_json:($task+"/codex.status.json")}
+    }}' >"$task/state.json"
+}
+
+printf 'base\n' >"$repo/file.txt"
+git -C "$repo" add file.txt
+git -C "$repo" commit -qm base
+printf 'same\n' >"$repo/file.txt"
+git -C "$repo" commit -qam same
+same=$(git -C "$repo" rev-parse HEAD)
+identical=$fixture/identical
+write_task "$identical" "$same" "$same" '["file.txt"]' '["file.txt"]'
+result=$(check 'identical commits' 0 "$identical")
+[[ $(jq -r '.safe' <<<"$result") == true ]] || { printf 'not ok - identical commits were rejected\n%s\n' "$result" >&2; exit 1; }
+[[ $(jq -r '.overlaps|length' <<<"$result") -ge 1 ]] || { printf 'not ok - identical commits lost the overlap record\n' >&2; exit 1; }
+[[ $(jq -r '.merges[0].clean' <<<"$result") == true ]] || { printf 'not ok - identical commits were not merge-clean\n' >&2; exit 1; }
+
+printf 'alpha\nmiddle\nomega\n' >"$repo/file.txt"
+git -C "$repo" commit -qam diverged-base
+git -C "$repo" checkout -q -b left
+printf 'LEFT\nmiddle\nomega\n' >"$repo/file.txt"
+git -C "$repo" commit -qam left
+left=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout -q -b right HEAD~1
+printf 'alpha\nmiddle\nRIGHT\n' >"$repo/file.txt"
+git -C "$repo" commit -qam right
+right=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" merge-tree --write-tree --quiet "$left" "$right" >/dev/null
+divergent=$fixture/divergent
+write_task "$divergent" "$left" "$right" '["file.txt"]' '["file.txt"]'
+result=$(check 'divergent overlap' 2 "$divergent")
+[[ $(jq -r '.safe' <<<"$result") == false ]] || { printf 'not ok - divergent overlap was accepted\n%s\n' "$result" >&2; exit 1; }
+[[ $(jq -r '.merges[0].clean' <<<"$result") == true ]] || { printf 'not ok - divergent fixture was not an auto-merge\n%s\n' "$result" >&2; exit 1; }
+
+git -C "$repo" checkout -q --orphan other
+git -C "$repo" rm -qrf .
+printf 'other\n' >"$repo/other.txt"
+git -C "$repo" add other.txt
+git -C "$repo" commit -qm other
+other=$(git -C "$repo" rev-parse HEAD)
+unrelated=$fixture/unrelated
+write_task "$unrelated" "$same" "$other" '["file.txt"]' '["other.txt"]'
+result=$(check 'unrelated history' 2 "$unrelated")
+[[ $(jq -r '.safe' <<<"$result") == false ]] || { printf 'not ok - incompatible history was accepted\n%s\n' "$result" >&2; exit 1; }
+[[ $(jq -r '.overlaps|length' <<<"$result") == 0 ]] || { printf 'not ok - unrelated fixture unexpectedly overlapped\n%s\n' "$result" >&2; exit 1; }
+[[ $(jq -r '.merges[0].clean' <<<"$result") == false ]] || { printf 'not ok - unrelated histories merged cleanly\n%s\n' "$result" >&2; exit 1; }
+
+printf 'ok - identical commits pass and divergent or incompatible history stays blocked\n'

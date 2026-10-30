@@ -139,5 +139,9 @@ lead artifact is committed, capacity is verified, and the reviewer CLI is idle.
 The default `activate-reviewers TASK_DIR` also starts only eligible reviewers.
 Read `review_activation.deferred` or the snapshot's Waiting lines for reasons.
 Do not ask the user to disable a provider or the budget gate merely because one
-reviewer is unavailable, and do not start retry loops. Remaining deferred roles
-are still required; do not silently waive verification or broaden task scope.
+reviewer is unavailable, and do not start retry loops. Quota exhaustion waits;
+it never waives review. Remaining deferred roles stay required unless the user
+approves one specific role with `agent-workspaces waive-role TASK_DIR --role ROLE
+--reason REASON --confirmed-by-user`. That records the actor, time, and reason
+and leaves the role waived, distinct from completed. Do not mark a reviewer
+completed to skip review, invent review evidence, or broaden task scope.

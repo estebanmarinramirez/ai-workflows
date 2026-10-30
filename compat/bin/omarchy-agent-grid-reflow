@@ -1,0 +1,177 @@
+#!/bin/bash
+# Reunite managed terminal windows on one workspace and fit them to that
+# workspace's monitor. Usage: omarchy-agent-grid-reflow WORKSPACE ADDRESS...
+# Addresses are placed in grid order. Only the named windows are touched, and
+# a reflow that is already correct dispatches nothing.
+
+set -o pipefail
+
+workspace_id=${1:?workspace id}; shift
+addresses=("$@")
+((${#addresses[@]} > 0)) || { echo 'omarchy-agent-grid-reflow: no windows given' >&2; exit 2; }
+[[ $workspace_id =~ ^[0-9]+$ ]] || { echo "omarchy-agent-grid-reflow: invalid workspace: $workspace_id" >&2; exit 2; }
+
+# A selector is only ever built from a requested, well-formed address.
+declare -A requested=()
+for address in "${addresses[@]}"; do
+  [[ $address =~ ^0x[0-9a-fA-F]+$ && -z ${requested[$address]:-} ]] || { echo "omarchy-agent-grid-reflow: invalid or duplicate window address: '$address'" >&2; exit 2; }
+  requested[$address]=1
+done
+address_filter=$(printf '%s\n' "${addresses[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+settle_delay=${AW_REFLOW_DELAY:-0.1}
+settle_attempts=${AW_REFLOW_ATTEMPTS:-40}
+
+# Read one compositor snapshot into $rows: address, workspace, floating, x, y,
+# width, height for exactly the requested windows. It fails unless the command
+# succeeds and every requested window is present with usable geometry, so a
+# failed, empty or partial read can never pass for a verified state.
+rows=''
+snapshot_rows() {
+  local clients
+  clients=$(hyprctl clients -j 2>/dev/null) || return 1
+  rows=$(jq -r --argjson addresses "$address_filter" '
+    [.[] | select(.address as $a | $addresses | index($a))] as $found
+    | if ($found | map(.address) | unique | length) == ($addresses | length)
+        and all($found[]; (.workspace.id | type) == "number" and (.floating | type) == "boolean"
+                 and ((.at | length) == 2) and ((.size | length) == 2)
+                 and all(.at[], .size[]; type == "number"))
+      then $found[] | [.address, .workspace.id, .floating, .at[0], .at[1], .size[0], .size[1]] | @tsv
+      else error("incomplete snapshot") end' <<<"$clients" 2>/dev/null) || return 1
+  [[ -n $rows ]]
+}
+
+dispatch() { hyprctl dispatch "$1" >/dev/null; }
+
+# Moves between workspaces, and especially between monitors, complete after
+# the dispatch returns and shift a floating window by the monitor offset.
+# Measure first, so nothing is placed until every window has really arrived.
+arrived=false; reads=0
+for _ in $(seq 1 "$settle_attempts"); do
+  snapshot_rows || { sleep "$settle_delay"; continue; }
+  ((reads += 1))
+  arrived=true
+  while IFS=$'\t' read -r address window_workspace floating _; do
+    [[ $window_workspace == "$workspace_id" ]] && continue
+    arrived=false
+    # Ask again only occasionally; repeated moves of a pending window can bounce it.
+    if ((reads == 1 || reads % 10 == 0)); then
+      dispatch "hl.dsp.window.move({ workspace = '$workspace_id', follow = false, window = 'address:$address' })"
+    fi
+  done <<<"$rows"
+  [[ $arrived == true ]] && break
+  sleep "$settle_delay"
+done
+if [[ $arrived != true ]]; then
+  echo "Could not gather every workspace panel on workspace $workspace_id; layout was left unchanged." >&2
+  exit 1
+fi
+
+# Fit to the monitor that shows this workspace, not whichever monitor has
+# keyboard focus. Fall back to the focused monitor for a workspace that has
+# not been created yet.
+monitors=$(hyprctl monitors -j) || { echo 'Could not read the monitor list; layout was left unchanged.' >&2; exit 1; }
+workspaces=$(hyprctl workspaces -j) || { echo 'Could not read the workspace list; layout was left unchanged.' >&2; exit 1; }
+monitor_name=$(jq -r --argjson id "$workspace_id" '[.[] | select(.id == $id)][0].monitor // empty' <<<"$workspaces")
+monitor=$(jq -c --arg name "$monitor_name" '
+  (map(select(.name == $name))[0]) // (map(select(.focused == true))[0]) // .[0] // empty' <<<"$monitors")
+[[ -n $monitor ]] || { echo 'No monitor is available for the workspace layout.' >&2; exit 1; }
+scale=$(jq -r '.scale' <<<"$monitor")
+monitor_x=$(jq -r '.x' <<<"$monitor")
+monitor_y=$(jq -r '.y' <<<"$monitor")
+monitor_width=$(jq -r '.width' <<<"$monitor")
+monitor_height=$(jq -r '.height' <<<"$monitor")
+read -r reserved_left reserved_top reserved_right reserved_bottom < <(jq -r '.reserved | @tsv' <<<"$monitor")
+
+# Hyprland positions are logical (scaled) pixels in one global space whose
+# origin may be negative. Round, so fractional scales cannot lose a pixel.
+transform=$(jq -r '.transform // 0' <<<"$monitor")
+if ((transform % 2 == 1)); then
+  swap=$monitor_width; monitor_width=$monitor_height; monitor_height=$swap
+fi
+logical_x=$((monitor_x + reserved_left))
+logical_y=$((monitor_y + reserved_top))
+logical_width=$(awk "BEGIN {print int($monitor_width / $scale + 0.5)}")
+logical_height=$(awk "BEGIN {print int($monitor_height / $scale + 0.5)}")
+logical_width=$((logical_width - reserved_left - reserved_right))
+logical_height=$((logical_height - reserved_top - reserved_bottom))
+
+outer_gap=$(hyprctl getoption general:gaps_out -j | jq -r '(.css // "3") | split(" ")[0]' 2>/dev/null)
+inner_gap=$(hyprctl getoption general:gaps_in -j | jq -r '(.css // "2") | split(" ")[0]' 2>/dev/null)
+[[ $outer_gap =~ ^[0-9]+$ ]] || outer_gap=3
+[[ $inner_gap =~ ^[0-9]+$ ]] || inner_gap=2
+between_gap=$((inner_gap * 2))
+
+total_windows=${#addresses[@]}
+if ((total_windows <= 4)); then columns=2; else columns=3; fi
+rows=$(((total_windows + columns - 1) / columns))
+usable_width=$((logical_width - outer_gap * 2 - between_gap * (columns - 1)))
+usable_height=$((logical_height - outer_gap * 2 - between_gap * (rows - 1)))
+cell_width=$((usable_width / columns))
+cell_height=$((usable_height / rows))
+
+declare -A want_x=() want_y=() want_width=() want_height=()
+for index in "${!addresses[@]}"; do
+  address=${addresses[$index]}
+  column=$((index % columns)); row=$((index / columns))
+  x=$((logical_x + outer_gap + column * (cell_width + between_gap)))
+  y=$((logical_y + outer_gap + row * (cell_height + between_gap)))
+  width=$cell_width; height=$cell_height
+  ((column == columns - 1)) && width=$((logical_x + logical_width - outer_gap - x))
+  ((row == rows - 1)) && height=$((logical_y + logical_height - outer_gap - y))
+  want_x[$address]=$x; want_y[$address]=$y; want_width[$address]=$width; want_height[$address]=$height
+done
+
+area_left=$logical_x; area_top=$logical_y
+area_right=$((logical_x + logical_width)); area_bottom=$((logical_y + logical_height))
+abs() { local v=$1; echo $((v < 0 ? -v : v)); }
+
+# Placement is asynchronous as well. Re-read and re-apply until each window
+# sits where it belongs; windows that already match are never touched.
+placed=false
+for _ in $(seq 1 "$settle_attempts"); do
+  snapshot_rows || { sleep "$settle_delay"; continue; }
+  placed=true
+  while IFS=$'\t' read -r address window_workspace floating x y width height; do
+    if [[ $window_workspace != "$workspace_id" ]]; then
+      placed=false
+      dispatch "hl.dsp.window.move({ workspace = '$workspace_id', follow = false, window = 'address:$address' })"
+      continue
+    fi
+    if [[ $floating != true ]]; then
+      placed=false
+      dispatch "hl.dsp.window.float({ action = 'set', window = 'address:$address' })"
+      continue
+    fi
+    if (($(abs $((x - want_x[$address]))) > 1 || $(abs $((y - want_y[$address]))) > 1 \
+      || $(abs $((width - want_width[$address]))) > 2 || $(abs $((height - want_height[$address]))) > 2)); then
+      placed=false
+      dispatch "hl.dsp.window.resize({ x = ${want_width[$address]}, y = ${want_height[$address]}, relative = false, window = 'address:$address' })"
+      dispatch "hl.dsp.window.move({ x = ${want_x[$address]}, y = ${want_y[$address]}, relative = false, window = 'address:$address' })"
+    fi
+  done <<<"$rows"
+  [[ $placed == true ]] && break
+  sleep "$settle_delay"
+done
+
+# Success needs a verified, complete snapshot. Exact sizes can be adjusted by
+# the compositor, so a pass that dispatched nothing proves every panel is
+# floating, on the workspace and in its cell; otherwise visibility is the
+# contract: inside the monitor's work area. An unreadable snapshot fails closed.
+if [[ $placed != true ]]; then
+  verified=false
+  for _ in $(seq 1 "$settle_attempts"); do
+    snapshot_rows && { verified=true; break; }
+    sleep "$settle_delay"
+  done
+  if [[ $verified != true ]]; then
+    echo 'Could not read a complete window snapshot to verify the layout. Reopen the workspace to retry.' >&2
+    exit 1
+  fi
+  while IFS=$'\t' read -r address window_workspace floating x y width height; do
+    if [[ $window_workspace != "$workspace_id" || $floating != true ]] \
+      || ((x < area_left - 1 || y < area_top - 1 || x + width > area_right + 1 || y + height > area_bottom + 1)); then
+      echo "Panel reconciliation failed for $address. Reopen the workspace to retry." >&2
+      exit 1
+    fi
+  done <<<"$rows"
+fi

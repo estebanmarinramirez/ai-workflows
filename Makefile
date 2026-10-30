@@ -27,16 +27,22 @@ test:
 	./tests/sessions
 	python3 tests/pane-recovery
 	./tests/orchestrator-wake
+	./tests/collision
+	./tests/workflow-deadlock
 	./tests/monitor-wake
 	./tests/routing
 	./tests/menu
 	./tests/models
 	./tests/layouts
 	./tests/desktop-layout
+	./tests/desktop-reflow
 	./tests/integration-base
+	./tests/combined-interactions
 	./tests/model-policy
 	./tests/live-config
 	./tests/assignments
+	python3 tests/credits
+	./tests/credit-wake
 	./tests/agent-controls
 	./tests/empty-repository
 	./tests/gestures

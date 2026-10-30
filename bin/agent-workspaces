@@ -173,6 +173,7 @@ case "$cmd" in
     done
     [[ -n $task && -n $role && -n $state ]] || aw_die 'status requires --task, --role, and --state'
     aw_valid_state "$state" || aw_die "invalid state: $state"
+    [[ $state != waived ]] || aw_die 'waived is recorded only by waive-role --confirmed-by-user --reason'
     [[ -d $task ]] || aw_die "task directory not found: $task"
     aw_require_no_handover "$task"
     status_file="$task/$role.status.json"; now=$(aw_now)
@@ -723,6 +724,45 @@ PLIST
     aw_audit "${task%/.coordination/*}" agent.retried "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" '{task_id:$task,role:$role}')" orchestrator
     printf 'Retried %s for task %s.\n' "$role" "$(basename "$task")"
     ;;
+  waive-role)
+    task=${1:?task directory}; shift
+    aw_require_no_handover "$task"
+    confirmed=false; role=''; reason=''
+    while (($#)); do
+      case "$1" in
+        --confirmed-by-user) confirmed=true; shift ;;
+        --role) role=$2; shift 2 ;;
+        --reason) reason=$2; shift 2 ;;
+        *) aw_die "unknown waive-role option: $1" ;;
+      esac
+    done
+    [[ $confirmed == true ]] || aw_die 'waive-role requires --confirmed-by-user after explicit human approval'
+    [[ -n $role ]] || aw_die 'waive-role requires --role'
+    state="$task/state.json"; [[ -f $state ]] || aw_die "missing task: $task"
+    reason=$(jq -rn --arg reason "$reason" '$reason | gsub("^\\s+|\\s+$";"")')
+    [[ ${#reason} -ge 12 ]] || aw_die 'waive-role requires a concrete --reason'
+    lead=$(jq -r '.lead // empty' "$state")
+    [[ $role != "$lead" ]] || aw_die 'the lead role cannot be waived'
+    jq -e --arg role "$role" '.roles[$role]' "$state" >/dev/null || aw_die "role is not assigned: $role"
+    status_file=$(jq -r --arg role "$role" '.roles[$role].status_json // .roles[$role].status_file // empty' "$state")
+    [[ -n $status_file && -f $status_file ]] || aw_die "role status is missing: $role"
+    role_state=$(jq -r '.state // "dispatched"' "$status_file")
+    [[ $role_state == deferred ]] || aw_die "only a deferred role can be waived, found $role_state"
+    now=$(aw_now); actor=user:confirmed-via-orchestrator; workspace_root=${task%/.coordination/*}
+    aw_atomic_jq "$status_file" --arg at "$now" --arg reason "$reason" --arg actor "$actor" \
+      '.state="waived" | .updated_at=$at | .waiver={actor:$actor,at:$at,reason:$reason}'
+    exec {waiver_lock}>"$task/.state.lock"
+    flock "$waiver_lock"
+    aw_atomic_jq "$state" --arg role "$role" --arg at "$now" --arg reason "$reason" --arg actor "$actor" \
+      '.roles[$role].state="waived" | .roles[$role].waiver={actor:$actor,at:$at,reason:$reason}
+       | .gates.reduced_assurance=true | .updated_at=$at
+       | .transitions += [{from:"deferred",to:"waived",at:$at,actor:$actor,role:$role}]'
+    flock -u "$waiver_lock"
+    exec {waiver_lock}>&-
+    aw_audit "$workspace_root" role.waived "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg reason "$reason" --arg at "$now" '{task_id:$task,role:$role,reason:$reason,at:$at}')" "$actor"
+    "$0" refresh "$task" >/dev/null
+    "$0" next "$task"
+    ;;
   next)
     task=${1:?task directory}
     "$0" refresh "$task" >/dev/null
@@ -752,13 +792,15 @@ PLIST
     case "$action" in
       approve-integration)
         [[ $status == awaiting_integration ]] || aw_die "approve-integration requires awaiting_integration, found $status"
-        jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'all assigned roles must be completed'
+        aw_roles_allow_gate "$state" || aw_die 'assigned roles must be completed, or explicitly waived with an audited reason'
+        assurance=independent
+        jq -e 'any(.roles[]?; .state=="waived")' "$state" >/dev/null && assurance=reduced
         collision=$(aw_collision_json "$task")
         printf '%s\n' "$collision" | jq . >"$task/collision-report.json"
         [[ $(jq -r '.safe' <<<"$collision") == true ]] || aw_die 'agent branches have unresolved integration collisions'
         temporary=$(mktemp "$task/.state.json.XXXXXX")
         jq --arg at "$now" '.gates.integration_approved=true | .status="integration_ready" | .updated_at=$at | .transitions += [{from:"awaiting_integration",to:"integration_ready",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
-        aw_audit "$workspace_root" integration.approved '{"collision_check":"passed"}' user:confirmed-via-orchestrator
+        aw_audit "$workspace_root" integration.approved "$(jq -cn --arg assurance "$assurance" '{collision_check:"passed",assurance:$assurance}')" user:confirmed-via-orchestrator
         ;;
       dispatch-verification)
         [[ $status == awaiting_integration ]] || aw_die "dispatch-verification requires awaiting_integration, found $status"
@@ -1036,7 +1078,10 @@ PLIST
     state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
     [[ $(jq -r '.status' "$state") == ready_for_pr ]] || aw_die 'task must be ready_for_pr'
     jq -e '.gates.integration_approved==true and .gates.pr_prepared==true and .gates.pr_approved==true' "$state" >/dev/null || aw_die 'integration and PR gates are not all approved'
-    jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'every required role must be completed'
+    aw_roles_allow_gate "$state" || aw_die 'every required role must be completed, or explicitly waived with an audited reason'
+    if jq -e 'any(.roles[]?; .state=="waived")' "$state" >/dev/null; then
+      printf 'Assurance: reduced; waived roles are not independent review evidence\n'
+    fi
     collision=$(aw_collision_json "$task")
     [[ $(jq -r '.safe' <<<"$collision") == true ]] || aw_die 'agent branches have unresolved integration collisions'
     repository=$(jq -r '.repository' "$state"); title=$(jq -r '.pr.title // .objective' "$state"); branch=$(git -C "$repository" branch --show-current)

@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Paid-credit capacity accounting across collectors, capacity, admission, routing and display.
+Sanitized fixtures only: no provider, account or paid request is used."""
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'lib'))
+import budget as b
+import routing
+import capacity
+import codex_quota
+from assignments import atomic
+from routing import Router
+
+BALANCE = '24973.7870002500'
+
+
+class Credits(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.root = self.base / 'data/agent-workspaces/repo/set'
+        self.task = self.root / '.coordination/t1'
+        folder = self.base / 'config/agent-workspaces'
+        shutil.copytree(ROOT / 'config', folder)
+        self.config = json.loads((folder / 'config.json').read_text())
+        self.config['budget']['enabled'] = True
+        self.config['routing'].update(manage_orchestrator=False, mode='automatic')
+        self.now = datetime.now(timezone.utc)
+        self.usage = self.base / 'state/omarchy/agents/usage'
+        self.sidecar = self.base / 'state/omarchy/agents/agent-workspaces-credits'
+        atomic(self.root / 'workspace.json', {'workspace_id': 'w:set', 'profile': 'safe', 'agents': [{'role': p, 'provider': p} for p in self.config['providers']]})
+        self.state = dict(id='t1', workspace_id='w:set', status='active', stage='execute', lead='codex', created_at=self.now.isoformat(),
+                          routing={'difficulty': 'simple'}, roles={p: {'provider': p, 'worktree': str(self.root / p), 'state': 'in_progress' if p == 'codex' else 'deferred'} for p in self.config['providers']})
+        atomic(self.task / 'state.json', self.state)
+        self.save()
+        for provider in self.config['providers']:
+            self.native(provider, .2)
+        env = patch.dict(os.environ, XDG_CONFIG_HOME=str(self.base / 'config'), XDG_DATA_HOME=str(self.base / 'data'), XDG_STATE_HOME=str(self.base / 'state'),
+                         AW_LIB=str(ROOT / 'lib/core.sh'))
+        env.start(); self.addCleanup(env.stop)
+
+    def save(self): atomic(self.base / 'config/agent-workspaces/config.json', self.config)
+
+    def native(self, provider, used, **changes):
+        value = dict(schemaVersion=1, id=provider, ready=True, updatedAt=self.now.isoformat(), limits=[dict(percent=used, resetsAt=(self.now + timedelta(hours=4)).isoformat())])
+        value.update(changes)
+        atomic(self.usage / f'{provider}.json', value)
+
+    def credit(self, provider='codex', **changes):
+        value = dict(provider=provider, source='fixture', unit='credits', observedAt=self.now.isoformat(), hasCredits=True, unlimited=False,
+                     balance=BALANCE, ordinaryUsageAllowed=True, spendControlReached=False)
+        value.update(changes)
+        value = {k: v for k, v in value.items() if v is not ...}
+        atomic(self.sidecar / f'{provider}.json', value)
+
+    def pool(self, provider='codex'):
+        return capacity.capacities(self.config, self.usage, self.now)[1][capacity.pool_id(provider, self.config['routing'])]
+
+    def allowed(self, provider='codex', purpose='managed'):
+        try: b.check(self.config, provider, purpose); return True
+        except ValueError: return False
+
+    def test_installed_credit_policy_defers_to_observed_credit_constraints(self):
+        self.config['budget']['credit_backed_managed_providers'] = ['codex']
+        self.save()
+        self.native('codex', 1.0)
+        # Preserve explicit ordinary authority when the provider has no credit collector.
+        self.assertTrue(self.allowed())
+        self.assertFalse(self.router().guard(['codex'], self.task))
+        for change in ({'ordinaryUsageAllowed': False}, {'spendControlReached': True},
+                       {'balance': '0'}, {'balance': 'NaN'},
+                       {'observedAt': (self.now-timedelta(hours=1)).isoformat()}):
+            with self.subTest(change=change):
+                self.credit(**change)
+                self.assertFalse(self.allowed())
+                router = self.router()
+                self.assertTrue(router.guard(['codex'], self.task))
+                self.assertFalse(any(row['target']['provider'] == 'codex' and row['action'] in ('switch', 'adjust')
+                                     for row in router.plan()['decisions']))
+        # A malformed sidecar also counts as observed evidence, never as a missing collector.
+        (self.sidecar / 'codex.json').write_text('{')
+        self.assertFalse(self.allowed())
+        self.assertTrue(self.router().guard(['codex'], self.task))
+        # Unknown aliases cannot hide another alias's observed constraints.
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'claude': 'shared'}
+        self.save()
+        self.credit(balance='0')
+        self.assertFalse(self.allowed())
+        self.assertTrue(self.router().guard(['codex'], self.task))
+        self.config['routing']['account_pools'] = {}
+        self.save()
+        self.credit()
+        self.assertTrue(self.allowed())
+        self.assertFalse(self.router().guard(['codex'], self.task))
+        self.config['budget']['credit_minimum'] = {'codex': 30000}
+        self.save()
+        self.assertFalse(self.allowed())
+        self.assertTrue(self.router().guard(['codex'], self.task))
+        for purpose in ('experiment', 'boost'):
+            self.assertFalse(self.allowed(purpose=purpose))
+
+    def test_exhausted_subscription_with_confirmed_credits_allows_only_ordinary_work(self):
+        self.native('codex', 1.0); self.credit()
+        pool = self.pool()
+        self.assertEqual((pool['state'], pool['remaining'], pool['used']), ('exhausted', 0, 1.0))
+        self.assertEqual((pool['credits']['state'], pool['credits']['balance'], pool['credits']['unit']), ('available', BALANCE, 'credits'))
+        self.assertEqual(capacity.ordinary_allowance(pool, .05), (True, 'credits'))
+        self.assertTrue(self.allowed())
+        with b.admission(self.config, 'codex', 'managed'): pass
+        for purpose in ('experiment', 'boost'): self.assertFalse(self.allowed(purpose=purpose), purpose)
+        self.assertNotIn('percent', json.dumps(pool['credits']))
+
+    def test_unusable_credit_evidence_never_counts_as_allowance(self):
+        self.native('codex', 1.0)
+        stale = (self.now - timedelta(hours=1)).isoformat()
+        cases = {'zero': dict(balance='0.0'), 'negative': dict(balance='-3'), 'nan': dict(balance='NaN'), 'infinite': dict(balance='Infinity'),
+                 'garbage': dict(balance='lots'), 'boolean balance': dict(balance=True), 'list balance': dict(balance=[5]), 'stale': dict(observedAt=stale),
+                 'bad time': dict(observedAt='yesterday'), 'no flag': dict(hasCredits=...), 'no balance': dict(balance=...), 'string flag': dict(hasCredits='true'),
+                 'has false': dict(hasCredits=False), 'no unit': dict(unit=...), 'no source': dict(source=...), 'permission missing': dict(ordinaryUsageAllowed=...),
+                 'spend unknown': dict(spendControlReached=...), 'ordinary denied': dict(ordinaryUsageAllowed=False), 'spend capped': dict(spendControlReached=True),
+                 'string unlimited': dict(unlimited='yes', balance=...), 'unlimited but denied': dict(unlimited=True, ordinaryUsageAllowed=False),
+                 'unlimited but capped': dict(unlimited=True, spendControlReached=True), 'other provider': dict(provider='claude')}
+        for name, change in cases.items():
+            with self.subTest(name):
+                self.credit(**change)
+                self.assertFalse(self.pool()['credits']['usable'], name)
+                self.assertFalse(self.allowed(), name)
+        shutil.rmtree(self.sidecar)
+        self.assertEqual(self.pool()['credits']['state'], 'unknown')
+        self.assertFalse(self.allowed())
+
+    def test_missing_fields_are_unknown_not_zero_and_denials_are_distinct(self):
+        self.credit(balance=...)
+        self.assertEqual(self.pool()['credits']['state'], 'unknown')
+        self.credit(balance='0')
+        self.assertEqual(self.pool()['credits']['state'], 'none')
+        self.credit(spendControlReached=True)
+        self.assertEqual(self.pool()['credits']['state'], 'denied')
+        self.credit(ordinaryUsageAllowed=False)
+        self.assertTrue(self.pool()['credits']['account_denied'])
+
+    def test_supported_unlimited_allows_ordinary_work_without_a_balance(self):
+        self.native('codex', 1.0); self.credit(unlimited=True, balance=..., hasCredits=...)
+        self.assertEqual(capacity.ordinary_allowance(self.pool(), .3), (True, 'unlimited'))
+        self.assertTrue(self.allowed()); self.assertFalse(self.allowed(purpose='experiment'))
+
+    def test_subscription_available_without_credits_and_reserve_is_not_a_balance_percentage(self):
+        self.assertTrue(self.allowed())
+        self.native('codex', .8)  # 20% left is inside the 30% reserve
+        self.assertFalse(self.allowed())
+        self.credit(balance='0.01')  # a tiny positive balance is still usable; reserve never applies to credits
+        self.assertTrue(self.allowed())
+        self.native('codex', .2); self.credit(balance='0')
+        self.assertTrue(self.allowed())  # subscription headroom needs no credits
+
+    def test_credits_never_repair_unknown_or_stale_subscription_evidence(self):
+        self.credit()
+        self.native('codex', .1, limits=[])
+        self.assertEqual(self.pool()['state'], 'unknown'); self.assertFalse(self.allowed())
+        self.native('codex', 1.0, updatedAt=(self.now - timedelta(hours=1)).isoformat())
+        self.assertFalse(self.allowed())
+
+    def test_configured_monetary_bound_and_validation(self):
+        self.native('codex', 1.0); self.credit(balance='50')
+        self.config['budget']['credit_minimum'] = {'codex': '100'}
+        self.assertFalse(self.allowed())
+        self.credit(balance='150'); self.assertTrue(self.allowed())
+        for bad in ({'codex': 'x'}, {'codex': -1}, {'codex': 'NaN'}, {'nobody': 1}, [], {'codex': True}):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                b.settings(dict(self.config, budget=dict(self.config['budget'], credit_minimum=bad)))
+
+    def test_aliases_share_one_balance_and_unknown_or_denied_alias_wins(self):
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'claude': 'shared'}
+        self.native('codex', 1.0); self.native('claude', 1.0)
+        self.credit('codex', balance='10'); self.credit('claude', balance='20')
+        pool = self.pool()
+        self.assertEqual(pool['credits']['balance'], '10')  # never 30
+        self.credit('claude', balance=...)
+        self.assertFalse(self.allowed('codex')); self.assertFalse(self.allowed('claude'))
+        self.credit('claude', ordinaryUsageAllowed=False)
+        self.assertFalse(self.allowed('codex'))
+        self.credit('claude', unit='USD')
+        self.assertEqual(self.pool()['credits']['state'], 'unknown')  # not a currency conversion
+
+    def test_alias_with_unobserved_subscription_blocks_credit_use(self):
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'claude': 'shared'}
+        self.native('codex', 1.0); self.native('claude', 1.0, limits=[])
+        self.credit('codex'); self.credit('claude')
+        self.assertFalse(self.allowed('codex'))
+        self.native('claude', 1.0); self.assertTrue(self.allowed('codex'))
+
+    def test_credits_are_provider_specific_and_units_are_never_pooled(self):
+        self.native('codex', 1.0); self.native('claude', 1.0); self.native('grok', .1)
+        self.credit('codex'); self.credit('claude', unit='USD', balance=...)
+        self.assertTrue(self.allowed('codex')); self.assertFalse(self.allowed('claude'))
+        self.assertTrue(self.allowed('grok'))
+        self.credit('claude', unit='USD', balance='12.50')
+        self.assertTrue(self.allowed('claude'))
+        pools = capacity.capacities(self.config, self.usage, self.now)[1]
+        self.assertEqual({k: (v['credits']['unit'], v['credits']['balance']) for k, v in pools.items() if v['credits']['usable']},
+                         {'codex': ('credits', BALANCE), 'claude': ('USD', '12.50')})
+
+    def test_every_provider_can_supply_confirmed_credits_natively_or_by_sidecar(self):
+        for provider, unit in (('codex', 'credits'), ('claude', 'USD'), ('grok', 'USD')):
+            with self.subTest(provider):
+                self.native(provider, 1.0)
+                self.assertFalse(self.allowed(provider))  # no evidence: documented unknown
+                self.native(provider, 1.0, credits=dict(source='fixture', unit=unit, observedAt=self.now.isoformat(), hasCredits=True, unlimited=False,
+                                                         balance='3', ordinaryUsageAllowed=True, spendControlReached=False))
+                self.assertTrue(self.allowed(provider))
+
+    def test_routing_and_guard_agree_with_admission(self):
+        for provider in self.config['providers']: self.native(provider, 1.0)
+        def router(): return Router(self.root, str(ROOT / 'bin/agent-workspaces'), self.now)
+        def decision(): return next(r for r in router().plan()['decisions'] if r['slot'] == 'codex')
+        self.assertEqual(decision()['action'], 'wait')
+        self.assertTrue(router().guard(['codex'], str(self.task)))
+        self.credit()
+        row = decision()
+        self.assertEqual(row['action'], 'keep'); self.assertEqual([c['allowance'] for c in row['candidates']], ['credits'])
+        self.assertEqual(router().guard(['codex'], str(self.task)), [])
+        self.assertTrue(router().guard(['claude'], str(self.task)))  # codex credits never fund another provider
+        self.native('claude', .2)
+        row = decision()
+        self.assertEqual({c['target']['provider']: c['allowance'] for c in row['candidates']}, {'codex': 'credits', 'claude': 'subscription'})
+        self.assertEqual(max(row['candidates'], key=lambda c: c['score'])['target']['provider'], 'claude')
+
+    def router(self): return Router(self.root, str(ROOT / 'bin/agent-workspaces'), self.now)
+
+    def test_hard_denial_outranks_healthy_subscription_everywhere(self):
+        self.credit(balance='100', ordinaryUsageAllowed=False)  # native codex stays at 20% used
+        for purpose in ('managed', 'experiment', 'boost'):
+            self.assertFalse(self.allowed(purpose=purpose), purpose)
+        self.config['budget']['unknown_managed_providers'] = ['codex']; self.save()
+        self.assertFalse(self.allowed())
+        self.assertTrue(self.router().guard(['codex'], str(self.task)))
+        with self.assertRaises(ValueError):
+            with b.admission(self.config, 'codex', 'managed'): pass
+        self.credit(ordinaryUsageAllowed=False, unit=..., source=..., balance=...)  # a bare fresh denial still denies
+        self.assertFalse(self.allowed())
+        self.credit(ordinaryUsageAllowed=True)
+        self.assertTrue(self.allowed()); self.assertEqual(self.router().guard(['codex'], str(self.task)), [])
+        self.credit(ordinaryUsageAllowed=False, observedAt=(self.now - timedelta(hours=1)).isoformat())
+        self.assertTrue(self.allowed())  # a stale denial is not authoritative evidence
+
+    def test_newer_authoritative_limits_are_not_hidden_behind_a_fresh_native_cache(self):
+        self.native('codex', .2, updatedAt=(self.now - timedelta(seconds=60)).isoformat())
+        reset = (self.now + timedelta(hours=4)).isoformat()
+        credit = dict(provider='codex', source='codex-app-server', unit='credits', observedAt=self.now.isoformat(), hasCredits=True, unlimited=False,
+                      balance='100', ordinaryUsageAllowed=True, spendControlReached=False)
+        with patch.object(codex_quota, 'query', return_value=([dict(percent=1.0, resetsAt=reset)], credit)):
+            codex_quota.refresh()
+        pool = self.pool()
+        self.assertEqual((pool['used'], pool['state']), (1.0, 'exhausted'))
+        self.assertTrue(self.allowed())
+        for purpose in ('experiment', 'boost'): self.assertFalse(self.allowed(purpose=purpose), purpose)
+        # a returned restriction takes precedence over permissive windows
+        restricted = [dict(percent=.1, resetsAt=reset), dict(label='account restriction', percent=1)]
+        self.native('codex', .2)
+        with patch.object(codex_quota, 'query', return_value=(restricted, dict(credit, ordinaryUsageAllowed=False))):
+            codex_quota.refresh()
+        self.assertEqual(self.pool()['used'], 1.0); self.assertFalse(self.allowed())
+        # an older observation never overrides a newer native one; an exact tie keeps the more constrained
+        old = self.now - timedelta(seconds=120)
+        self.native('codex', .2)
+        with patch.object(codex_quota, 'query', return_value=([dict(percent=1.0, resetsAt=reset)], dict(credit, observedAt=old.isoformat()))):
+            codex_quota.refresh()
+        self.assertEqual(self.pool()['used'], .2)
+        atomic(self.sidecar / 'codex.json', dict(credit, observedAt=self.now.isoformat(), limits=[dict(percent=1.0, resetsAt=reset)]))
+        self.assertEqual(self.pool()['used'], 1.0)
+
+    def test_merged_alias_balance_is_checked_against_the_strictest_minimum_in_any_order_or_source(self):
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'claude': 'shared'}
+        self.native('codex', 1.0); self.native('claude', 1.0)
+        for first, second in (('codex', 'claude'), ('claude', 'codex')):
+            self.config['providers'] = [first, second]
+            with self.subTest(first):
+                self.config['budget']['credit_minimum'] = {'codex': '50'}
+                self.credit('codex', balance='100'); self.credit('claude', balance='1', source='another-source')
+                self.assertEqual(self.pool()['credits']['balance'], '1')
+                self.assertFalse(self.allowed('codex')); self.assertFalse(self.allowed('claude'))
+                self.credit('claude', balance='60', source='another-source')
+                self.assertTrue(self.allowed('codex')); self.assertTrue(self.allowed('claude'))
+                self.config['budget']['credit_minimum'] = {'claude': '75', 'codex': '10'}
+                self.assertFalse(self.allowed('codex'))  # the stricter alias minimum binds the shared balance
+                self.credit('claude', balance='80', source='another-source'); self.assertTrue(self.allowed('codex'))
+                self.credit('claude', balance='80', source='another-source', unit='USD')
+                self.assertEqual(self.pool()['credits']['state'], 'unknown'); self.assertFalse(self.allowed('codex'))
+
+    def test_unlimited_alias_does_not_launder_a_finite_alias_below_the_strictest_minimum(self):
+        self.config['routing']['account_pools'] = {'codex': 'shared', 'claude': 'shared'}
+        self.native('codex', 1.0); self.native('claude', 1.0)
+        for first, second in (('codex', 'claude'), ('claude', 'codex')):
+            with self.subTest(first):
+                self.config['providers'] = [first, second]
+                self.config['budget']['credit_minimum'] = {'codex': '50', 'claude': '0'}
+                self.credit('codex', unlimited=True, balance=..., hasCredits=...); self.credit('claude', balance='1')
+                self.assertEqual(self.pool()['credits']['state'], 'none')
+                self.assertFalse(self.allowed('codex')); self.assertFalse(self.allowed('claude'))
+                self.credit('claude', balance='51')
+                self.assertTrue(self.allowed('codex')); self.assertTrue(self.allowed('claude'))
+                self.config['budget']['credit_minimum'] = {'codex': '0', 'claude': '60'}  # strictest minimum may sit on the finite alias
+                self.assertFalse(self.allowed('codex'))
+                self.credit('claude', balance='61'); self.assertTrue(self.allowed('codex'))
+                self.credit('claude', unlimited=True, balance=..., hasCredits=...)  # two unlimited aliases stay unlimited
+                self.assertEqual(self.pool()['credits']['state'], 'unlimited'); self.assertTrue(self.allowed('claude'))
+                self.config['budget']['credit_minimum'] = {}
+                self.credit('claude', balance='1', unit='USD')  # mixed units never merge
+                self.assertEqual(self.pool()['credits']['state'], 'unknown')
+                self.credit('claude', balance='1', ordinaryUsageAllowed=False); self.assertFalse(self.allowed('codex'))
+
+    def test_snapshot_account_text_matches_admission_without_money(self):
+        def line():
+            report = self.router().plan()
+            return next(x for x in routing.display(report).splitlines() if 'Account codex:' in x)
+        self.native('codex', 1.0)
+        self.assertNotIn('paid', line())
+        self.credit()
+        text = line()
+        self.assertIn('subscription exhausted, paid allowance available for ordinary work', text)
+        self.assertNotIn(BALANCE, text); self.assertNotIn('24973', text)
+        self.credit(spendControlReached=True); self.assertNotIn('paid allowance', line())
+        self.credit(ordinaryUsageAllowed=False); self.assertIn('provider denies ordinary usage', line())
+        self.native('codex', .2); self.credit(ordinaryUsageAllowed=False)
+        self.assertIn('provider denies ordinary usage', line())
+
+    def test_display_shows_exhaustion_with_credits_rather_than_false_exhaustion(self):
+        for provider in self.config['providers']: self.native(provider, 1.0)
+        command = [sys.executable, str(ROOT / 'compat/bin/omarchy-agent-usage-workspaces')]
+        text = json.loads(subprocess.check_output(command, text=True))['usageStatusText']
+        self.assertIn('exhausted', text); self.assertNotIn('credits available', text)
+        self.credit()
+        result = json.loads(subprocess.check_output(command, text=True))
+        self.assertIn('paid credits available', result['usageStatusText'])
+        self.assertNotIn(BALANCE, json.dumps(result))
+
+    def test_codex_collector_contract_is_sanitized_and_validates_variants(self):
+        now = datetime.now(timezone.utc)
+        reset = int((now + timedelta(days=1)).timestamp())
+        result = {'accountId': 'acct-secret', 'ordinaryUsageAllowed': True,
+                  'rateLimits': {'primary': {'usedPercent': 100, 'resetsAt': reset}, 'spendControlReached': False,
+                                 'credits': {'hasCredits': True, 'unlimited': False, 'balance': BALANCE}, 'planType': 'x'}}
+        windows, observation = codex_quota.parse(result, now)
+        self.assertEqual([w['percent'] for w in windows], [1.0])
+        self.assertEqual((observation['balance'], observation['unit'], observation['source']), (BALANCE, 'credits', 'codex-app-server'))
+        self.assertNotIn('acct-secret', json.dumps(observation)); self.assertNotIn('planType', observation)
+        normalized = capacity.normalize_credits(observation, now, 300)
+        self.assertEqual((normalized['state'], normalized['usable']), ('available', True))
+        denied, _ = codex_quota.parse(dict(result, ordinaryUsageAllowed=False), now)
+        self.assertEqual(denied[-1], dict(label='account restriction', percent=1))
+        _, capped = codex_quota.parse(json.loads(json.dumps(result).replace('"spendControlReached": false', '"spendControlReached": true')), now)
+        self.assertEqual(capacity.normalize_credits(capped, now, 300)['state'], 'denied')
+        _, nocredits = codex_quota.parse(dict(result, rateLimits={k: v for k, v in result['rateLimits'].items() if k != 'credits'}), now)
+        self.assertEqual(capacity.normalize_credits(nocredits, now, 300)['state'], 'unknown')
+        for bad in ({'rateLimits': None}, {'rateLimits': {}}, {'rateLimits': {'primary': {'usedPercent': True, 'resetsAt': reset}}},
+                    {'rateLimits': {'primary': {'usedPercent': 101, 'resetsAt': reset}}}, {'rateLimits': {'primary': {'usedPercent': 5, 'resetsAt': 1}}}):
+            with self.subTest(bad), self.assertRaises((ValueError, KeyError, TypeError)): codex_quota.parse(bad, now)
+
+    def test_collector_refreshes_credits_when_native_limits_are_fresh(self):
+        self.native('codex', .2)
+        credit = dict(provider='codex', source='codex-app-server', unit='credits', observedAt=self.now.isoformat(), hasCredits=True, unlimited=False,
+                      balance='1', ordinaryUsageAllowed=True, spendControlReached=False)
+        before = (self.usage / 'codex.json').read_bytes()
+        with patch.object(codex_quota, 'query', return_value=([dict(percent=.9)], credit)) as query:
+            codex_quota.refresh()
+        query.assert_called_once()
+        self.assertEqual(json.loads((self.sidecar / 'codex.json').read_text())['balance'], '1')
+        self.assertEqual((self.usage / 'codex.json').read_bytes(), before)  # native subscription record untouched
+        self.assertEqual(oct((self.sidecar / 'codex.json').stat().st_mode & 0o777), '0o600')
+
+    def test_balance_churn_does_not_wake_but_eligibility_change_does(self):
+        script = f'source {ROOT}/lib/core.sh; aw_actionable_signature "$1"'
+        signature = lambda: subprocess.check_output(['bash', '-c', script, 'x', str(self.root)], text=True).strip()
+        self.credit(balance='10'); first = signature()
+        for balance in ('9.5', '8', '1000'):
+            self.credit(balance=balance, observedAt=(self.now + timedelta(minutes=1)).isoformat())
+            self.native('codex', .5)
+            self.assertEqual(signature(), first, balance)
+        state = json.loads((self.task / 'state.json').read_text())
+        state.setdefault('review_activation', {})['deferred'] = {'grok': 'budget requires fresh authoritative quota'}
+        atomic(self.task / 'state.json', state)
+        self.assertNotEqual(signature(), first)
+
+
+if __name__ == '__main__':
+    unittest.main()
