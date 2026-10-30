@@ -158,7 +158,7 @@ class Router:
                 reserve = max(0 if review else self.policy['reserve_fraction'],budget.reserve(self.config))
                 credit_backed_provider = budget.allows_credit_backed_managed(self.config,provider,pool=capacity)
                 allowed, via = ordinary_allowance(capacity, reserve)
-                if credit_backed_provider: allowed, via = True, 'configured_credits'
+                if not allowed and credit_backed_provider: allowed, via = True, 'configured_credits'
                 if not allowed: continue
                 # Paid credits keep ordinary work possible but never outrank an account with subscription headroom.
                 usable = capacity['remaining'] - reserve if via == 'subscription' else 1e-6

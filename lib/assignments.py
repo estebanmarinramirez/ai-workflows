@@ -294,7 +294,8 @@ class Assignments:
             expiry = record['routing'].get('boost_expires')
             if expiry and expiry <= datetime.now(timezone.utc).timestamp():
                 raise ChangeError('Temporary boost expired; cancel and replan')
-            if not ordinary_allowance(pool, reserve)[0]:
+            if not (ordinary_allowance(pool, reserve)[0] or
+                    budget.allows_credit_backed_managed(policy, target['provider'], pool=pool)):
                 raise ChangeError('Target account no longer has fresh available capacity; cancel and replan')
         # Resolve explicitly against the selected settings without publishing
         # them as active ownership before the successor acknowledges.

@@ -87,8 +87,9 @@ class Credits(unittest.TestCase):
                 self.assertFalse(self.allowed())
                 router = self.router()
                 self.assertTrue(router.guard(['codex'], self.task))
-                self.assertFalse(any(row['target']['provider'] == 'codex' and row['action'] in ('switch', 'adjust')
-                                     for row in router.plan()['decisions']))
+                for row in router.plan()['decisions']:
+                    self.assertNotIn('codex', [c['target']['provider'] for c in row.get('candidates', [])])
+                    self.assertFalse(row['action'] == 'handover' and row['target']['provider'] == 'codex')
         # A malformed sidecar also counts as observed evidence, never as a missing collector.
         (self.sidecar / 'codex.json').write_text('{')
         self.assertFalse(self.allowed())
@@ -237,6 +238,28 @@ class Credits(unittest.TestCase):
         self.assertEqual({c['target']['provider']: c['allowance'] for c in row['candidates']}, {'codex': 'credits', 'claude': 'subscription'})
         self.assertEqual(max(row['candidates'], key=lambda c: c['score'])['target']['provider'], 'claude')
 
+    def test_configured_credit_policy_preserves_subscription_ranking(self):
+        self.config['budget']['credit_backed_managed_providers'] = ['codex']
+        self.config['routing']['switch_improvement'] = 0
+        self.save()
+        self.native('codex', .02)
+        self.native('claude', .05)
+        self.native('grok', 1.0)
+        row = next(r for r in self.router().plan()['decisions'] if r['slot'] == 'codex')
+        self.assertEqual((row['action'], row['target']['provider']), ('keep', 'codex'))
+        candidates = {c['target']['provider']: c for c in row['candidates']}
+        self.assertEqual(candidates['codex']['allowance'], 'subscription')
+        self.assertEqual(candidates['claude']['allowance'], 'subscription')
+        self.assertGreater(candidates['codex']['score'], candidates['claude']['score'])
+        # Actual no-collector fallback retains low priority below subscription headroom.
+        self.native('codex', 1.0)
+        row = next(r for r in self.router().plan()['decisions'] if r['slot'] == 'codex')
+        self.assertEqual((row['action'], row['target']['provider']), ('handover', 'claude'))
+        candidates = {c['target']['provider']: c for c in row['candidates']}
+        self.assertEqual(candidates['codex']['allowance'], 'configured_credits')
+        self.assertLessEqual(candidates['codex']['score'], 1e-6)
+        self.assertGreater(candidates['claude']['score'], candidates['codex']['score'])
+
     def test_no_collector_credit_fallback_survives_routed_handover_recheck(self):
         self.config['budget']['credit_backed_managed_providers'] = ['codex']
         self.save()
@@ -272,7 +295,22 @@ class Credits(unittest.TestCase):
              patch.object(store, 'stopped', return_value='%1'), patch.object(assignments, 'run', side_effect=fake_run), \
              patch.object(assignments.shutil, 'which', return_value='/fixture/codex'), \
              patch.object(assignments.subprocess, 'check_output', return_value='provider-command'):
+            # Independently exercise the apply-time recheck even if admission has already passed.
+            self.native('codex', 1.0)
+            self.config['budget']['credit_minimum'] = {'codex': 50}
+            self.save()
+            for change in ({'ordinaryUsageAllowed': False}, {'spendControlReached': True},
+                           {'balance': '0'}, {'balance': '1'}, {'balance': 'NaN'},
+                           {'observedAt': (self.now-timedelta(hours=1)).isoformat()}):
+                with self.subTest(recheck=change), patch.object(b, 'check'):
+                    self.credit(**change)
+                    with self.assertRaisesRegex(assignments.ChangeError, 'fresh available capacity'):
+                        store.apply('change')
+                    self.assertEqual(record['phase'], 'ready')
+            (self.sidecar / 'codex.json').unlink()
+            self.native('codex', .2, limits=[])
             store.apply('change')
+            self.assertEqual(record['phase'], 'awaiting_ack')
 
     def router(self): return Router(self.root, str(ROOT / 'bin/agent-workspaces'), self.now)
 
