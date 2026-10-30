@@ -40,6 +40,14 @@ class Credits(unittest.TestCase):
         self.now = datetime.now(timezone.utc)
         self.usage = self.base / 'state/omarchy/agents/usage'
         self.sidecar = self.base / 'state/omarchy/agents/agent-workspaces-credits'
+        self.provider_bin = self.base / 'provider-bin'
+        self.provider_bin.mkdir()
+        for provider in self.config['providers']:
+            manifest = json.loads((folder / 'providers' / f'{provider}.json').read_text())
+            executable = manifest.get('executable', provider)
+            stub = self.provider_bin / executable
+            stub.write_text('#!/bin/sh\nexit 0\n')
+            stub.chmod(0o755)
         atomic(self.root / 'workspace.json', {'workspace_id': 'w:set', 'profile': 'safe', 'agents': [{'role': p, 'provider': p} for p in self.config['providers']]})
         self.state = dict(id='t1', workspace_id='w:set', status='active', stage='execute', lead='codex', created_at=self.now.isoformat(),
                           routing={'difficulty': 'simple'}, roles={p: {'provider': p, 'worktree': str(self.root / p), 'state': 'in_progress' if p == 'codex' else 'deferred'} for p in self.config['providers']})
@@ -48,7 +56,7 @@ class Credits(unittest.TestCase):
         for provider in self.config['providers']:
             self.native(provider, .2)
         env = patch.dict(os.environ, XDG_CONFIG_HOME=str(self.base / 'config'), XDG_DATA_HOME=str(self.base / 'data'), XDG_STATE_HOME=str(self.base / 'state'),
-                         AW_LIB=str(ROOT / 'lib/core.sh'))
+                         AW_LIB=str(ROOT / 'lib/core.sh'), PATH=f'{self.provider_bin}{os.pathsep}/usr/bin:/bin')
         env.start(); self.addCleanup(env.stop)
 
     def save(self): atomic(self.base / 'config/agent-workspaces/config.json', self.config)
