@@ -210,6 +210,10 @@ fi
 [[ $permission_profile =~ ^(safe|trusted|yolo)$ ]] || permission_profile=trusted
 session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"aw-$repo_hash-$repo_name-$set_slug" | cut -c1-80)
 legacy_session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"agents-$repo_name-$set_slug" | cut -c1-80)
+class_set=$(sed -E 's/[^[:alnum:]_]/_/g' <<<"$set_slug")
+# GTK application-id components must begin with a letter and may not contain
+# hyphens. Ghostty silently falls back to its default class when this is invalid.
+class_prefix="org.omarchy.agentworkspaces.r$repo_hash.s$class_set"
 
 if [[ $is_new == true ]]; then
   gum style --bold "Worktrees: $worktree_root"
@@ -294,9 +298,33 @@ fi
 # persistent tmux pane. Opening a workspace means restoring its agents too,
 # even when no terminal window needs to be spawned.
 ensure_agent_running() {
-  local role=$1 provider=${role_providers[$1]} pane_session pane relaunch state_file
+  local role=$1 provider=${role_providers[$1]:-} pane_session pane relaunch state_file stale_addresses stale_address remaining
+  if [[ $role == orchestrator ]]; then
+    provider=$(jq -r '.orchestrator_provider // "codex"' "${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces/config.json")
+  fi
   pane_session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$session_name-$role" | cut -c1-100)
-  tmux has-session -t "$pane_session" 2>/dev/null || return 0
+  if ! tmux has-session -t "$pane_session" 2>/dev/null; then
+    # Ending a workspace removes tmux sessions, but terminal emulators can
+    # keep their windows alive after the attached client exits. Retire only
+    # this role's managed windows so the normal launch path can replace them.
+    stale_addresses=$(hyprctl clients -j | jq -r --arg class "$class_prefix.$role" \
+      '.[] | select(.class == $class or .initialClass == $class) | .address')
+    while IFS= read -r stale_address; do
+      [[ -n $stale_address ]] || continue
+      hyprctl dispatch "hl.dsp.window.close({ window = \"address:$stale_address\" })" >/dev/null || return 1
+    done <<<"$stale_addresses"
+    for _ in $(seq 1 50); do
+      remaining=$(hyprctl clients -j | jq -r --arg class "$class_prefix.$role" \
+        '.[] | select(.class == $class or .initialClass == $class) | .address' | head -1)
+      [[ -z $remaining ]] && break
+      sleep 0.1
+    done
+    if [[ -n $remaining ]]; then
+      gum style --foreground=196 "Could not replace the stale $role terminal window. Close it and reopen this workspace."
+      return 1
+    fi
+    return 0
+  fi
   pane=$(tmux list-panes -t "$pane_session" -F '#{pane_id}' | head -1)
   omarchy-agent-pane-active "$role" "$pane_session" && return 0
   if [[ -f $worktree_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$worktree_root/.coordination/agents.json" >/dev/null; then return 0; fi
@@ -316,13 +344,9 @@ ensure_agent_running() {
   tmux send-keys -t "$pane" Enter
 }
 
-for role in "${agent_roles[@]}"; do ensure_agent_running "$role"; done
+for role in "${roles[@]}"; do ensure_agent_running "$role" || exit 1; done
 agent-workspaces snapshot "$repo_hash:$set_slug" --write >/dev/null
 
-class_set=$(sed -E 's/[^[:alnum:]_]/_/g' <<<"$set_slug")
-# GTK application-id components must begin with a letter and may not contain
-# hyphens. Ghostty silently falls back to its default class when this is invalid.
-class_prefix="org.omarchy.agentworkspaces.r$repo_hash.s$class_set"
 declare -A addresses=()
 terminal_id=$(xdg-terminal-exec --print-id 2>/dev/null)
 
@@ -498,6 +522,14 @@ for index in "${!roles[@]}"; do
   ((row == rows - 1)) && height=$((logical_y + logical_height - outer_gap - y))
   place_cell "$role" "$x" "$y" "$width" "$height"
 done
+
+# A previous end may have stopped the monitor while persistent terminal
+# windows remained open. Starting it here also covers the existing-session
+# path where omarchy-agent-pane is not invoked again.
+agent-workspaces monitor-start "$repo_hash:$set_slug" || {
+  gum style --foreground=196 'Workspace windows opened, but the monitor could not start.'
+  exit 1
+}
 
 # Moving and resizing are asynchronous too. Confirm every panel stayed
 # floating; a later open can then safely act as an explicit reflow operation.

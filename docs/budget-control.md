@@ -158,6 +158,17 @@ verified. Known low quota (including partial pool evidence) and process
 concurrency still apply. Experiments and temporary boosts never use this
 exception. Remove the provider from the list to restore strict admission.
 
+`budget.credit_backed_managed_providers` also defaults to an empty list. Add a
+provider, for example `"claude"`, when that account has separate provider usage
+credits that are not represented in quota telemetry. Managed launches and
+automatic routing may then proceed for that provider even when subscription
+quota is low, exhausted, or unknown. Shared-account concurrency still applies,
+and automatic routing uses the economical pressure profile when quota is
+exhausted or unknown. The provider's credit balance is not visible to this
+controller, so this is an authorization to use the provider's credit facility,
+not a dollar cap or balance check. This exception does not cover experiments or
+temporary boosts. Remove the provider to restore quota-based admission.
+
 New workflow tasks are persisted as `awaiting_configuration`. The dispatcher
 reconciles routing using that task's difficulty and sends work only after the
 required handover is acknowledged, budget admission succeeds and each selected

@@ -38,6 +38,79 @@ def run(*args: str, cwd: Path | None = None) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def display_repository_name(remote: str, path: Path) -> str:
+    identity, web_url = canonical_remote(remote)
+    if identity and web_url:
+        return Path(urlparse(web_url).path).name.removesuffix(".git")
+    return path.name.removesuffix(".git")
+
+
+def managed_worktree_label(path: Path) -> str:
+    try:
+        relative = path.resolve(strict=False).relative_to(DATA_HOME.resolve())
+    except ValueError:
+        return ""
+    parts = relative.parts
+    if len(parts) < 3:
+        return ""
+    set_name, slot = parts[1], parts[2]
+    if slot == ".orchestrator":
+        slot = "orchestrator"
+        if len(parts) > 3:
+            slot += f" ({parts[3]})"
+    return f"{set_name} · {slot}"
+
+
+def worktree_records(output: str, repository: Path) -> list[dict]:
+    records = []
+    for block in output.split("\n\n"):
+        if not block.strip():
+            continue
+        fields = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            fields[key] = value
+        raw_path = fields.get("worktree", "")
+        if not raw_path or "bare" in fields:
+            continue
+        path = Path(raw_path).expanduser().resolve(strict=False)
+        head = fields.get("HEAD", "")
+        branch = fields.get("branch", "")
+        if branch.startswith("refs/heads/"):
+            branch = branch.removeprefix("refs/heads/")
+        subject = run("git", "-C", str(repository), "show", "-s", "--format=%s", head) if head else ""
+        records.append({
+            "path": str(path),
+            "branch": branch or "(detached)",
+            "head": head,
+            "subject": subject,
+            "detached": "detached" in fields,
+            "locked": "locked" in fields,
+            "prunable": "prunable" in fields,
+            "prunable_reason": fields.get("prunable", ""),
+            "registered": True,
+            "primary": False,
+            "exists": path.is_dir(),
+            "workspace": managed_worktree_label(path),
+        })
+    return records
+
+
+def merge_worktrees(left: list[dict], right: list[dict]) -> list[dict]:
+    by_path = {}
+    for item in left + right:
+        path = item.get("path", "")
+        if not path:
+            continue
+        previous = by_path.get(path, {})
+        merged = dict(previous)
+        merged.update(item)
+        merged["registered"] = bool(previous.get("registered") or item.get("registered"))
+        merged["primary"] = bool(previous.get("primary") or item.get("primary"))
+        by_path[path] = merged
+    return sorted(by_path.values(), key=lambda item: (not item.get("primary", False), item.get("branch", "").casefold(), item.get("path", "").casefold()))
+
+
 def canonical_remote(remote: str) -> tuple[str, str]:
     remote = remote.strip()
     if not remote:
@@ -54,12 +127,51 @@ def canonical_remote(remote: str) -> tuple[str, str]:
     return identity, f"https://{host}/{path}"
 
 
-def git_record(path: Path) -> dict | None:
+def git_record(path: Path, worktree_cache: dict[str, list[dict]] | None = None) -> dict | None:
     top = run("git", "-C", str(path), "rev-parse", "--show-toplevel")
     bare = run("git", "-C", str(path), "rev-parse", "--is-bare-repository") == "true"
     if not top and not bare:
         return None
-    root = Path(top or path).resolve()
+    discovered_root = Path(top or path).resolve()
+    common = run("git", "-C", str(discovered_root), "rev-parse", "--git-common-dir")
+    if common and not Path(common).is_absolute():
+        common = str((discovered_root / common).resolve())
+    if bare:
+        worktrees = []
+    elif worktree_cache is not None and common in worktree_cache:
+        worktrees = [dict(item) for item in worktree_cache[common]]
+    else:
+        worktree_output = run("git", "-C", str(discovered_root), "worktree", "list", "--porcelain")
+        worktrees = worktree_records(worktree_output, discovered_root)
+        if worktree_cache is not None:
+            worktree_cache[common] = [dict(item) for item in worktrees]
+    primary = next((item for item in worktrees if (Path(item["path"]) / ".git").is_dir()), None)
+    if primary is None and worktrees:
+        primary = worktrees[0]
+    root = Path(primary["path"]).resolve() if primary else discovered_root
+    if primary:
+        primary["primary"] = True
+    discovered_path = discovered_root
+    known_paths = {item["path"] for item in worktrees}
+    if not bare and str(discovered_path) not in known_paths:
+        head = run("git", "-C", str(discovered_path), "rev-parse", "HEAD")
+        branch = run("git", "-C", str(discovered_path), "branch", "--show-current")
+        worktrees.append({
+            "path": str(discovered_path),
+            "branch": branch or "(detached)",
+            "head": head,
+            "subject": run("git", "-C", str(discovered_path), "show", "-s", "--format=%s", head) if head else "",
+            "detached": not bool(branch),
+            "locked": False,
+            "prunable": False,
+            "prunable_reason": "",
+            "registered": False,
+            "primary": False,
+            "exists": discovered_path.is_dir(),
+            "workspace": managed_worktree_label(discovered_path),
+            "dirty": bool(run("git", "-C", str(discovered_path), "status", "--porcelain")),
+        })
+    root = Path(run("git", "-C", str(root), "rev-parse", "--show-toplevel") or root).resolve()
     common = run("git", "-C", str(root), "rev-parse", "--git-common-dir")
     if common and not Path(common).is_absolute():
         common = str((root / common).resolve())
@@ -69,19 +181,29 @@ def git_record(path: Path) -> dict | None:
         digest = hashlib.sha256((common or str(root)).encode()).hexdigest()[:16]
         identity = f"local:{digest}"
     porcelain = run("git", "-C", str(root), "status", "--porcelain") if not bare else ""
-    worktrees = run("git", "-C", str(root), "worktree", "list", "--porcelain")
+    dirty = bool(porcelain) or any(item.get("dirty", False) for item in worktrees)
+    checkout = {
+        "common_dir": common,
+        "local_path": str(root),
+        "bare": bare,
+        "branch": run("git", "-C", str(root), "branch", "--show-current"),
+        "dirty": dirty,
+        "worktrees": worktrees,
+    }
     return {
         "id": identity,
-        "name": root.name.removesuffix(".git"),
+        "name": display_repository_name(remote, root),
         "local_path": str(root),
         "common_dir": common,
         "remote": remote,
         "web_url": web_url,
         "local": True,
         "bare": bare,
-        "branch": run("git", "-C", str(root), "branch", "--show-current"),
-        "dirty": bool(porcelain),
-        "worktree_count": worktrees.count("worktree "),
+        "branch": checkout["branch"],
+        "dirty": dirty,
+        "worktree_count": max(0, len(worktrees) - int(any(item.get("primary") for item in worktrees))),
+        "worktrees": worktrees,
+        "local_checkouts": [checkout],
         "last_commit_at": run("git", "-C", str(root), "log", "-1", "--format=%cI"),
         "indexed_at": now(),
     }
@@ -169,9 +291,52 @@ def github_records(config: dict) -> list[dict]:
 def merge_record(left: dict, right: dict) -> dict:
     merged = dict(left)
     for key, value in right.items():
+        if key in {"worktrees"}:
+            merged[key] = merge_worktrees(merged.get(key, []), value or [])
+            continue
+        if key == "local_checkouts":
+            checkouts = {item.get("common_dir") or item.get("local_path", ""): dict(item) for item in merged.get(key, [])}
+            for item in value or []:
+                checkout_key = item.get("common_dir") or item.get("local_path", "")
+                previous = checkouts.get(checkout_key, {})
+                checkout = dict(previous)
+                checkout.update(item)
+                checkout["dirty"] = bool(previous.get("dirty") or item.get("dirty"))
+                checkout["worktrees"] = merge_worktrees(previous.get("worktrees", []), item.get("worktrees", []))
+                checkouts[checkout_key] = checkout
+            merged[key] = list(checkouts.values())
+            continue
+        if key in {"workspace_sets", "workspace_ids"}:
+            merged[key] = sorted(set(merged.get(key, [])) | set(value or []))
+            continue
         if value not in (None, "", [], False) or key not in merged:
             merged[key] = value
     merged["local"] = bool(left.get("local") or right.get("local"))
+    checkouts = merged.get("local_checkouts", [])
+    if checkouts:
+        primary = max(checkouts, key=lambda item: (
+            bool(item.get("workspace_ids")),
+            len(item.get("workspace_sets", [])),
+            bool(item.get("recently_used")),
+            not item.get("bare", False),
+            Path(item.get("local_path", "")).name.casefold() == merged.get("name", "").casefold(),
+            -len(Path(item.get("local_path", "")).parts),
+            item.get("local_path", "").casefold(),
+        ))
+        for key in ("local_path", "common_dir", "branch", "bare"):
+            if key in primary:
+                merged[key] = primary[key]
+        merged["dirty"] = any(item.get("dirty", False) for item in checkouts)
+        merged["worktrees"] = merge_worktrees([], [tree for item in checkouts for tree in item.get("worktrees", [])])
+        merged["worktree_count"] = sum(
+            max(0, len(item.get("worktrees", [])) - int(any(tree.get("primary") for tree in item.get("worktrees", []))))
+            for item in checkouts
+        )
+        merged["workspace_sets"] = sorted({value for item in checkouts for value in item.get("workspace_sets", [])})
+        merged["workspace_ids"] = sorted({value for item in checkouts for value in item.get("workspace_ids", [])})
+        merged["active_workspace_count"] = sum(item.get("active_workspace_count", 0) for item in checkouts)
+        merged["last_agent_access"] = max((item.get("last_agent_access", "") for item in checkouts), default="")
+        merged["recently_used"] = any(item.get("recently_used", False) for item in checkouts)
     return merged
 
 
@@ -201,7 +366,7 @@ def github_cache_stale(config: dict, refreshed_at: str) -> bool:
 
 LOCAL_FIELDS = {
     "local_path", "common_dir", "local", "bare", "branch", "dirty",
-    "worktree_count", "last_commit_at", "workspace_sets", "workspace_ids",
+    "worktree_count", "worktrees", "local_checkouts", "last_commit_at", "workspace_sets", "workspace_ids",
     "active_workspace_count", "last_agent_access", "recently_used",
 }
 
@@ -226,11 +391,15 @@ def refresh(include_github: bool) -> dict:
     metadata = workspace_metadata()
     paths = set(candidate_paths(config))
     paths.update(Path(path) for path in metadata)
+    worktree_cache: dict[str, list[dict]] = {}
     for path in sorted(paths):
-        record = git_record(path)
+        record = git_record(path, worktree_cache)
         if not record:
             continue
-        record.update(metadata.get(record["local_path"], {}))
+        workspace = metadata.get(record["local_path"], {})
+        record.update(workspace)
+        if record.get("local_checkouts"):
+            record["local_checkouts"][0].update(workspace)
         records[record["id"]] = merge_record(records.get(record["id"], {}), record)
     github_refreshed_at = now() if include_github else previous.get("github_refreshed_at", "")
     result = {

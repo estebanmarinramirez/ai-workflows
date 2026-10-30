@@ -2,7 +2,8 @@
 
 set -o pipefail
 
-AW_VERSION=1.12.0
+AW_VERSION_FILE="$(dirname "${BASH_SOURCE[0]}")/../VERSION"
+if [[ -f $AW_VERSION_FILE ]]; then AW_VERSION=$(<"$AW_VERSION_FILE"); else AW_VERSION=unknown; fi
 AW_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces
 AW_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/agent-workspaces
 AW_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}/agent-workspaces
@@ -559,9 +560,10 @@ aw_collision_json() {
       range(0; $roles|length) as $i | range($i+1; $roles|length) as $j |
       (($roles[$i].files - ($roles[$i].files - $roles[$j].files))) as $shared |
       select($shared|length>0) | {left:$roles[$i].role,right:$roles[$j].role,files:$shared,
+        identical:(($roles[$i].commits[-1] // "") != "" and $roles[$i].commits[-1] == $roles[$j].commits[-1]),
         critical:[$shared[]|select(test("(^|/)(Cargo.lock|package-lock.json|pnpm-lock.yaml|yarn.lock|.*migration.*)$";"i"))]}
     ]) as $overlaps |
     {base:$base,roles:$roles,merges:$merges,overlaps:$overlaps,
       lockfile_policy:{manual_merge:false,instruction:"Resolve Cargo manifests first; take a known-good Cargo.lock side; regenerate affected packages with cargo update -p <crate> --precise <version>; run locked validation and review the diff.",files:([$overlaps[].files[] | select(endswith("Cargo.lock"))] | unique)},
-      safe:(($overlaps|length)==0 and ([$merges[]|select(.clean==false)]|length)==0)}'
+      safe:(([$overlaps[] | select(.identical|not)] | length)==0 and ([$merges[]|select(.clean==false)]|length)==0)}'
 }

@@ -15,7 +15,7 @@ from capacity import capacities, pool_id, read_object
 from models import validate
 from assignments import ChangeError
 
-DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'unknown_managed_providers':[], 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
+DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'unknown_managed_providers':[], 'credit_backed_managed_providers':[], 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
             'experiment_attempts_24h':2, 'experiment_concurrency':1,
             'managed_concurrency_per_pool':2, 'boost_minutes_24h':20, 'boost_max_minutes':10, 'experiment_timeout_seconds':120}
 PROFILES = {'codex':{'simple':('gpt-6-luna','low'),'standard':('gpt-6.1-sol','medium'),'complex':('gpt-6.1-sol','high')},
@@ -37,6 +37,7 @@ def settings(config):
     value=dict(DEFAULTS,**config.get('budget',{}))
     if type(value['enabled']) is not bool: raise ValueError('budget.enabled must be boolean')
     if not isinstance(value['unknown_managed_providers'],list) or any(x not in PROFILES for x in value['unknown_managed_providers']): raise ValueError('invalid budget.unknown_managed_providers')
+    if not isinstance(value['credit_backed_managed_providers'],list) or any(x not in PROFILES for x in value['credit_backed_managed_providers']): raise ValueError('invalid budget.credit_backed_managed_providers')
     if value['unknown_interactive'] not in ('warn','block'): raise ValueError('invalid budget.unknown_interactive')
     for key in ('external_reserve_fraction','experiment_reserve_fraction','effort_pressure_fraction'):
         if type(value[key]) not in (int,float) or not 0<=value[key]<1: raise ValueError('invalid budget.'+key)
@@ -66,8 +67,16 @@ def allows_unknown_managed(config,provider,pool,purpose='managed'):
             and (pool.get('remaining') is None or pool['remaining']>reserve(config)))
 
 
+def allows_credit_backed_managed(config,provider,purpose='managed'):
+    """Permit managed work whose extra provider credits aren't exposed to quota telemetry."""
+    return purpose=='managed' and provider in settings(config)['credit_backed_managed_providers']
+
+
 def check(config, provider, purpose='managed', interactive=False):
     if not settings(config)['enabled']: return
+    if allows_credit_backed_managed(config,provider,purpose):
+        print('budget: '+provider+' managed work is authorized to use provider credits; the separate credit balance is not verified or capped here.',file=sys.stderr)
+        return
     _, pools=capacities(config)
     pool=pools.get(pool_id(provider,config.get('routing',{})),{})
     # Partial authoritative evidence can forbid spending even when another

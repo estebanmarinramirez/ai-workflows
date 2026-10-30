@@ -21,6 +21,8 @@ if [[ $role == orchestrator ]]; then
 fi
 [[ $role == orchestrator ]] && profile=$(jq -r '.orchestrator_profile // "trusted"' "$HOME/.config/agent-workspaces/config.json")
 provider=$(agent-workspaces role-provider "$provider" "$role" "$workspace_id")
+configured_provider=$provider
+configured_profile=$profile
 worker_env=''
 if [[ $role != orchestrator && $role != integration ]] && command -v sccache >/dev/null 2>&1; then
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sccache"
@@ -40,20 +42,42 @@ set_session_metadata() {
 
 assignment_root=$(agent-workspaces workspace-root "$workspace_id" 2>/dev/null || true)
 if [[ -f $assignment_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$assignment_root/.coordination/agents.json" >/dev/null; then
+  handover_fallback=false
   # A checkpoint survives a reboot, but its tmux session does not. Recreate an
   # idle shell so the handover can launch only its designated successor.
   # Never resume the outgoing provider, and never replace a session that exists.
   if ! tmux has-session -t "$session" 2>/dev/null; then
     pending=$(jq -c --arg role "$role" 'first(.requests[] | select(.slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack")))' "$assignment_root/.coordination/agents.json")
+    pending_source=$(jq -r '.source // ""' <<<"$pending")
     provider=$(jq -r 'if .phase=="ready" then .outgoing_provider else .target.provider end' <<<"$pending")
     change_id=$(jq -r '.id' <<<"$pending")
     tmux new-session -d -s "$session" -c "$directory" bash --noprofile --norc || exit 1
     set_session_metadata
     tmux set-option -q -t "$session" @aw_handover_id "$change_id"
-    agent-workspaces agents "$workspace_id" apply "$change_id" || printf 'Handover remains pending; review with agent-workspaces agents %s\n' "$workspace_id" >&2
+    if apply_output=$(agent-workspaces agents "$workspace_id" apply "$change_id" 2>&1); then
+      [[ -z $apply_output ]] || printf '%s\n' "$apply_output"
+    else
+      printf '%s\n' "$apply_output" >&2
+      case "$apply_output" in
+        *'Task routing intent changed'*|*'Routing preferences changed'*|*'Routing task intent is missing'*)
+          if [[ $pending_source == routing ]] && agent-workspaces agents "$workspace_id" cancel "$change_id" >/dev/null; then
+            tmux set-option -q -t "$session" @aw_handover_id ''
+            provider=$configured_provider
+            profile=$configured_profile
+            handover_fallback=true
+            printf 'Discarded stale routed handover %s; launching with the configured %s provider.\n' "$change_id" "$provider" >&2
+          else
+            printf 'Handover remains pending; review with agent-workspaces agents %s\n' "$workspace_id" >&2
+          fi
+          ;;
+        *) printf 'Handover remains pending; review with agent-workspaces agents %s\n' "$workspace_id" >&2 ;;
+      esac
+    fi
   fi
-  [[ $role == orchestrator ]] && agent-workspaces monitor-start "$workspace_id" >/dev/null 2>&1
-  exec tmux attach-session -t "$session"
+  if [[ $handover_fallback == false ]]; then
+    [[ $role == orchestrator ]] && agent-workspaces monitor-start "$workspace_id" >/dev/null 2>&1
+    exec tmux attach-session -t "$session"
+  fi
 fi
 was_started=false
 if [[ -n $state_file ]]; then

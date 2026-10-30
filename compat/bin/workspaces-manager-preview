@@ -2,7 +2,32 @@
 set -euo pipefail
 identity=${1:?identity}
 [[ $identity != __* ]] || exit 0
-agent-workspaces catalog show | jq -r --arg id "$identity" '
+catalog=$(agent-workspaces catalog show)
+if [[ $identity == wt:* ]]; then
+  token=${identity#wt:}
+  tree_index=${token##*:}
+  repository_id=${token%:*}
+  [[ $tree_index =~ ^[0-9]+$ ]] || exit 0
+  jq -r --arg id "$repository_id" --argjson index "$tree_index" '
+    .repositories[] | select(.id==$id) as $repository |
+    ($repository.worktrees[$index]) as $tree |
+    if $tree == null then empty else
+      "\u001b[1m" + $repository.name + " · worktree\u001b[0m\n\n" +
+      "Repository " + ($repository.local_path // "—") + "\n" +
+      "Workspace  " + (if ($tree.workspace // "") != "" then $tree.workspace else "—" end) + "\n" +
+      "Branch     " + ($tree.branch // "(detached)") + "\n" +
+      "About      " + (if ($tree.subject // "") != "" then $tree.subject else "No commit summary" end) + "\n" +
+      "Location   " + ($tree.path // "—") + "\n" +
+      "Commit     " + (if ($tree.head // "") != "" then $tree.head[0:12] else "—" end) + "\n" +
+      "State      " + (if ($tree.prunable // false) then "prunable · " + ($tree.prunable_reason // "")
+                        elif ($tree.exists // false) and ($tree.registered // true) then "registered"
+                        elif ($tree.exists // false) then "unregistered worktree"
+                        else "missing folder" end)
+    end
+  ' <<<"$catalog"
+  exit 0
+fi
+jq -r --arg id "$identity" '
   .repositories[] | select(.id==$id) |
   "\u001b[1m" + .name + "\u001b[0m\n\n" +
   (if .local then "Local      " + .local_path else "GitHub     " + (.github // .web_url) end) + "\n" +
@@ -10,9 +35,20 @@ agent-workspaces catalog show | jq -r --arg id "$identity" '
   "\nBranch     " + (.branch // .default_branch // "—") +
   "\nVisibility " + (if .private then "private" else "public" end) +
   "\nWorktrees  " + ((.worktree_count // 0)|tostring) +
+  (if (.worktrees // [] | map(select(.primary != true)) | length)>0 then
+    "\n\nBranches and locations\n" +
+    ([.worktrees[] | select(.primary != true) |
+      "  " + (.branch // "(detached)") +
+      (if (.subject // "") != "" then " — " + (.subject|gsub("[[:cntrl:]]"; " ")) else "" end) +
+      (if (.workspace // "") != "" then " · " + .workspace else "" end) +
+      "\n    " + (.path // "—") +
+      (if (.registered // true) then "" else "  · unregistered" end) +
+      (if .prunable then "  · prunable" else "" end)
+    ] | join("\n"))
+   else "" end) +
   "\nWorkspaces " + ((.workspace_sets // [])|join(", ")|if .=="" then "—" else . end) +
   "\nActive     " + ((.active_workspace_count // 0)|tostring) +
   "\nDirty      " + ((.dirty // false)|tostring) +
   "\nUpdated    " + (.last_agent_access // .remote_pushed_at // .last_commit_at // "—") +
   "\nRemote     " + (.remote // "—")
-'
+' <<<"$catalog"

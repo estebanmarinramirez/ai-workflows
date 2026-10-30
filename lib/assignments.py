@@ -359,6 +359,16 @@ class Assignments:
             run(['tmux', 'set-option', '-t', session, '@aw_provider', record['outgoing_provider']])
             run(['tmux', 'set-option', '-t', session, '@aw_provider_session_id', record.get('outgoing_session_id', '')])
             run(['tmux', 'set-option', '-t', session, '@aw_handover_id', ''])
+        elif record['phase'] == 'ready':
+            # A failed startup can leave its idle Bash carrying this request's
+            # generation marker. Clear only that marker; never touch a newer
+            # handover or change the outgoing provider session.
+            try:
+                generation = run(['tmux', 'show-option', '-qv', '-t', record['session'], '@aw_handover_id'])
+            except ChangeError:
+                generation = ''
+            if generation == change_id:
+                run(['tmux', 'set-option', '-t', record['session'], '@aw_handover_id', ''])
         record['phase'] = 'cancelled'
         record['cancelled_at'] = now()
         self.save(state)

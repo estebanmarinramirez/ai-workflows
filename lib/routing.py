@@ -96,6 +96,9 @@ class Router:
         report = dict(policy_version='capacity-routing-v2',policy_kind='deterministic_capacity_heuristic',schema_version=1, workspace_id=self.store.workspace, mode=self.policy.get('mode', 'off'),
                       task=str(task_path) if task_path else None, difficulty=difficulty,
                       pools=self.pools, decisions=[], warnings=[])
+        credit_backed = set(budget.settings(self.config)['credit_backed_managed_providers'])
+        report['warnings'].extend(f'{provider}: routing may use provider credits not represented in quota telemetry'
+                                  for provider in sorted(credit_backed))
         workspace_policy = read_object(self.root / 'workspace.json').get('routing', {})
         effort_mode = workspace_policy.get('effort_mode', self.policy.get('effort_mode', 'fixed'))
         if effort_mode not in ('auto', 'balanced', 'fixed'): raise ChangeError('Effort mode must be auto, balanced or fixed')
@@ -134,7 +137,8 @@ class Router:
                 continue
             # Never infer spare capacity from missing, stale or invalid evidence.
             current_capacity = self.pools.get(current_pool, {})
-            if current_capacity.get('state', 'unknown') == 'unknown':
+            current_credit_backed = budget.allows_credit_backed_managed(self.config,current['provider'])
+            if current_capacity.get('state', 'unknown') == 'unknown' and not current_credit_backed:
                 row.update(action='unknown', reason='current account capacity is unverified; keep settings')
                 continue
             recent = [r for r in state['requests'].values() if r['slot'] == slot and r.get('source') == 'routing'
@@ -143,22 +147,33 @@ class Router:
                 latest = max(recent, key=lambda r: r.get('requested_at', ''))
                 changed = timestamp(latest.get('accepted_at') or latest.get('cancelled_at') or latest.get('requested_at'))
                 same_policy = latest.get('routing', {}).get('difficulty') == difficulty and latest.get('routing', {}).get('effort_mode') == effort_mode
-                if same_policy and changed and (self.now-changed).total_seconds() < self.policy['cooldown_seconds'] and current_capacity.get('remaining', 0) > max(self.policy['reserve_fraction'],budget.reserve(self.config)) and (effort_mode != 'balanced' or current == budget.target(self.config,current['provider'],difficulty,budget.under_pressure(self.config,current_capacity),self.store.workspace,role=='lead',self.now.timestamp())):
+                current_pressure = budget.under_pressure(self.config,current_capacity) or (current_credit_backed and current_capacity.get('used') is None)
+                if same_policy and changed and (self.now-changed).total_seconds() < self.policy['cooldown_seconds'] and (current_credit_backed or current_capacity.get('remaining', 0) > max(self.policy['reserve_fraction'],budget.reserve(self.config))) and (effort_mode != 'balanced' or current == budget.target(self.config,current['provider'],difficulty,current_pressure,self.store.workspace,role=='lead',self.now.timestamp())):
                     row.update(action='cooldown', reason='recent routing change; avoid switching churn')
                     continue
             candidates = []
             for provider in eligible:
                 pool = pool_id(provider, self.policy)
                 capacity = self.pools[pool]
-                if capacity['state'] != 'available': continue
-                reserve = max(0 if review else self.policy['reserve_fraction'],budget.reserve(self.config))
-                usable = capacity['remaining'] - reserve
-                if usable <= 0: continue
+                credit_backed_provider = budget.allows_credit_backed_managed(self.config,provider)
+                if capacity['state'] != 'available' and not credit_backed_provider: continue
+                if credit_backed_provider:
+                    # The provider's separate credit balance is absent from telemetry.
+                    # Treat it as eligible and lower effort when quota is unknown.
+                    usable = 1.0
+                else:
+                    reserve = max(0 if review else self.policy['reserve_fraction'],budget.reserve(self.config))
+                    usable = capacity['remaining'] - reserve
+                    if usable <= 0: continue
                 profile = self.policy.get('profiles', {}).get(difficulty, {}).get(provider)
                 if not isinstance(profile, dict): continue
                 model = profile.get('model') or self.config.get('model_policy', {}).get(provider, {}).get('model')
                 effort = profile.get('effort', 'high')
-                pressure = budget.under_pressure(self.config,capacity) if effort_mode=='balanced' else capacity['used'] >= self.policy['pressure_fraction']
+                if effort_mode == 'balanced':
+                    pressure = budget.under_pressure(self.config,capacity) or (credit_backed_provider and capacity.get('used') is None)
+                else:
+                    used = capacity.get('used')
+                    pressure = (used is None and credit_backed_provider) or (used is not None and used >= self.policy['pressure_fraction'])
                 if pressure: effort = profile.get('pressure_effort', effort)
                 target = dict(provider=provider, model=model, effort=effort)
                 if effort_mode == 'fixed':
@@ -272,11 +287,12 @@ class Router:
                 reasons.append(f'{slot}: finish or cancel pending handover')
             provider = provider_for_slot(self.root, slot, task, self.config)
             pool = self.pools.get(pool_id(provider, self.policy), {})
+            credit_backed_provider = budget.allows_credit_backed_managed(self.config,provider)
             is_review = review or bool(task and (slot != task.get('lead') or task.get('stage') in ('review', 'verify')))
             reserve = max(0 if is_review else self.policy['reserve_fraction'],budget.reserve(self.config))
-            if budget.settings(self.config)['enabled'] and pool.get('state') != 'available' and not budget.allows_unknown_managed(self.config,provider,pool):
+            if budget.settings(self.config)['enabled'] and pool.get('state') != 'available' and not budget.allows_unknown_managed(self.config,provider,pool) and not credit_backed_provider:
                 reasons.append(f'{slot}: budget requires fresh authoritative quota')
-            if pool.get('remaining') is not None and pool['remaining'] <= reserve:
+            if pool.get('remaining') is not None and pool['remaining'] <= reserve and not credit_backed_provider:
                 reasons.append(f'{slot}: account quota is exhausted or reserved for review; wait for fresh capacity or route to another account')
         return reasons
 
