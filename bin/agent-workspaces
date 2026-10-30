@@ -173,6 +173,7 @@ case "$cmd" in
     done
     [[ -n $task && -n $role && -n $state ]] || aw_die 'status requires --task, --role, and --state'
     aw_valid_state "$state" || aw_die "invalid state: $state"
+    [[ $state != waived ]] || aw_die 'waived is recorded only by waive-role --confirmed-by-user --reason'
     [[ -d $task ]] || aw_die "task directory not found: $task"
     aw_require_no_handover "$task"
     status_file="$task/$role.status.json"; now=$(aw_now)
@@ -345,31 +346,41 @@ case "$cmd" in
     ;;
   monitor-loop)
     workspace_id=${1:?workspace id}
+    # A positive second argument bounds one process for deterministic tests.
+    # The installed monitor invokes this command with the workspace id only.
+    max_ticks=${2:-}
+    [[ -z $max_ticks || $max_ticks =~ ^[1-9][0-9]*$ ]] || aw_die 'monitor-loop tick count must be a positive integer'
     interval=$(jq -r '.monitor_interval_seconds // 15' "$AW_CONFIG_FILE")
     [[ $interval =~ ^[0-9]+$ && $interval -ge 5 ]] || interval=15
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
-    signature_file="$workspace_root/.orchestrator/.state-signature"
+    monitor_tick=0
     while :; do
+      monitor_tick=$((monitor_tick + 1))
+      if [[ -n ${AW_MONITOR_TICK_HOOK:-} ]]; then
+        AW_MONITOR_TICK=$monitor_tick "$AW_MONITOR_TICK_HOOK" || true
+      fi
       "$0" routing "$workspace_id" reconcile >/dev/null 2>&1 || true
       "$0" agents "$workspace_id" reconcile >/dev/null 2>&1 || true
       "$0" reconcile-dispatch "$workspace_id" >/dev/null 2>&1 || true
       "$0" reconcile-reviewers "$workspace_id" >/dev/null 2>&1 || true
-      snapshot_file=$("$0" snapshot "$workspace_id" --write 2>/dev/null || true)
-      if [[ -s $snapshot_file ]]; then
-        signature=$(sed '/^Updated:/d' "$snapshot_file" | sha256sum | awk '{print $1}')
-        previous=''; [[ -f $signature_file ]] && read -r previous <"$signature_file"
-        printf '%s\n' "$signature" >"$signature_file"
-        if [[ -n $previous && $signature != "$previous" ]]; then
-          "$0" attention "$workspace_id" >/dev/null 2>&1 || true
-          "$0" event-review "$workspace_id" >/dev/null 2>&1 || true
-          printf '%s\n' "$signature" >"$workspace_root/.orchestrator/.pending-wake"
-        fi
+      # The snapshot stays fresh for the orchestrator. Its timestamps and
+      # telemetry are not themselves a reason to wake.
+      "$0" snapshot "$workspace_id" --write >/dev/null 2>&1 || true
+      if aw_queue_orchestrator_wake "$workspace_root"; then
+        "$0" attention "$workspace_id" >/dev/null 2>&1 || true
+        "$0" event-review "$workspace_id" >/dev/null 2>&1 || true
       fi
       if [[ -s $workspace_root/.orchestrator/.pending-wake ]]; then
         read -r pending_signature <"$workspace_root/.orchestrator/.pending-wake"
         "$0" wake "$workspace_id" "$pending_signature" >/dev/null 2>&1 || true
       fi
-      sleep "$interval"
+      if [[ -n $max_ticks ]]; then
+        if [[ $monitor_tick -ge $max_ticks ]]; then
+          break
+        fi
+      else
+        sleep "$interval"
+      fi
     done
     ;;
   wake)
@@ -377,8 +388,10 @@ case "$cmd" in
     workspace_root=$(aw_workspace_root "$workspace_id") || aw_die "unknown workspace: $workspace_id"
     pending_file="$workspace_root/.orchestrator/.pending-wake"
     delivered_file="$workspace_root/.orchestrator/.wake-signature"
-    delivered=''; [[ -f $delivered_file ]] && read -r delivered <"$delivered_file"
-    if [[ $delivered == "$signature" ]]; then
+    delivered=''; [[ -f $delivered_file ]] && read -r delivered <"$delivered_file" || true
+    semantic=$(aw_actionable_signature "$workspace_root" || true)
+    # A handover token and the semantic signature are one event once delivered.
+    if [[ -n $delivered && ( $delivered == "$signature" || ( -n $semantic && $delivered == "$semantic" ) ) ]]; then
       [[ ! -f $pending_file ]] || mv "$pending_file" "$workspace_root/.orchestrator/.pending-wake.delivered"
       exit 0
     fi
@@ -400,9 +413,19 @@ case "$cmd" in
     tmux paste-buffer -b "$buffer" -t "$pane" -d
     tmux send-keys -t "$pane" Enter
     [[ $provider == codex ]] && { sleep 0.65; tmux send-keys -t "$pane" Enter; }
+    # Test seam for a change that lands after the signature was read. The
+    # recorded value stays the earlier signature, so the newer change remains
+    # undelivered and is retried instead of being marked acknowledged.
+    if [[ -n ${AW_WAKE_BEFORE_RECORD:-} ]]; then
+      "$AW_WAKE_BEFORE_RECORD" || true
+    fi
+    recorded=${semantic:-$signature}
     temporary=$(mktemp "$workspace_root/.orchestrator/.wake-signature.XXXXXX")
-    printf '%s\n' "$signature" >"$temporary"
+    printf '%s\n' "$recorded" >"$temporary"
     mv "$temporary" "$delivered_file"
+    temporary=$(mktemp "$workspace_root/.orchestrator/.state-signature.XXXXXX")
+    printf '%s\n' "$recorded" >"$temporary"
+    mv "$temporary" "$workspace_root/.orchestrator/.state-signature"
     [[ ! -f $pending_file ]] || mv "$pending_file" "$workspace_root/.orchestrator/.pending-wake.delivered"
     ;;
   attention)
@@ -701,6 +724,45 @@ PLIST
     aw_audit "${task%/.coordination/*}" agent.retried "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" '{task_id:$task,role:$role}')" orchestrator
     printf 'Retried %s for task %s.\n' "$role" "$(basename "$task")"
     ;;
+  waive-role)
+    task=${1:?task directory}; shift
+    aw_require_no_handover "$task"
+    confirmed=false; role=''; reason=''
+    while (($#)); do
+      case "$1" in
+        --confirmed-by-user) confirmed=true; shift ;;
+        --role) role=$2; shift 2 ;;
+        --reason) reason=$2; shift 2 ;;
+        *) aw_die "unknown waive-role option: $1" ;;
+      esac
+    done
+    [[ $confirmed == true ]] || aw_die 'waive-role requires --confirmed-by-user after explicit human approval'
+    [[ -n $role ]] || aw_die 'waive-role requires --role'
+    state="$task/state.json"; [[ -f $state ]] || aw_die "missing task: $task"
+    reason=$(jq -rn --arg reason "$reason" '$reason | gsub("^\\s+|\\s+$";"")')
+    [[ ${#reason} -ge 12 ]] || aw_die 'waive-role requires a concrete --reason'
+    lead=$(jq -r '.lead // empty' "$state")
+    [[ $role != "$lead" ]] || aw_die 'the lead role cannot be waived'
+    jq -e --arg role "$role" '.roles[$role]' "$state" >/dev/null || aw_die "role is not assigned: $role"
+    status_file=$(jq -r --arg role "$role" '.roles[$role].status_json // .roles[$role].status_file // empty' "$state")
+    [[ -n $status_file && -f $status_file ]] || aw_die "role status is missing: $role"
+    role_state=$(jq -r '.state // "dispatched"' "$status_file")
+    [[ $role_state == deferred ]] || aw_die "only a deferred role can be waived, found $role_state"
+    now=$(aw_now); actor=user:confirmed-via-orchestrator; workspace_root=${task%/.coordination/*}
+    aw_atomic_jq "$status_file" --arg at "$now" --arg reason "$reason" --arg actor "$actor" \
+      '.state="waived" | .updated_at=$at | .waiver={actor:$actor,at:$at,reason:$reason}'
+    exec {waiver_lock}>"$task/.state.lock"
+    flock "$waiver_lock"
+    aw_atomic_jq "$state" --arg role "$role" --arg at "$now" --arg reason "$reason" --arg actor "$actor" \
+      '.roles[$role].state="waived" | .roles[$role].waiver={actor:$actor,at:$at,reason:$reason}
+       | .gates.reduced_assurance=true | .updated_at=$at
+       | .transitions += [{from:"deferred",to:"waived",at:$at,actor:$actor,role:$role}]'
+    flock -u "$waiver_lock"
+    exec {waiver_lock}>&-
+    aw_audit "$workspace_root" role.waived "$(jq -cn --arg task "$(basename "$task")" --arg role "$role" --arg reason "$reason" --arg at "$now" '{task_id:$task,role:$role,reason:$reason,at:$at}')" "$actor"
+    "$0" refresh "$task" >/dev/null
+    "$0" next "$task"
+    ;;
   next)
     task=${1:?task directory}
     "$0" refresh "$task" >/dev/null
@@ -730,13 +792,15 @@ PLIST
     case "$action" in
       approve-integration)
         [[ $status == awaiting_integration ]] || aw_die "approve-integration requires awaiting_integration, found $status"
-        jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'all assigned roles must be completed'
+        aw_roles_allow_gate "$state" || aw_die 'assigned roles must be completed, or explicitly waived with an audited reason'
+        assurance=independent
+        jq -e 'any(.roles[]?; .state=="waived")' "$state" >/dev/null && assurance=reduced
         collision=$(aw_collision_json "$task")
         printf '%s\n' "$collision" | jq . >"$task/collision-report.json"
         [[ $(jq -r '.safe' <<<"$collision") == true ]] || aw_die 'agent branches have unresolved integration collisions'
         temporary=$(mktemp "$task/.state.json.XXXXXX")
         jq --arg at "$now" '.gates.integration_approved=true | .status="integration_ready" | .updated_at=$at | .transitions += [{from:"awaiting_integration",to:"integration_ready",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
-        aw_audit "$workspace_root" integration.approved '{"collision_check":"passed"}' user:confirmed-via-orchestrator
+        aw_audit "$workspace_root" integration.approved "$(jq -cn --arg assurance "$assurance" '{collision_check:"passed",assurance:$assurance}')" user:confirmed-via-orchestrator
         ;;
       dispatch-verification)
         [[ $status == awaiting_integration ]] || aw_die "dispatch-verification requires awaiting_integration, found $status"
@@ -765,9 +829,18 @@ PLIST
         repository=$(jq -r '.repository' "$state")
         [[ $(git -C "$repository" branch --show-current) == "$integration_branch" ]] || aw_die 'integration checkout is not on the recorded integration branch'
         [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
-        printf '# Integration result\n\n%s\n' "$evidence" >"$task/integration-result.md"
+        artifact=$(jq -r '.integration.head // empty' "$state")
+        if [[ -n $artifact ]]; then
+          # Evidence authorizes exactly the artifact the plan produced, in this checkout.
+          [[ $(git -C "$repository" rev-parse HEAD) == "$artifact" ]] || aw_die "integration branch moved: HEAD $(git -C "$repository" rev-parse HEAD) is not the recorded artifact $artifact; evidence cannot authorize a different checkout"
+          git -C "$repository" merge-base --is-ancestor "$(jq -r '.integration.base_sha' "$state")" HEAD || aw_die 'recorded artifact no longer descends from its recorded base'
+          assurance_line="Artifact: $artifact (branch $integration_branch, base $(jq -r '.integration.base_ref' "$state") $(jq -r '.integration.base_sha' "$state"))"
+        else
+          assurance_line="Artifact: legacy integration without a recorded base or head; not verified against an exact commit"
+        fi
+        printf '# Integration result\n\n%s\n\n%s\n' "$assurance_line" "$evidence" >"$task/integration-result.md"
         temporary=$(mktemp "$task/.state.json.XXXXXX")
-        jq --arg at "$now" '.status="awaiting_pr" | .updated_at=$at | .transitions += [{from:"integration_ready",to:"awaiting_pr",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
+        jq --arg at "$now" '.status="awaiting_pr" | .integration.recorded_at=$at | .updated_at=$at | .transitions += [{from:"integration_ready",to:"awaiting_pr",at:$at,actor:"user:confirmed-via-orchestrator"}]' "$state" >"$temporary" && mv "$temporary" "$state"
         aw_audit "$workspace_root" integration.recorded "$(jq -cn --arg evidence "$evidence" '{evidence:$evidence}')" user:confirmed-via-orchestrator
         ;;
       prepare-pr)
@@ -837,55 +910,97 @@ PLIST
   integrate)
     task=${1:?task directory}; shift
     aw_require_no_handover "$task"
-    confirmed=false; commits=()
+    confirmed=false; plan_only=false; fetch_first=false; base=''; approved_sha=''; from_checkout=false; commits=()
     while (($#)); do
       case "$1" in
         --confirmed-by-user) confirmed=true; shift ;;
-        --commit) commits+=("$2"); shift 2 ;;
+        --plan) plan_only=true; shift ;;
+        --fetch) fetch_first=true; shift ;;
+        --base) base=${2:?--base needs a ref}; shift 2 ;;
+        --base-sha) approved_sha=${2:?--base-sha needs a commit}; shift 2 ;;
+        --from-current-checkout) from_checkout=true; shift ;;
+        --commit) commits+=("${2:?--commit needs a commit}"); shift 2 ;;
         *) aw_die "unknown integrate option: $1" ;;
       esac
     done
+    state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
+    repository=$(jq -r '.repository' "$state")
+    if [[ $plan_only == true ]]; then
+      # Read-only: no refresh, no audit, no task metadata. The stored status is authoritative here.
+      status=$(jq -r '.status' "$state")
+      # Read-only preflight. --fetch only refreshes remote-tracking refs.
+      [[ $status =~ ^(awaiting_integration|integration_ready)$ ]] || aw_die "integrate --plan requires awaiting_integration or integration_ready, found $status"
+      [[ $from_checkout != true && -z $approved_sha ]] || aw_die 'integrate --plan takes --base and --commit only'
+      [[ $fetch_first != true ]] || git -C "$repository" fetch --prune origin >/dev/null || aw_die 'could not refresh origin; plan from the existing remote-tracking refs by omitting --fetch'
+      plan=$(aw_integration_plan_json "$task" "$base" "${commits[@]}") || exit 1
+      # The printed command must run as printed: quote every word and keep an explicit base.
+      printf -v apply 'agent-workspaces integrate %q --base-sha %q' "$task" "$(jq -r '.base.sha' <<<"$plan")"
+      if [[ $(jq -r '.base.source' <<<"$plan") == explicit ]]; then printf -v apply '%s --base %q' "$apply" "$(jq -r '.base.ref' <<<"$plan")"; fi
+      while IFS= read -r planned; do printf -v apply '%s --commit %q' "$apply" "$planned"; done < <(jq -r '.commits[].sha' <<<"$plan")
+      jq --arg apply "$apply --confirmed-by-user" '. + {apply:$apply}' <<<"$plan"
+      [[ $(jq -r '.ready' <<<"$plan") == true ]] || exit 2
+      exit 0
+    fi
+    [[ $fetch_first != true ]] || aw_die '--fetch belongs to integrate --plan; the applied base must match the approved plan exactly'
+    "$0" refresh "$task" >/dev/null
+    status=$(jq -r '.status' "$state")
     [[ $confirmed == true ]] || aw_die 'integrate requires --confirmed-by-user after explicit human approval'
     ((${#commits[@]})) || aw_die 'integrate requires at least one --commit'
-    state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
-    [[ $(jq -r '.status' "$state") == integration_ready ]] || aw_die 'task must be integration_ready'
+    [[ $status == integration_ready ]] || aw_die 'task must be integration_ready'
     jq -e '.gates.integration_approved==true' "$state" >/dev/null || aw_die 'integration handoff is not approved'
-    repository=$(jq -r '.repository' "$state")
-    [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
-    original_branch=$(git -C "$repository" branch --show-current)
-    [[ -n $original_branch ]] || aw_die 'integration checkout is detached'
-    for commit in "${commits[@]}"; do
-      git -C "$repository" cat-file -e "$commit^{commit}" 2>/dev/null || aw_die "unknown commit: $commit"
-      jq -e --arg commit "$commit" '[.roles[].status_json] | map(select(. != null))' "$state" >/dev/null
-      reported=false
-      while IFS= read -r status_json; do
-        [[ -f $status_json ]] || continue
-        jq -e --arg commit "$commit" '.commits | index($commit) != null' "$status_json" >/dev/null && { reported=true; break; }
-      done < <(jq -r '.roles[].status_json // empty' "$state")
-      [[ $reported == true ]] || aw_die "commit was not reported by an assigned agent: $commit"
-    done
-    set_slug=$(jq -r '.set' "$state"); task_id=$(basename "$task")
-    branch=$(sed -E 's/[^[:alnum:]_.\/-]+/-/g' <<<"integration/$set_slug/$task_id")
-    git -C "$repository" show-ref --verify --quiet "refs/heads/$branch" && aw_die "integration branch already exists: $branch"
-    git -C "$repository" switch -c "$branch"
-    integrated=()
-    for commit in "${commits[@]}"; do
+    [[ -z $(jq -r '.integration.branch // empty' "$state") ]] || aw_die "an integration plan was already applied on $(jq -r '.integration.branch' "$state"); record-integration or start a new task"
+    if [[ $from_checkout == true ]]; then
+      # Legacy behaviour, only on explicit request: base is whatever the checkout points at.
+      [[ -z $base && -z $approved_sha ]] || aw_die '--from-current-checkout cannot be combined with --base or --base-sha'
+      base=HEAD
+    else
+      [[ -n $approved_sha ]] || aw_die "integrate needs the approved base: run 'agent-workspaces integrate $task --plan --commit SHA...', review it, then pass --base-sha SHA (or --from-current-checkout to keep the legacy base explicitly)"
+    fi
+    plan=$(aw_integration_plan_json "$task" "$base" "${commits[@]}") || exit 1
+    if [[ $(jq -r '.ready' <<<"$plan") != true ]]; then
+      jq -r '.blockers[]' <<<"$plan" >&2
+      aw_die "integration preflight failed; fix the blockers above and run 'integrate $task --plan' again"
+    fi
+    base_ref=$(jq -r '.base.ref' <<<"$plan"); base_sha=$(jq -r '.base.sha' <<<"$plan"); base_source=$(jq -r '.base.source' <<<"$plan")
+    if [[ $from_checkout != true ]]; then
+      approved_full=$(git -C "$repository" rev-parse --verify -q "$approved_sha^{commit}" 2>/dev/null) || aw_die "unknown approved base commit: $approved_sha"
+      [[ $approved_full == "$base_sha" ]] || aw_die "integration base changed since the plan: approved $approved_full, now $base_sha at $base_ref; run 'integrate $task --plan' again and obtain a refreshed approval"
+    else
+      base_source=checkout-head
+    fi
+    original_branch=$(jq -r '.original.branch' <<<"$plan"); original_sha=$(jq -r '.original.sha' <<<"$plan")
+    mapfile -t full_commits < <(jq -r '.commits[].sha' <<<"$plan")
+    branch=$(jq -r '.integration_branch' <<<"$plan")
+    restore_checkout() {
+      git -C "$repository" cherry-pick --abort 2>/dev/null || true
+      if [[ -n $original_branch ]]; then
+        git -C "$repository" switch "$original_branch" >/dev/null 2>&1 || true
+      else
+        git -C "$repository" switch --detach "$original_sha" >/dev/null 2>&1 || true
+      fi
+      git -C "$repository" branch -D "$branch" >/dev/null 2>&1 || true
+    }
+    git -C "$repository" switch --no-track -c "$branch" "$base_sha" || aw_die "could not create $branch from $base_ref"
+    for commit in "${full_commits[@]}"; do
       if git -C "$repository" merge-base --is-ancestor "$commit" HEAD; then continue; fi
       if ! git -C "$repository" cherry-pick "$commit"; then
-        git -C "$repository" cherry-pick --abort 2>/dev/null || true
-        git -C "$repository" switch "$original_branch" >/dev/null 2>&1 || true
-        git -C "$repository" branch -D "$branch" >/dev/null 2>&1 || true
-        aw_die "integration conflict while cherry-picking $commit; checkout restored"
+        restore_checkout
+        aw_die "integration conflict while cherry-picking $commit; checkout restored to ${original_branch:-$original_sha}"
       fi
-      integrated+=("$commit")
     done
-    commits_json=$(printf '%s\n' "${commits[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')
-    jq -n --arg branch "$branch" --arg base "$original_branch" --arg at "$(aw_now)" --argjson commits "$commits_json" \
-      '{branch:$branch,base_branch:$base,selected_commits:$commits,integrated_at:$at}' >"$task/integration-plan.json"
-    aw_atomic_jq "$state" --arg branch "$branch" --arg at "$(aw_now)" --argjson commits "$commits_json" \
-      '.integration={branch:$branch,selected_commits:$commits,integrated_at:$at} | .updated_at=$at'
-    aw_audit "${task%/.coordination/*}" integration.commits.selected "$(jq -cn --arg branch "$branch" --argjson commits "$commits_json" '{branch:$branch,commits:$commits}')" user:confirmed-via-orchestrator
-    printf 'Integration branch: %s\nSelected commits: %s\n' "$branch" "${commits[*]}"
+    head_sha=$(git -C "$repository" rev-parse HEAD); tree_sha=$(git -C "$repository" rev-parse 'HEAD^{tree}')
+    commits_json=$(printf '%s\n' "${full_commits[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')
+    now=$(aw_now)
+    record=$(jq -n --arg branch "$branch" --arg base_ref "$base_ref" --arg base_sha "$base_sha" --arg base_source "$base_source" \
+      --arg original_branch "$original_branch" --arg original_sha "$original_sha" --arg head "$head_sha" --arg tree "$tree_sha" \
+      --arg plan_id "$(jq -r '.plan_id' <<<"$plan")" --arg at "$now" --argjson commits "$commits_json" \
+      '{branch:$branch,base_ref:$base_ref,base_sha:$base_sha,base_source:$base_source,original_branch:$original_branch,original_sha:$original_sha,
+        selected_commits:$commits,head:$head,tree:$tree,plan_id:$plan_id,integrated_at:$at}')
+    printf '%s\n' "$record" >"$task/integration-plan.json"
+    aw_atomic_jq "$state" --argjson record "$record" --arg at "$now" '.integration=$record | .updated_at=$at'
+    aw_audit "${task%/.coordination/*}" integration.commits.selected "$(jq -c '{branch,base_ref,base_sha,original_branch,original_sha,head,tree,commits:.selected_commits}' <<<"$record")" user:confirmed-via-orchestrator
+    printf 'Integration branch: %s\nBase: %s (%s)\nRestore point: %s\nArtifact: %s (tree %s)\nSelected commits: %s\n' \
+      "$branch" "$base_ref" "$base_sha" "${original_branch:-$original_sha}" "$head_sha" "$tree_sha" "${full_commits[*]}"
     ;;
   end)
     workspace_id=${1:?workspace id}
@@ -963,12 +1078,24 @@ PLIST
     state="$task/state.json"; [[ -f $state ]] || aw_die 'missing state.json'
     [[ $(jq -r '.status' "$state") == ready_for_pr ]] || aw_die 'task must be ready_for_pr'
     jq -e '.gates.integration_approved==true and .gates.pr_prepared==true and .gates.pr_approved==true' "$state" >/dev/null || aw_die 'integration and PR gates are not all approved'
-    jq -e '[.roles[].state] | all(.=="completed")' "$state" >/dev/null || aw_die 'every required role must be completed'
+    aw_roles_allow_gate "$state" || aw_die 'every required role must be completed, or explicitly waived with an audited reason'
+    if jq -e 'any(.roles[]?; .state=="waived")' "$state" >/dev/null; then
+      printf 'Assurance: reduced; waived roles are not independent review evidence\n'
+    fi
     collision=$(aw_collision_json "$task")
     [[ $(jq -r '.safe' <<<"$collision") == true ]] || aw_die 'agent branches have unresolved integration collisions'
     repository=$(jq -r '.repository' "$state"); title=$(jq -r '.pr.title // .objective' "$state"); branch=$(git -C "$repository" branch --show-current)
     [[ -n $branch ]] || aw_die 'integration checkout is detached'
     [[ -z $(git -C "$repository" status --porcelain) ]] || aw_die 'integration checkout is dirty'
+    recorded_branch=$(jq -r '.integration.branch // empty' "$state"); recorded_head=$(jq -r '.integration.head // empty' "$state")
+    if [[ -n $recorded_branch ]]; then
+      [[ $branch == "$recorded_branch" ]] || aw_die "checkout is on $branch, not the recorded integration branch $recorded_branch"
+    fi
+    if [[ -n $recorded_head ]]; then
+      [[ $(git -C "$repository" rev-parse HEAD) == "$recorded_head" ]] || aw_die "integration branch no longer matches the validated artifact $recorded_head; a rebased or extended branch needs new integration evidence"
+    else
+      printf 'Note: legacy integration record without an exact artifact; publishing the current branch head.\n'
+    fi
     git -C "$repository" fetch --prune origin
     base=$(aw_origin_base "$repository")
     read -r behind _ < <(git -C "$repository" rev-list --left-right --count "$base...HEAD")

@@ -69,9 +69,11 @@ agent-workspaces event-review WORKSPACE_ID
 agent-workspaces dispatch --workspace ID --template TEMPLATE --lead ROLE --seam SEAM --objective TEXT
 agent-workspaces sync WORKSPACE_ID [--confirmed-by-user]
 agent-workspaces activate-reviewers TASK_DIR [--roles ROLE ...]
+agent-workspaces waive-role TASK_DIR --role ROLE --reason REASON --confirmed-by-user
 agent-workspaces next TASK_DIR
 agent-workspaces advance TASK_DIR ACTION --confirmed-by-user [--title TITLE] [--evidence TEXT]
-agent-workspaces integrate TASK_DIR --commit SHA [--commit SHA...] --confirmed-by-user
+agent-workspaces integrate TASK_DIR --plan [--fetch] [--base REF] --commit SHA [--commit SHA...]
+agent-workspaces integrate TASK_DIR [--base REF] --base-sha SHA --commit SHA [--commit SHA...] --confirmed-by-user
 agent-workspaces status --task DIR --role ROLE --state STATE [options]
 agent-workspaces refresh TASK_DIR
 agent-workspaces collision TASK_DIR
@@ -91,6 +93,8 @@ agent-workspaces archive
 agent-workspaces publish TASK_DIR [--confirmed-by-user]
 agent-workspaces migrate
 ```
+
+Integration starts from an explicit base, never from whatever the integration checkout happens to be on. `integrate --plan` is a read-only preflight (it writes no task, audit or workspace file): it resolves the origin default branch (or `--base REF`), records the base ref and SHA, the checkout's original branch and SHA, and the validated commit selection, and prints the exact, shell-quoted `integrate` command to apply, including an explicit `--base` (`--fetch` only refreshes remote-tracking refs first). Applying that plan with `--base-sha` creates `integration/SET/TASK` from the approved base inside the same bounded operation, with no further approval. A dirty checkout, an unknown base or commit, or a base that moved since the plan is refused, and the plan must be refreshed. Existing refs are preserved, and a conflict restores the original checkout. The recorded head and tree identify the artifact: `record-integration` and `publish` refuse a different branch or head. A legacy task keeps the old base only with an explicit `--from-current-checkout`, which is recorded as such. Integration approval does not authorize publication; `publish` keeps its own confirmation.
 
 The Omarchy installer creates a timestamped rollback bundle before replacing managed files.
 
@@ -116,7 +120,7 @@ reflows existing windows without interrupting a checkpointed handover.
 sets. On macOS, worker slots remain available through tmux; automatic placement
 of four desktop windows is an Omarchy feature.
 
-The monitor itself is deterministic and consumes no model tokens. When material state changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. A deduplicated pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval.
+The monitor itself is deterministic and consumes no model tokens. It wakes the orchestrator only when the actionable signature changes: task status, gate values, role commits and changed files, integration and pull-request records, dispatch and reviewer eligibility, next actions, or a pending handover. Snapshot timestamps, quota telemetry, status evidence, and audit lines do not create another wake. When that signature changes, the optional event reviewer writes a short `briefing.md` using the configured lightweight model. One pending event then wakes the persistent conversational Orchestrator as soon as its prompt is empty; busy turns and user-typed drafts are never overwritten. Undelivered events retry every monitor interval, and an acknowledged signature is not delivered again after a monitor restart.
 
 Visible provider prompts are not treated as completion signals because some CLIs render their composer while tools are still running. Workflow state changes only from explicit agent reports, confirmed process failure, or an operator-initiated recovery.
 

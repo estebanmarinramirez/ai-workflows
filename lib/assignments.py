@@ -19,6 +19,7 @@ from models import validate
 from capacity import TERMINAL
 
 PENDING = {'requested', 'ready', 'launching', 'awaiting_ack'}
+SETTLED_ROLES = {'completed', 'deferred', 'waived'}
 
 
 class ChangeError(Exception):
@@ -114,11 +115,30 @@ class Assignments:
             raise ChangeError(f'Expected one managed session for {slot}; open the workspace first')
         return result[0]
 
+    def role_state(self, state, slot):
+        role = (state.get('roles') or {}).get(slot) or {}
+        recorded = role.get('state') or 'dispatched'
+        status_path = role.get('status_json') or role.get('status_file') or ''
+        if status_path and Path(status_path).is_file():
+            try:
+                reported = read(Path(status_path)).get('state')
+            except ChangeError:
+                reported = None
+            if reported:
+                recorded = reported
+        return recorded
+
     def active_tasks(self, slot):
+        # A listed slot is not active work once that role is finished, deferred,
+        # or explicitly waived. Terminal tasks, including superseded ones, never count.
         result = []
         for path in (self.root / '.coordination').glob('*/state.json'):
             state = read(path)
-            if state.get('status') not in TERMINAL and (slot == 'orchestrator' or slot in state.get('roles', {})):
+            if state.get('status') in TERMINAL:
+                continue
+            if slot == 'orchestrator' or (
+                slot in (state.get('roles') or {}) and self.role_state(state, slot) not in SETTLED_ROLES
+            ):
                 result.append(path.parent)
         return result
 
@@ -249,7 +269,7 @@ class Assignments:
         try: budget.check(policy,target['provider'])
         except ValueError as error: raise ChangeError(str(error)) from error
         if record.get('source') == 'routing':
-            from capacity import capacities, pool_id, read_object
+            from capacity import capacities, ordinary_allowance, pool_id, read_object
             routing = policy.get('routing', {})
             allowed = routing.get('allowed_models', {}).get(target['provider'])
             if allowed is not None and target['model'] not in allowed:
@@ -274,7 +294,8 @@ class Assignments:
             expiry = record['routing'].get('boost_expires')
             if expiry and expiry <= datetime.now(timezone.utc).timestamp():
                 raise ChangeError('Temporary boost expired; cancel and replan')
-            if pool.get('state') != 'available' or pool['remaining'] <= reserve:
+            if not (ordinary_allowance(pool, reserve)[0] or
+                    budget.allows_credit_backed_managed(policy, target['provider'], pool=pool)):
                 raise ChangeError('Target account no longer has fresh available capacity; cancel and replan')
         # Resolve explicitly against the selected settings without publishing
         # them as active ownership before the successor acknowledges.
@@ -359,6 +380,16 @@ class Assignments:
             run(['tmux', 'set-option', '-t', session, '@aw_provider', record['outgoing_provider']])
             run(['tmux', 'set-option', '-t', session, '@aw_provider_session_id', record.get('outgoing_session_id', '')])
             run(['tmux', 'set-option', '-t', session, '@aw_handover_id', ''])
+        elif record['phase'] == 'ready':
+            # A failed startup can leave its idle Bash carrying this request's
+            # generation marker. Clear only that marker; never touch a newer
+            # handover or change the outgoing provider session.
+            try:
+                generation = run(['tmux', 'show-option', '-qv', '-t', record['session'], '@aw_handover_id'])
+            except ChangeError:
+                generation = ''
+            if generation == change_id:
+                run(['tmux', 'set-option', '-t', record['session'], '@aw_handover_id', ''])
         record['phase'] = 'cancelled'
         record['cancelled_at'] = now()
         self.save(state)

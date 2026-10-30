@@ -27,32 +27,25 @@ with tempfile.TemporaryDirectory() as directory:
     prefix = f'org.omarchy.agentworkspaces.r{repo_hash}.stest'
     roles = ['claude', 'codex', 'grok', 'orchestrator']
     clients = [{'class': f'{prefix}.{role}', 'initialClass': f'{prefix}.{role}', 'address': f'0x{i+1}',
-                'workspace': {'id': 6}, 'floating': True} for i, role in enumerate(roles)]
+                'workspace': {'id': 6}, 'floating': True, 'at': [0, 0], 'size': [100, 100]} for i, role in enumerate(roles)]
     (base / 'clients.json').write_text(json.dumps(clients))
     def stub(name, source):
         path = binaries / name
         path.write_text(source)
         path.chmod(0o755)
     for name in ('gum', 'fzf', 'omarchy-restart-gum', 'omarchy-agent-pane', 'omarchy-agent-pane-active', 'omarchy-agent-grid-preview', 'claude', 'codex', 'grok'):
-        stub(name, '#!/bin/sh\nexit 0\n')
+        stub(name, '#!/bin/sh\necho "$*"\nexit 0\n')
     stub('omarchy-restart-gum', '#!/bin/sh\ntrue\n')
     stub('xdg-terminal-exec', '#!/bin/sh\nprintf "ghostty\\n"\n')
-    stub('tmux', '#!/bin/sh\nexit 1\n') # No real sessions; no relaunch needed.
+    stub('tmux', '#!/bin/sh\ncase "$1" in has-session) exit 0;; list-panes) echo %1;; esac\n') # Existing persistent sessions; no relaunch needed.
     stub('agent-workspaces', '''#!/bin/bash
-case "$1" in snapshot|prepare-repository) exit 0;; esac
+case "$1" in
+snapshot|prepare-repository) exit 0;;
+monitor-start) printf '%s\n' "$2" >> "$FIXTURE/monitor-starts"; exit "${MONITOR_FAILURE:-0}";;
+esac
 exec "$REAL_CLI" "$@"
 ''')
-    stub('hyprctl', '''#!/usr/bin/env python3
-import json, os, pathlib, sys
-base = pathlib.Path(os.environ['FIXTURE'])
-a = sys.argv[1:]
-with (base/'calls').open('a') as stream: stream.write(json.dumps(a)+'\\n')
-if a[0] == 'clients': print((base/'clients.json').read_text())
-elif a[0] == 'monitors': print((base/'monitor.json').read_text())
-elif a[0] == 'getoption': print(' {"css":"2"}')
-elif a[0] == 'dispatch': print('ok')
-else: raise SystemExit('Unexpected compositor call: '+repr(a))
-''')
+    shutil.copy(ROOT / 'tests/hyprctl-double', binaries / 'hyprctl')
     env = dict(os.environ, HOME=str(home), PATH=f'{binaries}:{os.environ["PATH"]}',
                XDG_CONFIG_HOME=str(home / '.config'), XDG_DATA_HOME=str(home / '.local/share'),
                AW_LIB=str(ROOT / 'lib/core.sh'), REAL_CLI=str(ROOT / 'bin/agent-workspaces'),
@@ -74,4 +67,20 @@ else: raise SystemExit('Unexpected compositor call: '+repr(a))
         assert manifest['layout'] == 'four-windows' and len(manifest['agents']) == 3
         assert [row['role'] for row in manifest['agents']] == roles[:3]
         assert sum(c[0] == 'clients' for c in calls) <= 9, calls # one snapshot per readiness poll
+    assert (base / 'monitor-starts').read_text().splitlines() == [f'{repo_hash}:test'] * 2
+    # The manager's existing-session reopen path must propagate monitor startup failure.
+    failed = subprocess.run(['bash', str(ROOT / 'compat/bin/omarchy-agent-grid')],
+                            env=dict(env, MONITOR_FAILURE='1'), capture_output=True, text=True)
+    assert failed.returncode != 0 and 'monitor could not start' in failed.stdout + failed.stderr
+    # A restore that split the set reunites it where most windows already are.
+    split = json.loads((base / 'clients.json').read_text())
+    split.insert(0, split.pop())  # orchestrator first, alone on another workspace
+    split[0]['workspace'] = {'id': 3, 'name': '3'}
+    (base / 'clients.json').write_text(json.dumps(split))
+    (workspace / '.hypr-workspace').unlink(missing_ok=True)
+    (base / 'calls').write_text('')
+    subprocess.run(['bash', str(ROOT / 'compat/bin/omarchy-agent-grid')], env=env, check=True, capture_output=True, text=True)
+    after = json.loads((base / 'clients.json').read_text())
+    assert {c['workspace']['id'] for c in after} == {6}, after
+    assert (workspace / '.hypr-workspace').read_text().strip() == '6'
     print('ok - four windows share one desktop; reopen preserves roles; scaled/rotated/negative-origin geometry')

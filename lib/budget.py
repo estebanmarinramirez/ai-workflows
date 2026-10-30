@@ -2,6 +2,7 @@
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -11,13 +12,14 @@ import sys
 import time
 import uuid
 
-from capacity import capacities, pool_id, read_object
+from capacity import account_denied, capacities, ordinary_allowance, pool_id, read_object
 from models import validate
 from assignments import ChangeError
 
-DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'unknown_managed_providers':[], 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
+DEFAULTS = {'enabled':False, 'unknown_interactive':'warn', 'unknown_managed_providers':[], 'credit_backed_managed_providers':[], 'external_reserve_fraction':.30, 'effort_pressure_fraction':.50, 'experiment_reserve_fraction':.50,
             'experiment_attempts_24h':2, 'experiment_concurrency':1,
-            'managed_concurrency_per_pool':2, 'boost_minutes_24h':20, 'boost_max_minutes':10, 'experiment_timeout_seconds':120}
+            'managed_concurrency_per_pool':2, 'boost_minutes_24h':20, 'boost_max_minutes':10, 'experiment_timeout_seconds':120,
+            'credit_minimum':{}}
 PROFILES = {'codex':{'simple':('gpt-6-luna','low'),'standard':('gpt-6.1-sol','medium'),'complex':('gpt-6.1-sol','high')},
             'claude':{'simple':('sonnet','low'),'standard':('sonnet','medium'),'complex':('opus','high')},
             'grok':{'simple':('grok-4.7-build-fast','low'),'standard':('grok-4.7-build-fast','medium'),'complex':('grok-4.6','high')}}
@@ -37,6 +39,7 @@ def settings(config):
     value=dict(DEFAULTS,**config.get('budget',{}))
     if type(value['enabled']) is not bool: raise ValueError('budget.enabled must be boolean')
     if not isinstance(value['unknown_managed_providers'],list) or any(x not in PROFILES for x in value['unknown_managed_providers']): raise ValueError('invalid budget.unknown_managed_providers')
+    if not isinstance(value['credit_backed_managed_providers'],list) or any(x not in PROFILES for x in value['credit_backed_managed_providers']): raise ValueError('invalid budget.credit_backed_managed_providers')
     if value['unknown_interactive'] not in ('warn','block'): raise ValueError('invalid budget.unknown_interactive')
     for key in ('external_reserve_fraction','experiment_reserve_fraction','effort_pressure_fraction'):
         if type(value[key]) not in (int,float) or not 0<=value[key]<1: raise ValueError('invalid budget.'+key)
@@ -44,6 +47,13 @@ def settings(config):
         raise ValueError('effort pressure must begin before the external reserve threshold')
     if value['experiment_reserve_fraction']<value['external_reserve_fraction']:
         raise ValueError('experiment reserve must protect the external reserve')
+    minimum=value['credit_minimum']
+    if not isinstance(minimum,dict) or any(k not in PROFILES or isinstance(v,bool) or not isinstance(v,(int,float,str)) for k,v in minimum.items()):
+        raise ValueError('invalid budget.credit_minimum')
+    for v in minimum.values():
+        try: ok=Decimal(str(v)).is_finite() and Decimal(str(v))>=0
+        except InvalidOperation: ok=False
+        if not ok: raise ValueError('invalid budget.credit_minimum')
     for key in ('experiment_attempts_24h','experiment_concurrency','managed_concurrency_per_pool','boost_minutes_24h','boost_max_minutes','experiment_timeout_seconds'):
         if type(value[key]) is not int or value[key]<1: raise ValueError('invalid budget.'+key)
     return value
@@ -66,14 +76,30 @@ def allows_unknown_managed(config,provider,pool,purpose='managed'):
             and (pool.get('remaining') is None or pool['remaining']>reserve(config)))
 
 
+def allows_credit_backed_managed(config,provider,purpose='managed',pool=None):
+    """Permit managed work whose extra provider credits aren't exposed to quota telemetry."""
+    return (purpose=='managed' and provider in settings(config)['credit_backed_managed_providers']
+            and (pool is None or (not account_denied(pool) and not (pool.get('credits') or {}).get('evidence_present'))))
+
+
 def check(config, provider, purpose='managed', interactive=False):
     if not settings(config)['enabled']: return
     _, pools=capacities(config)
     pool=pools.get(pool_id(provider,config.get('routing',{})),{})
+    # A fresh provider denial of ordinary usage outranks every allowance, exception and purpose.
+    if account_denied(pool): raise ValueError('budget: provider denies ordinary usage for this account')
+    if allows_credit_backed_managed(config,provider,purpose,pool):
+        print('budget: '+provider+' managed work is authorized to use provider credits; the separate credit balance is not verified or capped here.',file=sys.stderr)
+        return
+    # Fresh provider-confirmed credits continue ordinary managed work after the
+    # subscription is exhausted. Experiments and boosts stay on the subscription.
+    if purpose=='managed' and ordinary_allowance(pool,reserve(config,purpose))[0]: return
     # Partial authoritative evidence can forbid spending even when another
     # account alias has unknown limits. Never turn exhaustion into a warning.
     if pool.get('remaining') is not None and pool['remaining']<=reserve(config,purpose):
-        raise ValueError('budget: '+purpose+' would use protected quota; wait for reset or use another account')
+        paid=pool.get('credits') or {}
+        raise ValueError('budget: '+purpose+' would use protected quota; wait for reset or use another account'
+                         +('' if purpose!='managed' else '; paid credits unavailable ('+paid.get('reason','unknown')+')'))
     if pool.get('state')!='available':
         if allows_unknown_managed(config,provider,pool,purpose):
             print('budget: '+provider+' quota unknown; user-authorized managed-work exception active. Reserve is unverified.',file=sys.stderr)

@@ -7,10 +7,36 @@ record="$app_root/last-backup"
 backup=$(<"$record")
 [[ -d $backup && $backup == "$app_root/backups/"* ]] || { printf 'Invalid rollback bundle: %s\n' "$backup" >&2; exit 1; }
 
+restore_version=''
+if [[ -f $backup/install-root/VERSION ]]; then
+  restore_version=$(<"$backup/install-root/VERSION")
+fi
+if [[ -e $backup/agent-workspaces || -L $backup/agent-workspaces ]]; then
+  saved_target=$(readlink -f "$backup/agent-workspaces" 2>/dev/null || true)
+  if [[ $saved_target == "$app_root/"*/bin/agent-workspaces ]]; then
+    linked_version=${saved_target#"$app_root/"}
+    linked_version=${linked_version%%/*}
+    [[ -n $linked_version ]] && restore_version=$linked_version
+  fi
+fi
+if [[ ! $restore_version =~ ^[0-9]+(\.[0-9]+)*$ ]]; then restore_version=''; fi
+
+if [[ -d $backup/install-root ]]; then
+  [[ -n $restore_version ]] || { printf 'Rollback bundle has an install root without a version.\n' >&2; exit 1; }
+  restore_root="$app_root/$restore_version"
+  if [[ -d $restore_root ]]; then
+    displaced="$backup/rolled-forward-install-root-$restore_version"
+    [[ ! -e $displaced ]] || displaced="$displaced-$(date +%Y%m%d-%H%M%S)"
+    mv "$restore_root" "$displaced"
+  fi
+  mv "$backup/install-root" "$restore_root"
+fi
+
 if [[ -e $backup/agent-workspaces || -L $backup/agent-workspaces ]]; then
   cp -a --remove-destination "$backup/agent-workspaces" "$HOME/.local/bin/agent-workspaces"
 fi
-for saved in "$backup"/omarchy-agent-* "$backup"/omarchy-tmux-panel "$backup"/omarchy-tmux-panel-preview; do
+for saved in "$backup"/agent-workspaces-* "$backup"/workspaces "$backup"/workspaces-* \
+             "$backup"/omarchy-agent-* "$backup"/omarchy-tmux-panel "$backup"/omarchy-tmux-panel-preview; do
   [[ -f $saved ]] || continue
   cp "$saved" "$HOME/.local/bin/$(basename "$saved")"
   chmod +x "$HOME/.local/bin/$(basename "$saved")"
@@ -25,4 +51,7 @@ fi
 if [[ -f $backup/omarchy-menu.jsonc ]]; then
   cp "$backup/omarchy-menu.jsonc" "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 fi
-printf 'Restored managed files from %s. Worktrees, sessions, and task evidence were not changed.\n' "$backup"
+if [[ -n $restore_version ]]; then
+  printf '%s\n' "$restore_version" >"$app_root/current-version"
+fi
+printf 'Restored Agent Workspaces %s and managed files from %s. Worktrees, sessions, and task evidence were not changed.\n' "${restore_version:-current}" "$backup"

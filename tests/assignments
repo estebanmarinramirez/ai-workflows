@@ -196,6 +196,35 @@ class Handover(unittest.TestCase):
             self.store.apply(record['id'])
         self.assertEqual(len(self.launches), 1)
 
+    def test_settled_or_superseded_work_does_not_block_another_checkpoint(self):
+        other = self.root / '.coordination' / 't2'
+        other.mkdir()
+        base = a.read(self.task / 'state.json')
+        base['id'] = 't2'
+        base['status'] = 'superseded'
+        base['roles']['codex']['state'] = 'in_progress'
+        a.atomic(other / 'state.json', base)
+        record = self.request()
+        self.assertEqual(self.store.checkpoint(record['id'], self.note)['phase'], 'ready')
+        self.store.cancel(record['id'])
+        status = other / 'codex.status.json'
+        for role_state in ('completed', 'deferred', 'waived'):
+            base['status'] = 'awaiting_review'
+            base['roles']['codex']['state'] = 'in_progress'
+            base['roles']['codex']['status_json'] = str(status)
+            a.atomic(status, {'state': role_state, 'evidence': [], 'commits': []})
+            a.atomic(other / 'state.json', base)
+            record = self.request()
+            self.assertEqual(self.store.checkpoint(record['id'], self.note)['phase'], 'ready', role_state)
+            self.store.cancel(record['id'])
+        base['roles']['codex']['state'] = 'in_progress'
+        del base['roles']['codex']['status_json']
+        status.unlink()
+        a.atomic(other / 'state.json', base)
+        record = self.request()
+        with self.assertRaisesRegex(a.ChangeError, 'Other unfinished tasks'):
+            self.store.checkpoint(record['id'], self.note)
+
     def test_other_task_and_changed_checkpoint_are_protected(self):
         record = self.request()
         other = self.root / '.coordination/t2/state.json'
@@ -304,6 +333,22 @@ class Handover(unittest.TestCase):
             self.assertEqual(len(self.launches),1)
             with patch.dict(os.environ, AW_HANDOVER_ID=record['id']): self.store.accept(record['id'])
             self.assertEqual(self.store.load()['active']['codex']['source'],'routing')
+
+    def test_automatic_launch_accepts_confirmed_credits_but_not_unconfirmed_ones(self):
+        record = self.automatic_ready()
+        with patch.dict(os.environ, XDG_STATE_HOME=str(self.usage.parents[2])):
+            quota = a.read(self.usage/'claude.json')
+            quota['limits'][0]['percent'] = 1.0
+            a.atomic(self.usage/'claude.json',quota)
+            sidecar = self.usage.parent/'agent-workspaces-credits/claude.json'
+            credit = dict(provider='claude', source='fixture', unit='USD', observedAt=datetime.now(timezone.utc).isoformat(), hasCredits=True, unlimited=False,
+                          balance='12.5', ordinaryUsageAllowed=True, spendControlReached=True)
+            a.atomic(sidecar,credit)
+            with self.assertRaises(a.ChangeError): self.store.apply(record['id'])
+            self.assertEqual(self.launches,[])
+            a.atomic(sidecar,dict(credit,spendControlReached=False))
+            self.store.apply(record['id'])
+            self.assertEqual(len(self.launches),1)
 
     def test_automatic_launch_rechecks_current_model_allowlist(self):
         record = self.automatic_ready()

@@ -1,0 +1,77 @@
+#!/bin/bash
+# Cross-feature composition: identical-commit collision checks, terminal precedence,
+# handover freezing and the read-only integration plan must hold together.
+# Disposable local repositories only; no tmux, provider or desktop session.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" XDG_STATE_HOME="$fixture/state"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/agent-workspaces" "$XDG_STATE_HOME"
+cp "$root/config/config.json" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+unset AW_WORKSPACE_ID AW_HANDOVER_ID AW_HANDOVER_TARGET || true
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+cli() { AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" "$@"; }
+fail() { printf 'not ok - %s\n' "$*" >&2; exit 1; }
+
+repo=$fixture/repo
+git init -q -b main "$repo"
+printf 'base\n' >"$repo/f.txt"; git -C "$repo" add .; git -C "$repo" commit -qm base
+base=$(git -C "$repo" rev-parse HEAD)
+agent=$fixture/agent
+git -C "$repo" worktree add -q -b agents/x/set/claude "$agent"
+printf 'feature\n' >"$agent/f.txt"; git -C "$agent" commit -qam feature
+commit=$(git -C "$agent" rev-parse HEAD)
+
+workspace=$XDG_DATA_HOME/agent-workspaces/repo-hash/set
+task=$workspace/.coordination/t1
+mkdir -p "$task"
+jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex"]}' >"$workspace/workspace.json"
+report() { # role commits-json files-json
+  jq -n --arg r "$1" --argjson c "$2" --argjson f "$3" '{schema_version:1,task_id:"t1",role:$r,state:"completed",summary:"",updated_at:"x",evidence:[{command:"true",exit_code:0}],commits:$c,changed_files:$f,blockers:[]}' >"$task/$1.status.json"
+}
+state() { # status [extra jq object]
+  jq -n --arg repo "$repo" --arg agent "$agent" --arg task "$task" --arg status "$1" \
+    '{schema_version:2,id:"t1",workspace_id:"x:set",repository:$repo,set:"set",stage:"execute",status:$status,objective:"o",lead:"claude",
+      updated_at:"2026-10-22T00:00:00+02:00",
+      roles:{claude:{state:"completed",worktree:$agent,status_json:($task+"/claude.status.json")},codex:{state:"completed",worktree:$agent,status_json:($task+"/codex.status.json")}},
+      gates:{integration_approved:true},transitions:[]}' >"$task/state.json"
+}
+report claude "[\"$commit\"]" '["f.txt"]'
+report codex "[\"$commit\"]" '["f.txt"]'
+state integration_ready
+
+# 1. Identical commits reported by two roles are not a collision, yet missing/divergent ones still are.
+[[ $(cli collision "$task" | jq -r .safe) == true ]] || fail 'identical commits blocked'
+plan=$(cli integrate "$task" --plan --base main --commit "$commit")
+[[ $(jq -r '.ready' <<<"$plan") == true && $(jq -r '.commits|length' <<<"$plan") == 1 ]] || fail "plan with identical reports: $(jq -c . <<<"$plan")"
+report codex '["0000000000000000000000000000000000000001"]' '["f.txt"]'
+if cli collision "$task" >/dev/null 2>&1; then fail 'missing artifact passed collision'; fi
+report codex "[\"$commit\"]" '["f.txt"]'
+
+# 2. A pending handover freezes integration, plan and apply alike, and nothing is mutated.
+jq -n --arg task "$(realpath "$task")" '{requests:{c:{task:$task,phase:"ready"}}}' >"$workspace/.coordination/agents.json"
+[[ $(cli next "$task" | jq -r '.actions[0].id') == complete-handover ]] || fail 'handover did not take precedence in next'
+h=$(cd "$workspace" && find . -type f ! -name agents.json -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+if cli integrate "$task" --plan --base main --commit "$commit" >"$fixture/o" 2>&1 && [[ $(cat "$fixture/o" | jq -r '.ready // false') == true ]]; then
+  fail 'plan ready during pending handover'; fi
+if cli integrate "$task" --base main --base-sha "$base" --commit "$commit" --confirmed-by-user >/dev/null 2>&1; then fail 'apply ran during pending handover'; fi
+git -C "$repo" show-ref --verify --quiet refs/heads/integration/set/t1 && fail 'handover apply created a branch'
+rm -f "$workspace/.coordination/agents.json"
+
+# 3. A terminal task ignores handover requests and offers no action, without rewriting state.
+state superseded
+jq -n --arg task "$(realpath "$task")" '{requests:{c:{task:$task,phase:"awaiting_ack"}}}' >"$workspace/.coordination/agents.json"
+stamp=$(jq -c . "$task/state.json")
+[[ $(cli next "$task" | jq -r '.actions|length') == 0 ]] || fail 'terminal task with handover is actionable'
+[[ $(jq -c . "$task/state.json") == "$stamp" ]] || fail 'terminal state rewritten'
+rm -f "$workspace/.coordination/agents.json"
+
+# 4. Waiver is never automatic and never fabricates completion; apply still needs the approved base.
+state integration_ready
+if cli integrate "$task" --commit "$commit" --confirmed-by-user >/dev/null 2>&1; then fail 'apply without --base-sha accepted'; fi
+plan=$(cli integrate "$task" --plan --base main --commit "$commit")
+eval "cli $(jq -r '.apply | sub("^agent-workspaces ";"")' <<<"$plan")" >"$fixture/o" 2>&1 || fail "printed apply failed: $(cat "$fixture/o")"
+[[ $(git -C "$repo" rev-parse HEAD) == "$(git -C "$repo" rev-parse integration/set/t1)" ]] || fail 'integration branch not checked out'
+[[ $(jq -r '.integration.base_sha' "$task/state.json") == "$base" ]] || fail 'recorded base wrong'
+printf 'ok - collision, terminal, handover and integration features compose\n'

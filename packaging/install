@@ -23,6 +23,7 @@ fi
 [[ -d $config_root ]] && cp -a "$config_root" "$backup_root/config-root"
 managed_bins=("$bin_root/agent-workspaces")
 for source_file in "$root/compat/bin"/*; do managed_bins+=("$bin_root/$(basename "$source_file")"); done
+for source_file in "$root/compat/portable"/*; do managed_bins+=("$bin_root/$(basename "$source_file")"); done
 for target in "${managed_bins[@]}" "$config_root/config.json" "$menu_file"; do
   [[ -e $target || -L $target ]] || continue
   cp -a "$target" "$backup_root/$(basename "$target")"

@@ -35,11 +35,14 @@ Before requesting integration approval or another verification cycle for work as
 Do not treat a vague acknowledgement or earlier approval as authorization for a later gate. After the user explicitly confirms the named action, execute its bounded command:
 
 - Integration handoff: `agent-workspaces advance TASK_DIR approve-integration --confirmed-by-user`
-- Apply the user-approved commit plan: `agent-workspaces integrate TASK_DIR --commit SHA [--commit SHA...] --confirmed-by-user`
+- Preflight the integration base (read-only, no approval needed): `agent-workspaces integrate TASK_DIR --plan [--fetch] --commit SHA [--commit SHA...]`. Show the user the base ref and SHA, the checkout it will leave, and the commits. Run the plan's printed `apply` command exactly as printed after approval: it already carries the chosen `--base REF` (when one was given), `--base-sha`, and the commits.
+- Apply the user-approved plan from that exact base: `agent-workspaces integrate TASK_DIR [--base REF] --base-sha BASE_SHA --commit SHA [--commit SHA...] --confirmed-by-user` (keep `--base REF` whenever the plan used it). Preparing the clean checkout from the base is part of this one approval; do not ask again. If it reports the base changed, run the plan again and ask for a refreshed approval. Use `--from-current-checkout` only for a legacy task and only when the user asks for that base.
 - Record validated integration: `agent-workspaces advance TASK_DIR record-integration --evidence "EVIDENCE" --confirmed-by-user`
 - Prepare PR materials: `agent-workspaces advance TASK_DIR prepare-pr --title "TITLE" --confirmed-by-user`
 - Approve publication gate: `agent-workspaces advance TASK_DIR approve-pr --confirmed-by-user`
 - Publish draft PR: `agent-workspaces publish TASK_DIR --confirmed-by-user`
+
+Integration approval never covers publication: `publish` needs its own explicit confirmation.
 
 Never invent `--confirmed-by-user`. It records that the user explicitly approved that specific transition in this conversation. Report the resulting state, audit event, and PR URL when applicable.
 
@@ -136,5 +139,9 @@ lead artifact is committed, capacity is verified, and the reviewer CLI is idle.
 The default `activate-reviewers TASK_DIR` also starts only eligible reviewers.
 Read `review_activation.deferred` or the snapshot's Waiting lines for reasons.
 Do not ask the user to disable a provider or the budget gate merely because one
-reviewer is unavailable, and do not start retry loops. Remaining deferred roles
-are still required; do not silently waive verification or broaden task scope.
+reviewer is unavailable, and do not start retry loops. Quota exhaustion waits;
+it never waives review. Remaining deferred roles stay required unless the user
+approves one specific role with `agent-workspaces waive-role TASK_DIR --role ROLE
+--reason REASON --confirmed-by-user`. That records the actor, time, and reason
+and leaves the role waived, distinct from completed. Do not mark a reviewer
+completed to skip review, invent review evidence, or broaden task scope.

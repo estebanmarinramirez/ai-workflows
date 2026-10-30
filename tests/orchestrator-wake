@@ -1,0 +1,179 @@
+#!/bin/bash
+# Wake queue regressions. No live tmux server, provider, or desktop session is used.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/lib/core.sh"
+
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+injections() { grep -c -E '^(paste-buffer|send-keys) ' "$TMUX_LOG" || true; }
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" XDG_STATE_HOME="$fixture/state" TMUX_LOG="$fixture/tmux.log"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/agent-workspaces/providers" "$XDG_STATE_HOME" "$fixture/bin"
+cp "$root/config/config.json" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+workspace="$XDG_DATA_HOME/agent-workspaces/repo-hash/set"
+task="$workspace/.coordination/t1"
+mkdir -p "$task" "$workspace/.orchestrator"
+jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex","grok"]}' >"$workspace/workspace.json"
+write_state() {
+  local status=$1 role_state=$2 gate=$3
+  jq -n --arg status "$status" --arg role_state "$role_state" --argjson gate "$gate" \
+    '{schema_version:2,id:"t1",workspace_id:"x:set",stage:"execute",status:$status,objective:"fix wakes",updated_at:"2026-10-19T01:00:00+02:00",
+      roles:{grok:{state:$role_state,updated_at:"2026-10-19T01:00:00+02:00"}},
+      gates:{integration_approved:$gate},transitions:[{from:"active",to:$status,at:"2026-10-19T01:00:00+02:00",actor:"test"}],
+      dispatch:{waiting:["grok: budget heartbeat 95"],sent:[],started_at:"2026-10-19T01:00:00+02:00"},
+      review_activation:{deferred:{codex:"quota 95%"}}}' >"$task/state.json"
+}
+write_agents() {
+  jq -n --argjson pending "$1" '{schema_version:1,active:{grok:{provider:"grok",model:"grok-4.6",effort:"high",acknowledged_at:"2026-10-19T01:00:00+02:00"}},requests:$pending}' >"$workspace/.coordination/agents.json"
+}
+write_noise() {
+  local stamp=$1 quota=$2
+  printf '# snapshot\n\nUpdated: %s\n- Account claude: available; remaining %s\n-  %s · role.status · grok\n' "$stamp" "$quota" "$stamp" >"$workspace/.orchestrator/snapshot.md"
+  printf '%s\n' "{\"at\":\"$stamp\",\"event\":\"telemetry.refresh\",\"actor\":\"monitor\"}" >"$workspace/.coordination/audit.jsonl"
+  mkdir -p "$XDG_STATE_HOME/omarchy/agents/usage"
+  jq -n --arg at "$stamp" --argjson percent "$3" '{schemaVersion:1,id:"claude",ready:true,updatedAt:$at,limits:[{percent:$percent,resetsAt:"2026-10-23T14:44:59Z"}]}' >"$XDG_STATE_HOME/omarchy/agents/usage/claude.json"
+}
+
+write_state active in_progress false
+write_agents '{}'
+write_noise '2026-10-19T01:00:00+02:00' '95–100%' 0.96
+signature_one=$(aw_actionable_signature "$workspace")
+# Timestamps, audit lines, snapshot prose, and quota telemetry are not a new gate.
+jq '.updated_at="2026-10-19T01:00:15+02:00" | .roles.grok.updated_at="2026-10-19T01:00:15+02:00" | .transitions[0].at="2026-10-19T01:00:15+02:00" | .dispatch.started_at="2026-10-19T01:00:15+02:00" | .dispatch.waiting=["grok: budget heartbeat 90"] | .review_activation.deferred.codex="quota 90%"' "$task/state.json" >"$task/state.tmp"
+mv "$task/state.tmp" "$task/state.json"
+jq '.active.grok.acknowledged_at="2026-10-19T01:00:15+02:00"' "$workspace/.coordination/agents.json" >"$workspace/.coordination/agents.tmp"
+mv "$workspace/.coordination/agents.tmp" "$workspace/.coordination/agents.json"
+write_noise '2026-10-19T01:00:15+02:00' '90–95%' 0.91
+signature_two=$(aw_actionable_signature "$workspace")
+[[ $signature_one == "$signature_two" ]] || { printf 'not ok - telemetry refresh changed wake signature\n%s\n%s\n' "$signature_one" "$signature_two"; exit 1; }
+
+write_state awaiting_integration completed false
+signature_gate=$(aw_actionable_signature "$workspace")
+[[ $signature_gate != "$signature_one" ]] || { printf 'not ok - task gate did not change wake signature\n'; exit 1; }
+write_state active in_progress true
+signature_flag=$(aw_actionable_signature "$workspace")
+[[ $signature_flag != "$signature_one" ]] || { printf 'not ok - boolean gate did not change wake signature\n'; exit 1; }
+write_state active in_progress false
+write_agents '{"change":{"id":"change","slot":"grok","role":"lead","phase":"ready","when":"checkpoint","requested_at":"2026-10-19T01:02:00+02:00","target":{"provider":"claude","model":"opus","effort":"high"}}}'
+signature_handover=$(aw_actionable_signature "$workspace")
+[[ $signature_handover != "$signature_one" ]] || { printf 'not ok - handover did not change wake signature\n'; exit 1; }
+
+write_state active in_progress false
+write_agents '{}'
+rm -f "$workspace/.orchestrator/.state-signature" "$workspace/.orchestrator/.pending-wake"
+printf '%s\n' 'handover-change' >"$workspace/.orchestrator/.pending-wake"
+if aw_queue_orchestrator_wake "$workspace"; then
+  printf 'not ok - first observation queued a wake\n'; exit 1
+fi
+[[ $(cat "$workspace/.orchestrator/.pending-wake") == handover-change ]] || { printf 'not ok - startup cleared a pending handover wake\n'; exit 1; }
+if aw_queue_orchestrator_wake "$workspace"; then
+  printf 'not ok - unchanged state queued another wake\n'; exit 1
+fi
+write_state blocked blocked false
+aw_queue_orchestrator_wake "$workspace"
+pending=$(cat "$workspace/.orchestrator/.pending-wake")
+[[ $(printf '%s\n' "$pending" | wc -l) == 1 ]] || { printf 'not ok - pending wake was not a single event\n'; exit 1; }
+[[ $pending == "$(aw_actionable_signature "$workspace")" ]] || { printf 'not ok - pending wake is not the semantic signature\n'; exit 1; }
+if aw_queue_orchestrator_wake "$workspace"; then
+  printf 'not ok - repeated observation duplicated a pending wake\n'; exit 1
+fi
+[[ $(cat "$workspace/.orchestrator/.pending-wake") == "$pending" ]] || { printf 'not ok - pending wake changed without a new state\n'; exit 1; }
+write_state awaiting_integration completed false
+aw_queue_orchestrator_wake "$workspace"
+replaced=$(cat "$workspace/.orchestrator/.pending-wake")
+[[ $(printf '%s\n' "$replaced" | wc -l) == 1 && $replaced != "$pending" ]] || { printf 'not ok - newer state did not replace the one pending wake\n'; exit 1; }
+
+cat >"$fixture/bin/tmux" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$TMUX_LOG"
+case "$1" in
+  list-sessions)
+    [[ ${TMUX_HAVE_SESSION:-yes} == yes ]] && printf '%s\n' "orch|orchestrator|${TMUX_WORKSPACE:-x:set}|${TMUX_PROVIDER:-claude}"
+    ;;
+  list-panes) printf '%s\n' '%1' ;;
+  capture-pane) cat "${TMUX_CAPTURE:?}" ;;
+esac
+exit 0
+EOF
+chmod +x "$fixture/bin/tmux"
+export PATH="$fixture/bin:$PATH" TMUX_CAPTURE="$fixture/pane.txt" TMUX_PROVIDER=claude
+printf '%s\n' '❯' >"$TMUX_CAPTURE"
+: >"$TMUX_LOG"
+rm -f "$workspace/.orchestrator/.wake-signature" "$workspace/.orchestrator/.pending-wake" "$workspace/.orchestrator/.pending-wake.delivered"
+signature=$(aw_actionable_signature "$workspace")
+printf '%s\n' "$signature" >"$workspace/.orchestrator/.pending-wake"
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+[[ $(grep -c '^paste-buffer ' "$TMUX_LOG") == 1 ]] || { printf 'not ok - eligible wake was not delivered once\n'; exit 1; }
+[[ $(grep -c '^send-keys ' "$TMUX_LOG") == 1 ]] || { printf 'not ok - claude wake sent the wrong number of enters\n'; exit 1; }
+[[ $(cat "$workspace/.orchestrator/.wake-signature") == "$signature" ]] || { printf 'not ok - delivered signature was not recorded\n'; exit 1; }
+printf '%s\n' 'handover-change' >"$workspace/.orchestrator/.pending-wake"
+: >"$TMUX_LOG"
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set handover-change >/dev/null
+[[ ! -s $TMUX_LOG ]] || { printf 'not ok - handover token delivered a second prompt for the same state\n%s\n' "$(cat "$TMUX_LOG")"; exit 1; }
+if aw_queue_orchestrator_wake "$workspace"; then
+  printf 'not ok - delivered state queued another wake\n'; exit 1
+fi
+[[ ! -f $workspace/.orchestrator/.pending-wake ]] || { printf 'not ok - duplicate pending wake remained\n'; exit 1; }
+
+# A newer gate still delivers once, and only while the composer is idle.
+write_state awaiting_pr completed true
+signature=$(aw_actionable_signature "$workspace")
+printf '%s\n' "$signature" >"$workspace/.orchestrator/.pending-wake"
+printf '%s\n' '❯ user draft must survive' >"$TMUX_CAPTURE"
+: >"$TMUX_LOG"
+set +e
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+draft_code=$?
+set -e
+[[ $draft_code == 75 && $(injections) == 0 ]] || { printf 'not ok - typed draft was not preserved (%s)\n%s\n' "$draft_code" "$(cat "$TMUX_LOG")"; exit 1; }
+[[ -f $workspace/.orchestrator/.pending-wake ]] || { printf 'not ok - undelivered wake was discarded\n'; exit 1; }
+printf '%s\n' '❯' 'bypass permissions · esc to interrupt' >"$TMUX_CAPTURE"
+: >"$TMUX_LOG"
+set +e
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+busy_code=$?
+set -e
+[[ $busy_code == 75 && $(injections) == 0 ]] || { printf 'not ok - busy turn was woken (%s)\n%s\n' "$busy_code" "$(cat "$TMUX_LOG")"; exit 1; }
+printf '%s\n' '❯' >"$TMUX_CAPTURE"
+export TMUX_HAVE_SESSION=no
+: >"$TMUX_LOG"
+set +e
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+missing_code=$?
+set -e
+unset TMUX_HAVE_SESSION
+[[ $missing_code == 75 && $(injections) == 0 && $(grep -c '^new-session ' "$TMUX_LOG" || true) == 0 ]] || { printf 'not ok - missing orchestrator session was invented by wake (%s)\n%s\n' "$missing_code" "$(cat "$TMUX_LOG")"; exit 1; }
+jq '.budget.enabled=true' "$XDG_CONFIG_HOME/agent-workspaces/config.json" >"$XDG_CONFIG_HOME/agent-workspaces/config.tmp"
+mv "$XDG_CONFIG_HOME/agent-workspaces/config.tmp" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+: >"$TMUX_LOG"
+set +e
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null 2>&1
+budget_code=$?
+set -e
+[[ $budget_code == 75 && $(injections) == 0 ]] || { printf 'not ok - capacity guard did not hold the wake (%s)\n%s\n' "$budget_code" "$(cat "$TMUX_LOG")"; exit 1; }
+jq '.budget.enabled=false' "$XDG_CONFIG_HOME/agent-workspaces/config.json" >"$XDG_CONFIG_HOME/agent-workspaces/config.tmp"
+mv "$XDG_CONFIG_HOME/agent-workspaces/config.tmp" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+: >"$TMUX_LOG"
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+[[ $(grep -c '^paste-buffer ' "$TMUX_LOG") == 1 ]] || { printf 'not ok - eligible gate wake was not delivered once\n'; exit 1; }
+export TMUX_PROVIDER=codex
+printf '%s\n' '› Ask Codex to do anything' >"$TMUX_CAPTURE"
+write_state ready_for_pr completed true
+signature=$(aw_actionable_signature "$workspace")
+rm -f "$workspace/.orchestrator/.wake-signature"
+printf '%s\n' "$signature" >"$workspace/.orchestrator/.pending-wake"
+: >"$TMUX_LOG"
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+[[ $(grep -c '^paste-buffer ' "$TMUX_LOG") == 1 && $(grep -c '^send-keys ' "$TMUX_LOG") == 2 ]] || { printf 'not ok - codex delivery shape changed\n%s\n' "$(cat "$TMUX_LOG")"; exit 1; }
+printf '%s\n' '› user draft' >"$TMUX_CAPTURE"
+write_state blocked blocked false
+signature=$(aw_actionable_signature "$workspace")
+printf '%s\n' "$signature" >"$workspace/.orchestrator/.pending-wake"
+: >"$TMUX_LOG"
+set +e
+AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" wake x:set "$signature" >/dev/null
+codex_draft=$?
+set -e
+[[ $codex_draft == 75 && $(injections) == 0 ]] || { printf 'not ok - codex draft was overwritten (%s)\n%s\n' "$codex_draft" "$(cat "$TMUX_LOG")"; exit 1; }
+
+printf 'ok - semantic wakes are deduplicated and delivered only when eligible\n'

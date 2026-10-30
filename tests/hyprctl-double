@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Stateful Hyprland test double shared by the desktop tests.
+
+State lives in $FIXTURE: clients.json, monitor.json (a list), and optionally
+workspaces.json ({"id": "monitor name"}) and options.json. Options:
+delay      workspace moves complete after this many `clients` reads
+retile     a completed workspace move leaves the window tiled
+fault_mode, fault_from, fault_until, fault_omit
+           `clients` reads numbered [from, until) fail (exit 1), return [], or omit
+           the window fault_omit
+size_jitter  a resize lands this many pixels off (the compositor adjusted it)
+retile_after_place  the compositor retiles each placed window once, after the dispatch
+Like the compositor, a moved floating window keeps its offset within the monitor.
+"""
+import json
+import os
+import pathlib
+import re
+import sys
+
+base = pathlib.Path(os.environ['FIXTURE'])
+argv = sys.argv[1:]
+with (base / 'calls').open('a') as stream:
+    stream.write(json.dumps(argv) + '\n')
+
+
+def load(name, default):
+    path = base / name
+    return json.loads(path.read_text()) if path.exists() else default
+
+
+def save(name, value):
+    (base / name).write_text(json.dumps(value))
+
+
+monitors = load('monitor.json', [])
+clients = load('clients.json', [])
+mapping = load('workspaces.json', {})
+options = load('options.json', {})
+pending = load('pending.json', [])
+late = load('late.json', [])
+placed = load('placed.json', [])
+reads = load('reads.json', 0)
+
+
+def monitor_of(workspace):
+    name = mapping.get(str(workspace))
+    focused = next((m for m in monitors if m.get('focused')), monitors[0])
+    return next((m for m in monitors if m.get('name') == name), focused)
+
+
+def complete(move):
+    window = next(c for c in clients if c['address'] == move['address'])
+    old, new = monitor_of(window['workspace']['id']), monitor_of(move['workspace'])
+    window['at'] = [window['at'][0] - old['x'] + new['x'], window['at'][1] - old['y'] + new['y']]
+    window['workspace'] = {'id': move['workspace'], 'name': str(move['workspace'])}
+    mapping.setdefault(str(move['workspace']), new.get('name'))
+    window['monitor'] = new.get('id', 0)
+    if options.get('retile'):
+        window['floating'] = False
+
+
+def window_of(text):
+    address = re.search(r"address:(\S+?)'", text).group(1)
+    return next(c for c in clients if c['address'] == address)
+
+
+if argv[0] == 'clients':
+    for address in late:
+        next(c for c in clients if c['address'] == address)['floating'] = False
+    late[:] = []
+    for move in pending:
+        move['left'] -= 1
+    for move in [m for m in pending if m['left'] <= 0]:
+        complete(move)
+    pending[:] = [m for m in pending if m['left'] > 0]
+    index, reads = reads, reads + 1
+    save('reads.json', reads)
+    mode = options.get('fault_mode')
+    if mode and options.get('fault_from', 0) <= index < options.get('fault_until', 1 << 30):
+        if mode == 'fail':
+            save('clients.json', clients)
+            save('pending.json', pending)
+            raise SystemExit(1)
+        print(json.dumps([] if mode == 'empty' else [c for c in clients if c['address'] != options['fault_omit']]))
+    else:
+        print(json.dumps(clients))
+elif argv[0] == 'monitors':
+    print(json.dumps(monitors))
+elif argv[0] == 'workspaces':
+    ids = sorted({c['workspace']['id'] for c in clients} | {int(k) for k in mapping})
+    print(json.dumps([{'id': i, 'monitor': monitor_of(i).get('name'), 'monitorID': monitor_of(i).get('id', 0),
+                       'windows': sum(c['workspace']['id'] == i for c in clients)} for i in ids]))
+elif argv[0] == 'getoption':
+    print(' {"css":"2"}')
+elif argv[0] == 'dispatch':
+    text = argv[1]
+    if 'window.move' in text and 'workspace =' in text:
+        move = {'address': window_of(text)['address'], 'workspace': int(re.search(r"workspace = '(\d+)'", text).group(1)),
+                'left': int(options.get('delay', 0))}
+        if move['left'] > 0:
+            pending.append(move)
+        else:
+            complete(move)
+    elif 'window.move' in text:
+        x, y = (int(v) for v in re.search(r'x = (-?\d+), y = (-?\d+)', text).groups())
+        window_of(text)['at'] = [x, y]
+        address = window_of(text)['address']
+        if options.get('retile_after_place') and address not in placed:
+            placed.append(address)
+            late.append(address)
+    elif 'window.resize' in text:
+        x, y = (int(v) for v in re.search(r'x = (-?\d+), y = (-?\d+)', text).groups())
+        window_of(text)['size'] = [x + options.get('size_jitter', 0), y + options.get('size_jitter', 0)]
+    elif 'window.float' in text:
+        window_of(text)['floating'] = True
+    print('ok')
+else:
+    raise SystemExit('Unexpected compositor call: ' + repr(argv))
+save('clients.json', clients)
+save('pending.json', pending)
+save('late.json', late)
+save('placed.json', placed)
+save('workspaces.json', mapping)

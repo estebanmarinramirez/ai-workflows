@@ -210,6 +210,10 @@ fi
 [[ $permission_profile =~ ^(safe|trusted|yolo)$ ]] || permission_profile=trusted
 session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"aw-$repo_hash-$repo_name-$set_slug" | cut -c1-80)
 legacy_session_name=$(sed -E 's/[^[:alnum:]_-]+/-/g' <<<"agents-$repo_name-$set_slug" | cut -c1-80)
+class_set=$(sed -E 's/[^[:alnum:]_]/_/g' <<<"$set_slug")
+# GTK application-id components must begin with a letter and may not contain
+# hyphens. Ghostty silently falls back to its default class when this is invalid.
+class_prefix="org.omarchy.agentworkspaces.r$repo_hash.s$class_set"
 
 if [[ $is_new == true ]]; then
   gum style --bold "Worktrees: $worktree_root"
@@ -294,9 +298,33 @@ fi
 # persistent tmux pane. Opening a workspace means restoring its agents too,
 # even when no terminal window needs to be spawned.
 ensure_agent_running() {
-  local role=$1 provider=${role_providers[$1]} pane_session pane relaunch state_file
+  local role=$1 provider=${role_providers[$1]:-} pane_session pane relaunch state_file stale_addresses stale_address remaining
+  if [[ $role == orchestrator ]]; then
+    provider=$(jq -r '.orchestrator_provider // "codex"' "${XDG_CONFIG_HOME:-$HOME/.config}/agent-workspaces/config.json")
+  fi
   pane_session=$(sed -E 's/[^[:alnum:]_.-]+/-/g' <<<"$session_name-$role" | cut -c1-100)
-  tmux has-session -t "$pane_session" 2>/dev/null || return 0
+  if ! tmux has-session -t "$pane_session" 2>/dev/null; then
+    # Ending a workspace removes tmux sessions, but terminal emulators can
+    # keep their windows alive after the attached client exits. Retire only
+    # this role's managed windows so the normal launch path can replace them.
+    stale_addresses=$(hyprctl clients -j | jq -r --arg class "$class_prefix.$role" \
+      '.[] | select(.class == $class or .initialClass == $class) | .address')
+    while IFS= read -r stale_address; do
+      [[ -n $stale_address ]] || continue
+      hyprctl dispatch "hl.dsp.window.close({ window = \"address:$stale_address\" })" >/dev/null || return 1
+    done <<<"$stale_addresses"
+    for _ in $(seq 1 50); do
+      remaining=$(hyprctl clients -j | jq -r --arg class "$class_prefix.$role" \
+        '.[] | select(.class == $class or .initialClass == $class) | .address' | head -1)
+      [[ -z $remaining ]] && break
+      sleep 0.1
+    done
+    if [[ -n $remaining ]]; then
+      gum style --foreground=196 "Could not replace the stale $role terminal window. Close it and reopen this workspace."
+      return 1
+    fi
+    return 0
+  fi
   pane=$(tmux list-panes -t "$pane_session" -F '#{pane_id}' | head -1)
   omarchy-agent-pane-active "$role" "$pane_session" && return 0
   if [[ -f $worktree_root/.coordination/agents.json ]] && jq -e --arg role "$role" 'any(.requests[]; .slot==$role and (.phase=="ready" or .phase=="launching" or .phase=="awaiting_ack"))' "$worktree_root/.coordination/agents.json" >/dev/null; then return 0; fi
@@ -316,21 +344,26 @@ ensure_agent_running() {
   tmux send-keys -t "$pane" Enter
 }
 
-for role in "${agent_roles[@]}"; do ensure_agent_running "$role"; done
+for role in "${roles[@]}"; do ensure_agent_running "$role" || exit 1; done
 agent-workspaces snapshot "$repo_hash:$set_slug" --write >/dev/null
 
-class_set=$(sed -E 's/[^[:alnum:]_]/_/g' <<<"$set_slug")
-# GTK application-id components must begin with a letter and may not contain
-# hyphens. Ghostty silently falls back to its default class when this is invalid.
-class_prefix="org.omarchy.agentworkspaces.r$repo_hash.s$class_set"
 declare -A addresses=()
 terminal_id=$(xdg-terminal-exec --print-id 2>/dev/null)
 
 # Give every collaboration set its own stable Hyprland workspace. Prefer an
 # already-open set's workspace, then its saved workspace, then a free slot.
 workspace_state_file="$worktree_root/.hypr-workspace"
-workspace_id=$(hyprctl clients -j | jq -r --arg prefix "$class_prefix." \
-  '[.[] | select((.class | startswith($prefix)) or (.initialClass | startswith($prefix))) | .workspace.id][0] // empty')
+# A restore can leave the set split across workspaces. Reunite it where most
+# of its windows already are; ties prefer the saved workspace, then the lowest.
+saved_workspace=0
+if [[ -f $workspace_state_file ]]; then
+  read -r saved_workspace <"$workspace_state_file"
+  [[ $saved_workspace =~ ^[0-9]+$ ]] || saved_workspace=0
+fi
+workspace_id=$(hyprctl clients -j | jq -r --arg prefix "$class_prefix." --argjson saved "$saved_workspace" \
+  '[.[] | select(((.class | startswith($prefix)) or (.initialClass | startswith($prefix))) and .workspace.id > 0) | .workspace.id]
+   | group_by(.) | map({id: .[0], count: length})
+   | sort_by([-.count, (if .id == $saved then 0 else 1 end), .id])[0].id // empty')
 
 if [[ -z $workspace_id && -f $workspace_state_file ]]; then
   read -r saved_workspace <"$workspace_state_file"
@@ -417,97 +450,21 @@ for role in "${roles[@]}"; do
   fi
 done
 
-# Dwindle does not guarantee a balanced tree when restoring existing windows,
-# so calculate four deterministic quarters from the focused monitor's logical
-# work area. The gap matches Omarchy's outer-gap rhythm.
-monitor=$(hyprctl monitors -j | jq -c '.[] | select(.focused == true)' | head -1)
-scale=$(jq -r '.scale' <<<"$monitor")
-monitor_x=$(jq -r '.x' <<<"$monitor")
-monitor_y=$(jq -r '.y' <<<"$monitor")
-monitor_width=$(jq -r '.width' <<<"$monitor")
-monitor_height=$(jq -r '.height' <<<"$monitor")
-read -r reserved_left reserved_top reserved_right reserved_bottom < <(jq -r '.reserved | @tsv' <<<"$monitor")
-
-logical_x=$((monitor_x + reserved_left))
-logical_y=$((monitor_y + reserved_top))
-transform=$(jq -r '.transform // 0' <<<"$monitor")
-if ((transform % 2 == 1)); then
-  swap=$monitor_width; monitor_width=$monitor_height; monitor_height=$swap
-fi
-logical_width=$(awk "BEGIN {print int($monitor_width / $scale) - $reserved_left - $reserved_right}")
-logical_height=$(awk "BEGIN {print int($monitor_height / $scale) - $reserved_top - $reserved_bottom}")
-
-outer_gap=$(hyprctl getoption general:gaps_out -j | jq -r '(.css // "3") | split(" ")[0]' 2>/dev/null)
-inner_gap=$(hyprctl getoption general:gaps_in -j | jq -r '(.css // "2") | split(" ")[0]' 2>/dev/null)
-[[ $outer_gap =~ ^[0-9]+$ ]] || outer_gap=3
-[[ $inner_gap =~ ^[0-9]+$ ]] || inner_gap=2
-between_gap=$((inner_gap * 2))
-
-total_windows=${#roles[@]}
-if ((total_windows <= 4)); then columns=2; else columns=3; fi
-rows=$(((total_windows + columns - 1) / columns))
-usable_width=$((logical_width - outer_gap * 2 - between_gap * (columns - 1)))
-usable_height=$((logical_height - outer_gap * 2 - between_gap * (rows - 1)))
-cell_width=$((usable_width / columns))
-cell_height=$((usable_height / rows))
-
-place_cell() {
-  local role=$1 x=$2 y=$3 width=$4 height=$5 selector
-  selector="address:${addresses[$role]}"
-  hyprctl dispatch "hl.dsp.window.resize({ x = $width, y = $height, relative = false, window = '$selector' })" >/dev/null
-  hyprctl dispatch "hl.dsp.window.move({ x = $x, y = $y, relative = false, window = '$selector' })" >/dev/null
-}
-
-# Workspace moves can asynchronously retile a window. Complete those first,
-# then confirm the entire set is floating before applying exact geometry.
-for role in "${roles[@]}"; do
-  selector="address:${addresses[$role]}"
-  hyprctl dispatch "hl.dsp.window.move({ workspace = '$workspace_id', follow = false, window = '$selector' })" >/dev/null
-done
-sleep 0.1
-
-# Dwindle may retile the final moved window after the first float dispatch.
-# Reconcile compositor state instead of assuming one retry was enough.
-layout_ready=false
-for _ in $(seq 1 20); do
-  layout_ready=true
-  clients=$(hyprctl clients -j)
-  for role in "${roles[@]}"; do
-    selector="address:${addresses[$role]}"
-    is_floating=$(jq -r --arg address "${addresses[$role]}" '.[] | select(.address == $address) | .floating' <<<"$clients")
-    if [[ $is_floating != true ]]; then
-      layout_ready=false
-      hyprctl dispatch "hl.dsp.window.float({ action = 'set', window = '$selector' })" >/dev/null
-    fi
-  done
-  [[ $layout_ready == true ]] && break
-  sleep 0.1
-done
-if [[ $layout_ready != true ]]; then
-  gum style --foreground=196 "Could not float every workspace panel; layout was left unchanged."
+# Gather the set on its workspace and fit it to that workspace's monitor.
+# The reflow is idempotent: windows already in place are not touched.
+reflow=${OMARCHY_AGENT_GRID_REFLOW:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/omarchy-agent-grid-reflow}
+ordered_addresses=()
+for role in "${roles[@]}"; do ordered_addresses+=("${addresses[$role]}"); done
+if ! "$reflow" "$workspace_id" "${ordered_addresses[@]}"; then
+  gum style --foreground=196 "Could not arrange the workspace panels. Reopen the workspace to retry."
   exit 1
 fi
+# A previous end may have stopped the monitor while persistent terminal
+# windows remained open. Starting it here also covers the existing-session
+# path where omarchy-agent-pane is not invoked again.
+agent-workspaces monitor-start "$repo_hash:$set_slug" || {
+  gum style --foreground=196 'Workspace windows opened, but the monitor could not start.'
+  exit 1
+}
 
-for index in "${!roles[@]}"; do
-  role=${roles[$index]}
-  column=$((index % columns)); row=$((index / columns))
-  x=$((logical_x + outer_gap + column * (cell_width + between_gap)))
-  y=$((logical_y + outer_gap + row * (cell_height + between_gap)))
-  width=$cell_width; height=$cell_height
-  ((column == columns - 1)) && width=$((logical_x + logical_width - outer_gap - x))
-  ((row == rows - 1)) && height=$((logical_y + logical_height - outer_gap - y))
-  place_cell "$role" "$x" "$y" "$width" "$height"
-done
-
-# Moving and resizing are asynchronous too. Confirm every panel stayed
-# floating; a later open can then safely act as an explicit reflow operation.
-sleep 0.1
-clients=$(hyprctl clients -j)
-for role in "${roles[@]}"; do
-  is_floating=$(jq -r --arg address "${addresses[$role]}" '.[] | select(.address == $address) | .floating' <<<"$clients")
-  if [[ $is_floating != true ]]; then
-    gum style --foreground=196 "Panel reconciliation failed for $role. Reopen the workspace to retry."
-    exit 1
-  fi
-done
 hyprctl dispatch "hl.dsp.focus({ window = 'address:${addresses[orchestrator]}' })" >/dev/null

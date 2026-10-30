@@ -18,27 +18,67 @@ while :; do
   append_repository_branch() {
     local availability=$1 heading=$2 heading_id=$3
     local entries=()
-    mapfile -t entries < <(jq -r --arg availability "$availability" '.repositories[] |
-      (.workspace_sets // []) as $sets |
+    local repo_count
+    repo_count=$(jq --arg availability "$availability" '[.repositories[] |
       (if .local and ((.remote // "") != "") then "local-remote"
        elif .local then "local-only"
+       else "remote-only" end) | select(. == $availability)] | length' <<<"$catalog")
+    ((repo_count)) || return 0
+    mapfile -t entries < <(jq -r --arg availability "$availability" --arg home "$HOME" '
+      .repositories[] as $repo |
+      ($repo.workspace_sets // []) as $sets |
+      (if $repo.local and (($repo.remote // "") != "") then "local-remote"
+       elif $repo.local then "local-only"
        else "remote-only" end) as $kind |
       select($kind == $availability) |
-      [
-        .id,
-        ((if .local then "󰉋" else "" end) + "  " + .name +
-          (if (.dirty // false) then "  · changed" else "" end) +
-          (if (.active_workspace_count // 0)>0 then "  · active" else "" end) +
+      ([
+        $repo.id,
+        ((if $repo.local then "󰉋" else "" end) + "  " + $repo.name +
+          (if (($repo.branch // "") != "") then "  · " + $repo.branch else "" end) +
+          (if ($repo.local // false) and (($repo.local_path // "") != "") then
+             "  · " + ($repo.local_path as $path | (if $path == $home then "~" elif ($path|startswith($home + "/")) then "~" + $path[($home|length):] else $path end)|gsub("[[:cntrl:]]"; " "))
+           else "" end) +
+          (if ($repo.dirty // false) then "  · changed" else "" end) +
+          (if ($repo.active_workspace_count // 0)>0 then "  · active" else "" end) +
           (if ($sets|length)>0 then "  · " + (($sets|length)|tostring) + " workspace(s)" else "" end) +
-          (if (.private // false) then "  · private" else "" end))
-      ] | @tsv' <<<"$catalog")
-    ((${#entries[@]})) || return 0
-    rows+=("__group_${heading_id}__"$'\t'"▾  $heading  · ${#entries[@]}")
-    local index id label branch
+          (if (($repo.worktree_count // 0)>0) then "  · " + (($repo.worktree_count)|tostring) + " worktrees" else "" end) +
+          (if ($repo.private // false) then "  · private" else "" end))
+      ] | @tsv),
+      ([$repo.worktrees[]? | select(.primary != true)] as $trees |
+       if ($trees|length)>0 then
+         (["__group_tree_" + $repo.id + "__", "Branch worktrees · " + (($trees|length)|tostring)] | @tsv),
+         ($repo.worktrees // [] | to_entries[] | select(.value.primary != true) |
+          [
+            ("wt:" + $repo.id + ":" + (.key|tostring)),
+            ((if .value.prunable then "⚠ " else "" end) + (.value.branch // "(detached)") +
+             (if ((.value.subject // "") != "") then " · " + (.value.subject|gsub("[[:cntrl:]]"; " ")) else "" end) +
+             (if ((.value.workspace // "") != "") then " · " + .value.workspace else "" end) +
+             " · " +
+             (.value.path as $path | (if $path == $home then "~" elif ($path|startswith($home + "/")) then "~" + $path[($home|length):] else $path end)|gsub("[[:cntrl:]]"; " ")) +
+             (if (.value.registered // true) then "" else " · unregistered" end) +
+             (if .value.prunable then " · prunable" else "" end))
+          ] | @tsv)
+       else empty end)
+    ' <<<"$catalog")
+    rows+=("__group_${heading_id}__"$'\t'"▾  $heading  · $repo_count")
+    local index id label branch repo_index=0 repo_connector repo_spine tree_index=0 tree_count=0 tree_connector
     for index in "${!entries[@]}"; do
       IFS=$'\t' read -r id label <<<"${entries[$index]}"
-      branch='├─'; ((index == ${#entries[@]} - 1)) && branch='└─'
-      rows+=("$id"$'\t'"   $branch $label")
+      if [[ $id == __group_tree_* ]]; then
+        tree_count=${label##* · }
+        tree_index=0
+        rows+=("$id"$'\t'"   $repo_spine  └─ $label")
+      elif [[ $id == wt:* ]]; then
+        ((tree_index+=1))
+        tree_connector='├─'
+        if ((tree_index == tree_count)); then tree_connector='└─'; fi
+        rows+=("$id"$'\t'"   $repo_spine     $tree_connector $label")
+      else
+        ((repo_index+=1))
+        repo_connector='├─'; repo_spine='│'
+        if ((repo_index == repo_count)); then repo_connector='└─'; repo_spine=' '; fi
+        rows+=("$id"$'\t'"   $repo_connector $label")
+      fi
     done
   }
 
@@ -50,12 +90,40 @@ while :; do
     --delimiter=$'\t' --with-nth=2 --nth=2 --accept-nth=1 \
     --layout=reverse --no-border --info=inline-right --highlight-line \
     --pointer='›' --prompt='Workspaces  ' --separator='─' --scrollbar='│' \
-    --header='Repository availability · one identity, local and/or remote · Esc closes' \
+    --header='Repositories · branches grouped under each repo · type to filter · Esc closes' \
     --preview='workspaces-manager-preview {1}' --preview-window='down,55%,border-top,wrap' \
     --color="bg:${BACKGROUND:-#101315},bg+:${GUM_FILTER_SELECTED_BACKGROUND:-#343d41},fg:${FOREGROUND:-#cacccc},fg+:${GUM_FILTER_SELECTED_FOREGROUND:-#a5aeb4},hl:${GUM_FILTER_MATCH_FOREGROUND:-#798186},hl+:${GUM_FILTER_MATCH_FOREGROUND:-#798186},prompt:${GUM_FILTER_PROMPT_FOREGROUND:-#798186},pointer:${GUM_FILTER_INDICATOR_FOREGROUND:-#798186},header:${GUM_FILTER_PLACEHOLDER_FOREGROUND:-#4b4e55}") || exit 0
 
   case "$selected" in
     __group_*) continue ;;
+    wt:*)
+      token=${selected#wt:}
+      tree_index=${token##*:}
+      repository_id=${token%:*}
+      [[ $tree_index =~ ^[0-9]+$ ]] || continue
+      record=$(jq -c --arg id "$repository_id" '.repositories[] | select(.id==$id)' <<<"$catalog")
+      [[ -n $record ]] || continue
+      tree=$(jq -c --argjson index "$tree_index" '.worktrees[$index]' <<<"$record")
+      [[ $tree != null ]] || continue
+      name=$(jq -r '.name' <<<"$record")
+      repository_path=$(jq -r '.local_path' <<<"$record")
+      worktree_path=$(jq -r '.path' <<<"$tree")
+      branch=$(jq -r '.branch // "(detached)"' <<<"$tree")
+      actions=('Open workspace from repository')
+      [[ $(jq -r '.exists // false' <<<"$tree") == true ]] && actions=('Open branch folder in terminal' 'Open workspace from repository')
+      actions+=('Back')
+      action=$(printf '%s\n' "${actions[@]}" | gum choose --header="$name · $branch") || continue
+      case "$action" in
+        'Open branch folder in terminal')
+          if [[ -d $worktree_path ]]; then exec xdg-terminal-exec --dir="$worktree_path"; fi
+          gum style --foreground=196 'This worktree folder is no longer available.'
+          sleep 1
+          continue
+          ;;
+        'Open workspace from repository') exec env OMARCHY_AGENT_REPOSITORY="$repository_path" omarchy-agent-grid ;;
+        *) continue ;;
+      esac
+      ;;
     __refresh__)
       if agent-workspaces catalog refresh --github >/dev/null; then
         notify-send 'Workspaces' 'Local and GitHub repository catalog refreshed.'

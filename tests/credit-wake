@@ -1,0 +1,100 @@
+#!/bin/bash
+# Real monitor-loop regressions for paid-credit accounting: balance-only churn never wakes the model,
+# while a credit-driven eligibility change (a reviewer becoming admissible) delivers exactly one wake.
+# No live tmux server, provider, account or desktop session is used.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" XDG_STATE_HOME="$fixture/state" \
+  TMUX_LOG="$fixture/tmux.log" AW_TASK=""
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/agent-workspaces/providers" "$XDG_STATE_HOME/omarchy/agents/usage" "$fixture/bin" \
+  "$XDG_DATA_HOME/agent-workspaces/repo-hash/set/.orchestrator"
+cp "$root/config/config.json" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+cp -a "$root/config/providers/." "$XDG_CONFIG_HOME/agent-workspaces/providers/"
+jq '.event_reviewer.enabled=false | .budget.enabled=true' "$XDG_CONFIG_HOME/agent-workspaces/config.json" >"$fixture/config.tmp"
+mv "$fixture/config.tmp" "$XDG_CONFIG_HOME/agent-workspaces/config.json"
+export PATH="$fixture/bin:$PATH"
+source "$root/lib/core.sh"
+workspace="$XDG_DATA_HOME/agent-workspaces/repo-hash/set"
+task="$workspace/.coordination/t1"
+orch="$workspace/.orchestrator"
+usage="$XDG_STATE_HOME/omarchy/agents/usage"
+credits="$XDG_STATE_HOME/omarchy/agents/agent-workspaces-credits"
+jq -n '{schema_version:2,workspace_id:"x:set",repository:"/tmp",set:"set",profile:"trusted",providers:["claude","codex"]}' >"$workspace/workspace.json"
+
+cat >"$fixture/bin/tmux" <<'EOT'
+#!/bin/bash
+printf '%s\n' "$*" >>"$TMUX_LOG"
+case "$1" in
+  list-sessions)
+    case "$*" in
+      *'|'*) printf '%s\n' 'orch|orchestrator|x:set|claude' ;;
+      *session_name*role*) printf 's-codex\tcodex\tx:set\n' ;;
+    esac ;;
+  list-panes) printf '%s\n' '%1' ;;
+  show-option) printf '%s\n' codex ;;
+  capture-pane)
+    case "$*" in
+      *s-codex*) printf '› Ask Codex to do anything\n❯\n' ;;
+      *) printf '%s\n' '❯' ;;
+    esac ;;
+esac
+exit 0
+EOT
+printf '#!/bin/bash\nexit 0\n' >"$fixture/bin/agent-workspaces-pane-active"
+printf '#!/bin/bash\nexit 0\n' >"$fixture/bin/notify-send"
+cat >"$fixture/bin/tick-hook" <<'EOT'
+#!/bin/bash
+set -euo pipefail
+now=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+reset=$(date -u -d '+3 hours' +%Y-%m-%dT%H:%M:%S+00:00)
+for provider in claude codex; do
+  jq -n --arg id "$provider" --arg at "$now" --arg reset "$reset" '{schemaVersion:1,id:$id,ready:true,updatedAt:$at,limits:[{percent:(if $id=="codex" then 1.0 else 0.2 end),resetsAt:$reset}]}' >"$XDG_STATE_HOME/omarchy/agents/usage/$provider.json"
+done
+mkdir -p "$XDG_STATE_HOME/omarchy/agents/agent-workspaces-credits"
+allowed=true
+[[ -f $AW_CREDIT_MODE ]] && allowed=$(cat "$AW_CREDIT_MODE")
+# The balance moves on every poll; only the permission flag changes eligibility.
+jq -n --arg at "$now" --argjson allowed "$allowed" --arg balance "$((1000 - AW_MONITOR_TICK * 7)).2500" \
+  '{provider:"codex",source:"fixture",unit:"credits",observedAt:$at,hasCredits:true,unlimited:false,balance:$balance,ordinaryUsageAllowed:$allowed,spendControlReached:false}' \
+  >"$XDG_STATE_HOME/omarchy/agents/agent-workspaces-credits/codex.json"
+if [[ -f ${AW_TICK_SCENARIO:-} ]]; then source "$AW_TICK_SCENARIO"; fi
+EOT
+chmod +x "$fixture/bin/"*
+export AW_CREDIT_MODE="$fixture/credit-mode" AW_TICK_SCENARIO="$fixture/scenario.sh" AW_MONITOR_TICK_HOOK="$fixture/bin/tick-hook"
+
+fail() { printf 'not ok - %s\n%s\n' "$*" "$(cat "$TMUX_LOG" 2>/dev/null)"; exit 1; }
+wakes() { grep -c '^paste-buffer .* -d$' "$TMUX_LOG" || true; }
+run_ticks() { AW_LIB="$root/lib/core.sh" "$root/bin/agent-workspaces" monitor-loop x:set "$1"; }
+role_state() { jq -r .roles.codex.state "$task/state.json"; }
+
+mkdir -p "$task"
+jq -n --arg task "$task" '{schema_version:2,id:"t1",workspace_id:"x:set",repository:"/tmp",set:"set",stage:"execute",status:"awaiting_review",lead:"claude",
+  template_id:"docs",objective:"review",updated_at:"2026-10-22T10:00:00+02:00",gates:{},transitions:[],
+  roles:{claude:{state:"completed",provider:"claude",worktree:"/tmp",status_json:($task+"/claude.status.json")},
+         codex:{state:"deferred",provider:"codex",worktree:"/tmp",status_json:($task+"/codex.status.json")}}}' >"$task/state.json"
+jq -n '{schema_version:1,task_id:"t1",role:"claude",state:"completed",summary:"lead",updated_at:"x",evidence:[],commits:["abc"],changed_files:[],blockers:[]}' >"$task/claude.status.json"
+jq -n '{schema_version:1,task_id:"t1",role:"codex",state:"deferred",summary:"",updated_at:"x",evidence:[],commits:[],changed_files:[],blockers:[]}' >"$task/codex.status.json"
+: >"$TMUX_LOG"
+
+# A provider denial outranks exhausted-subscription credits: the reviewer stays deferred while the balance churns.
+printf 'false\n' >"$AW_CREDIT_MODE"; printf 'exit 0\n' >"$AW_TICK_SCENARIO"
+run_ticks 2
+: >"$TMUX_LOG"
+run_ticks 6
+[[ $(wakes) == 0 ]] || fail "balance-only churn woke the model $(wakes) times"
+[[ $(role_state) == deferred ]] || fail 'denied account activated a reviewer'
+
+# The provider confirms ordinary use: the reviewer becomes admissible on paid credits, once.
+printf 'true\n' >"$AW_CREDIT_MODE"
+: >"$TMUX_LOG"
+run_ticks 3
+[[ $(role_state) == dispatched ]] || fail "confirmed credits did not activate the reviewer (state $(role_state))"
+[[ $(wakes) == 1 ]] || fail "credit-driven eligibility change delivered $(wakes) wakes, want 1"
+
+# Afterwards balance changes are again invisible.
+: >"$TMUX_LOG"
+run_ticks 6
+[[ $(wakes) == 0 ]] || fail "post-transition balance churn woke the model $(wakes) times"
+printf 'ok - balance churn is silent and a credit-driven eligibility change wakes once\n'

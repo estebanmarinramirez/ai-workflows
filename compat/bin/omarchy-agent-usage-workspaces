@@ -17,7 +17,7 @@ if not (local_lib / 'capacity.py').exists():
     local_lib = Path(cli).resolve().parents[1] / 'lib' if cli else local_lib
 if os.environ.get('AW_LIB'): local_lib = Path(os.environ['AW_LIB']).parent
 sys.path.insert(0, str(local_lib))
-from capacity import capacities, pool_id, provider_for_slot, read_object
+from capacity import capacities, ordinary_allowance, pool_id, provider_for_slot, read_object
 
 TERMINAL = {"completed", "draft_pr", "ready_for_pr", "cancelled", "archived", "superseded"}
 REVIEW = {"awaiting_review", "awaiting_triage", "awaiting_integration", "awaiting_pr", "awaiting_pr_review"}
@@ -99,6 +99,10 @@ known_pools = [pools[p] for p in participating_pools if p in pools and pools[p][
 provider_usage = [pool['used'] for pool in known_pools]
 provider_resets = [pool['resets_at'] for pool in known_pools if pool['resets_at']]
 unknown_pools = len(participating_pools) - len(known_pools)
+# Subscription exhausted but provider-confirmed paid allowance continues ordinary work.
+# Money is never converted into a percentage; only the eligibility is shown.
+on_credits = sum(1 for pool in known_pools if pool['state'] == 'exhausted' and ordinary_allowance(pool, 0)[1] in ('credits', 'unlimited'))
+exhausted = sum(1 for pool in known_pools if pool['state'] == 'exhausted') - on_credits
 
 status_parts = [f"{running} running"]
 if review:
@@ -122,7 +126,10 @@ record = {
     "name": "Workspaces",
     "ready": True,
     "tierLabel": " · ".join(status_parts),
-    "usageStatusText": "Attention required" if blocked else (f"{unknown_pools} account quota(s) unknown" if unknown_pools else ""),
+    "usageStatusText": "Attention required" if blocked else "; ".join(filter(None, [
+        f"{unknown_pools} account quota(s) unknown" if unknown_pools else "",
+        f"{on_credits} subscription(s) exhausted, paid credits available" if on_credits else "",
+        f"{exhausted} account quota(s) exhausted" if exhausted else ""])),
     "authHelpText": f"{blocked} blocked" if blocked else "",
     "limits": limits,
     "todayPrompts": completed_today,
