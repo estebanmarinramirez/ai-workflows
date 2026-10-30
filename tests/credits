@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
+import assignments
 import budget as b
 import routing
 import capacity
@@ -235,6 +236,43 @@ class Credits(unittest.TestCase):
         row = decision()
         self.assertEqual({c['target']['provider']: c['allowance'] for c in row['candidates']}, {'codex': 'credits', 'claude': 'subscription'})
         self.assertEqual(max(row['candidates'], key=lambda c: c['score'])['target']['provider'], 'claude')
+
+    def test_no_collector_credit_fallback_survives_routed_handover_recheck(self):
+        self.config['budget']['credit_backed_managed_providers'] = ['codex']
+        self.save()
+        self.native('codex', .2, limits=[])
+        pool = self.pool()
+        self.assertTrue(b.allows_credit_backed_managed(self.config, 'codex', pool=pool))
+        self.assertFalse(capacity.ordinary_allowance(pool, .15)[0])
+
+        store = object.__new__(assignments.Assignments)
+        store.root = self.root
+        store.workspace = 'w:set'
+        store.file = self.root / '.coordination/agents.json'
+        store.cli = str(ROOT / 'bin/agent-workspaces')
+        store.config_root = self.base / 'config/agent-workspaces'
+        worktree = self.base / 'worktree'; worktree.mkdir()
+        record = dict(id='change', role='lead', slot='codex', session='s-codex', outgoing_provider='codex',
+                      target={'provider': 'codex', 'model': 'gpt-6-luna', 'effort': 'medium'},
+                      task=str(self.task), phase='ready', source='routing',
+                      checkpoint={'directory': str(worktree), 'commit': 'head', 'note': 'A sufficiently detailed checkpoint note for this verifier fixture.'},
+                      routing={'task': str(self.task), 'difficulty': 'simple', 'task_revision': 0,
+                               'effort_mode': 'fixed', 'intent_revision': 0, 'review_reserve': False})
+        state = {'active': {}, 'requests': {'change': record}}
+
+        def fake_run(args):
+            if args[:4] == ['git', '-C', str(worktree), 'rev-parse']:
+                return 'head'
+            if args[:2] == ['tmux', 'show-option']:
+                return 'safe'
+            return ''
+
+        with patch.object(store, 'load', return_value=state), patch.object(store, 'save'), \
+             patch.object(store, 'sessions', return_value=('s-codex', 'codex')), \
+             patch.object(store, 'stopped', return_value='%1'), patch.object(assignments, 'run', side_effect=fake_run), \
+             patch.object(assignments.shutil, 'which', return_value='/fixture/codex'), \
+             patch.object(assignments.subprocess, 'check_output', return_value='provider-command'):
+            store.apply('change')
 
     def router(self): return Router(self.root, str(ROOT / 'bin/agent-workspaces'), self.now)
 
